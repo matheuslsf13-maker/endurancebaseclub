@@ -19,12 +19,29 @@ npm install
 npm run dev
 ```
 
-Sem configurar o Supabase o app roda em **modo local** (dados só no navegador),
-o que já serve para testar tudo.
+O app já vem apontado para o projeto Supabase do clube
+(`endurance-base-club`, região São Paulo), então abre no modo online direto.
 
-Para usar de verdade, com vários celulares: crie um projeto no
-[Supabase](https://supabase.com), rode `supabase/schema.sql` no SQL Editor e
-preencha `.env` a partir de `.env.example`.
+Para rodar sem banco nenhum — só neste navegador, útil para testar — esvazie as
+duas constantes de `src/config.ts`.
+
+### Falta um passo para poder organizar
+
+Ler o site é público; **escrever cadastro exige login**. Enquanto não existir um
+usuário, o app abre em modo "Acompanhando" e não deixa criar evento.
+
+Crie o seu login no painel do Supabase:
+**Authentication → Users → Add user** (e-mail e senha, marcando *Auto Confirm
+User*). Depois é só entrar no app com ele.
+
+Quem vai ajudar a cronometrar **não** precisa de login: recebe o link do evento,
+digita o próprio nome e pronto.
+
+### Se precisar recriar o banco do zero
+
+Rode `supabase/schema.sql` inteiro no SQL Editor do Supabase e preencha
+`src/config.ts` (ou `.env`, a partir de `.env.example`) com a URL e a chave
+*publishable* do projeto.
 
 ## Documentação
 

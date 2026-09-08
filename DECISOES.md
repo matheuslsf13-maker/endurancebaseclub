@@ -97,6 +97,36 @@ o código do evento antes de inserir — e insere **só em `marcacoes`, só naqu
 evento**. Por isso o código **não pode** viver em `eventos`, que tem leitura
 pública: ele mora em `eventos_codigo`, tabela que `anon` não enxerga.
 
+## O banco fica em São Paulo, e o projeto é separado do Play de Todas
+
+Projeto Supabase próprio (`endurance-base-club`), não o do Play de Todas: são
+campeonatos diferentes, e misturar as tabelas bagunçaria os dois.
+
+A região é **sa-east-1 (São Paulo)**, não a us-east-1 do projeto irmão. Aqui a
+distância até o servidor tem efeito direto na precisão: a incerteza da sincronia
+de relógio é metade da ida-e-volta, então quanto mais perto o banco, mais
+confiável o horário gravado por cada celular.
+
+Medido no primeiro teste, através de dois proxies (o pior caso possível):
+ida-e-volta 442 ms, incerteza ±221 ms — já dentro do limite de 1 s que o app
+exige. De um celular na rede de verdade fica bem abaixo disso.
+
+## Dois avisos do verificador de segurança ficam de propósito
+
+O linter do Supabase reclama que `registrar_marcacoes` é `security definer` e
+pode ser chamada sem login. É exatamente o desenho: é assim que o cronometrista
+convidado grava tempo sem ter conta.
+
+O que torna isso seguro está dentro da função — ela só insere em `marcacoes`, só
+do evento cujo código confere, e o `evento_id` gravado é sempre o do código,
+nunca o que veio no pedido. Foi testado antes de entrar: visitante não lê
+`eventos_codigo`, não insere direto em `marcacoes`, código errado é recusado,
+código certo grava, e reenvio da mesma marcação não duplica o tempo.
+
+O terceiro aviso, esse sim, foi corrigido: `agora()` estava sem `search_path`
+fixo. Numa função que serve de relógio para a prova inteira, é o pior lugar
+possível para uma surpresa.
+
 ## Tema claro por padrão
 
 O app é usado na beira da pista, no sol. Tela escura no sol vira espelho e o

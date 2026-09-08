@@ -137,7 +137,11 @@ create or replace function public.agora()
 returns timestamptz
 language sql
 stable
-as $$ select now() $$;
+-- `search_path` fixo: sem isso, quem chama poderia apontar `now()` para outra
+-- coisa. Numa funcao que serve de relogio para a prova inteira, esse seria o
+-- pior lugar possivel para uma surpresa.
+set search_path = ''
+as $$ select pg_catalog.now() $$;
 
 grant execute on function public.agora() to anon, authenticated;
 
@@ -206,6 +210,12 @@ begin
 end $$;
 
 grant execute on function public.registrar_marcacoes(text, jsonb) to anon, authenticated;
+
+/*  O verificador de seguranca do Supabase avisa que esta funcao e
+    `security definer` e pode ser chamada sem login. E INTENCIONAL: e
+    exatamente assim que o cronometrista convidado grava tempo sem ter conta.
+    A funcao so insere em `marcacoes`, so do evento cujo codigo confere, e o
+    `evento_id` gravado e sempre o do codigo -- nunca o que veio no pedido.  */
 
 -- ------------------------------------------------------------
 --  Permissoes: todo mundo LE (atletas acompanham o resultado ao vivo),

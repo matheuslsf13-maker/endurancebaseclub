@@ -13,5 +13,5 @@
  *
  * Deixando em branco, o app roda em modo local (dados so no navegador).
  */
-export const SUPABASE_URL = ''
-export const SUPABASE_ANON_KEY = ''
+export const SUPABASE_URL = 'https://ljwcqnrjsmcgqqxsgfaf.supabase.co'
+export const SUPABASE_ANON_KEY = 'sb_publishable_c5UOTEME5f2XPGi-EMzL6w_bMwYCDiy'
