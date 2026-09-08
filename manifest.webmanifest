@@ -1,0 +1,12 @@
+{
+  "name": "Endurance Base Club — Cronometragem",
+  "short_name": "Endurance",
+  "description": "Cronometragem, resultados e histórico dos eventos do Endurance Base Club.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1a2b",
+  "theme_color": "#0b1a2b",
+  "icons": []
+}
