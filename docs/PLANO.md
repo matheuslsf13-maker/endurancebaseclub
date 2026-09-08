@@ -67,11 +67,19 @@ cor e ícone do card.
 
 ### Passo 3 — Formato das equipes
 **Solo · Dupla · Trio · Quarteto** (ou qualquer número). Pode haver mais de um
-formato no mesmo evento — ex: uma categoria solo e uma categoria dupla.
+formato no mesmo evento — ex: uma disputa solo e uma disputa em dupla.
 
-### Passo 4 — Categorias de disputa (opcional, também livre)
-Você escreve: *Masculino, Feminino, Misto, Iniciante, Master 40+*… Serve para a
-classificação sair separada por categoria além da geral.
+### Passo 4 — Como classificar
+Você escolhe aqui, no evento, como a classificação vai sair:
+
+- [ ] **Só geral** (sem separar nada)
+- [ ] **Por sexo** (masculino / feminino / misto)
+- [ ] **Por faixa etária** — e você define as faixas: `18-29`, `30-39`, `40+`…
+- [ ] **Por sexo e faixa etária** (as duas juntas)
+- [ ] **Categorias que eu escrevo** — texto livre: *Iniciante, Master, Elite*…
+
+Pode combinar mais de um critério. A classificação geral sai sempre; os
+critérios escolhidos geram as classificações separadas em cima dela.
 
 ### Passo 5 — Montar as equipes
 Escolhe os atletas do cadastro (ou cadastra na hora) e monta cada equipe, com
@@ -80,19 +88,33 @@ nome e número de peito (dorsal).
 ### Passo 6 — Quem faz o quê (o coração da flexibilidade)
 Para cada equipe, você escolhe um dos modos:
 
+São **dois modos**, que são os que o evento usa hoje:
+
 | Modo | Como fica | Exemplo |
 |---|---|---|
-| **A mesma pessoa faz tudo** | 1 atleta, todas as modalidades | Solo: Mateus corre, pedala e nada |
-| **A equipe faz tudo junta** | todos juntos, um clique só por modalidade | Dupla que corre lado a lado e chega junta |
-| **Revezamento por modalidade** | cada atleta pega uma modalidade | Arthur a corrida, Mateus o ciclismo, João a natação |
-| **Revezamento livre** | você arrasta e monta a sequência do seu jeito | Arthur corre e pedala, Mateus nada |
+| **Solo — a mesma pessoa faz tudo** | 1 atleta, todas as modalidades | Mateus corre, pedala e nada |
+| **Grupo — cada um faz uma parte** | você escolhe o atleta de cada modalidade | Dupla: Arthur a natação, Mateus a corrida. Trio: um em cada |
 
-Tudo isso sai do **mesmo modelo de dados** (a tabela `trechos`), então nenhum
-código muda entre um caso e outro — muda só a configuração que você fez.
+No modo grupo aparece um seletor por modalidade:
+
+```
+Trio "Os Bagres" (dorsal 12)
+  Corrida  3 km  →  [ Arthur ▾ ]
+  Ciclismo 4 km  →  [ Mateus ▾ ]
+  Natação  2 km  →  [ João   ▾ ]
+```
+
+Se o grupo tiver menos gente que modalidades, é só repetir a mesma pessoa em
+duas linhas — o sistema aceita.
+
+Os dois modos saem do **mesmo modelo de dados** (a tabela `trechos`), então
+nenhum código muda entre um caso e outro. E é esse mesmo modelo que, no dia em
+que você quiser o formato "todo mundo faz tudo junto", vai receber ele sem
+reescrever nada (ver seção 12).
 
 ### Exemplo completo
 > Evento "Desafio Base 2026" · largada em massa · Corrida 3 km → Ciclismo 4 km →
-> Natação 2 km · categorias Masculino e Misto · formatos Solo e Trio.
+> Natação 2 km · classificação por sexo · formatos Solo e Trio.
 > Trio "Os Bagres" (dorsal 12): Arthur → Corrida, Mateus → Ciclismo, João →
 > Natação.
 >
@@ -108,23 +130,30 @@ Para **toda** configuração, sempre os dois níveis:
 
 Então:
 - *Solo:* tempo total do Mateus + o tempo dele em cada uma das 3 modalidades.
-- *Trio revezando:* tempo total do trio + o tempo individual de cada um no
+- *Dupla ou trio:* tempo total da equipe + o tempo individual de cada um no
   trecho que fez.
-- *Equipe junta:* tempo total + tempo por modalidade, atribuído à equipe inteira.
+
+**Detalhe do modo grupo:** como cada atleta faz uma parte, quem cruza a linha
+final é uma pessoa só — não a equipe inteira. O clique de chegada é sempre no
+card da equipe, e o tempo total é o da equipe; o tempo individual sai de cada
+passagem.
 
 ## 5. Modelo de dados
 
 ```
 atletas         id, nome, apelido, sexo, nascimento, contato, foto, ativo
+                  -- sexo e nascimento alimentam a classificacao por sexo/faixa
                   -- cadastro do CLUBE, nao do evento: e o que permite o historico
 
-eventos         id, nome, data, local, tipo_largada, status, criado_em
+eventos         id, nome, data, local, tipo_largada, status, codigo, criado_em
+                  -- `codigo` e o segredo do link dos cronometristas (6.6)
 modalidades     id, evento_id, ordem, nome, distancia, unidade (km|m), cor, icone
-categorias      id, evento_id, nome                       -- Masculino, Misto, ...
+classificacao   id, evento_id, criterio (geral|sexo|faixa|livre), faixas, nomes
+                  -- escolhido no passo 4; a geral existe sempre
 baterias        id, evento_id, nome, horario_previsto, largada_em
 
-equipes         id, evento_id, dorsal, nome, tamanho (1..N), categoria_id,
-                bateria_id, modo (solo|junta|revezamento)
+equipes         id, evento_id, dorsal, nome, tamanho (1..N), categoria,
+                bateria_id, modo (solo|grupo)
 membros         id, equipe_id, atleta_id
 trechos         id, equipe_id, ordem, modalidade_id, atleta_id (null = equipe junta)
                   -- ⭐ e daqui que sai toda a flexibilidade do passo 6
@@ -170,7 +199,22 @@ Duas pessoas marcando o mesmo atleta com poucos segundos de diferença: o sistem
 **mantém o primeiro toque** e sinaliza os demais como duplicados para revisão.
 Não avança dois trechos de uma vez. Janela padrão: 15s, configurável.
 
-### 6.5 A tela do cronômetro
+### 6.5 O link dos cronometristas
+
+Você gera o link do evento e manda para quem vai ajudar. A pessoa abre, digita
+o próprio nome e já cai na tela de cronometragem — **sem criar conta, sem
+senha**. O nome dela fica gravado em cada marcação que fizer.
+
+Como isso é seguro sem login: o link carrega um **código secreto do evento**, e
+toda marcação entra por uma função do banco (`registrar_marcacao`, *security
+definer*) que só aceita a gravação se o código conferir. Ou seja, quem tem o
+link marca tempo **daquele evento e nada mais** — não apaga nada, não mexe em
+outro evento, não edita cadastro. Isso tudo continua exigindo o seu login de
+organizador.
+
+Se o link vazar, você **gera um código novo** e os antigos param de funcionar.
+
+### 6.6 A tela do cronômetro
 
 - Cronômetro da prova rodando no topo, em horário de Brasília.
 - **Um card grande por equipe**: dorsal, **quem está na prova agora**, modalidade
@@ -246,7 +290,7 @@ durante a prova. CSV continua disponível como alternativa leve.
 | 4 | Equipes | Montar solo/dupla/trio, dorsais, e o "quem faz o quê" |
 | 5 | Baterias | Só se a largada for em ondas |
 | 6 | Largada | Relógio de Brasília gigante, checagem de sincronia, botão **DAR LARGADA** |
-| 7 | **Cronômetro** | A tela principal (6.5) |
+| 7 | **Cronômetro** | A tela principal (6.6) |
 | 8 | Revisão | Conferir marcações, corrigir horário, resolver duplicados, DNF/DNS |
 | 9 | Resultados | Classificação geral/categoria/modalidade + **Exportar Excel** |
 | 10 | Perfil do atleta | Histórico completo, recordes, evolução, formações |
@@ -274,14 +318,24 @@ aumentam segurança, análise e conforto.
 equipes fictícias e 2 celulares, cronometrando do início ao fim. É o que prova
 que o problema do último evento foi resolvido.
 
-## 11. Pontos em aberto
+## 11. Decidido
 
-1. **Login dos cronometristas** — proposta: você gera um *código do evento*; o
-   cronometrista abre o link, digita o código e o próprio nome, sem criar conta.
-   Só o organizador tem login de verdade (mesmo modelo do Play de Todas: leitura
-   pública, escrita com login).
-2. **Chegada em massa** — se várias equipes chegam quase juntas, vale um modo
-   "fila de chegada" (marca o tempo primeiro, escolhe o dorsal depois)?
-3. **Supabase** — usar o mesmo projeto do Play de Todas ou criar um novo? A
-   recomendação é **um projeto novo**, para os dados dos dois não se misturarem.
-4. Identidade visual: cores e logo do Endurance Base Club.
+1. **Acesso dos cronometristas:** link com código do evento, sem conta (6.5).
+2. **Classificação:** escolhida na criação do evento — geral, sexo, faixa etária,
+   as duas, ou categorias escritas por você (passo 4).
+3. **Formatos:** só os dois que o evento usa hoje — solo e grupo com cada um
+   fazendo uma parte (passo 6).
+4. **Supabase:** projeto novo, separado do Play de Todas, para os dados não se
+   misturarem.
+
+## 12. Fora de escopo por enquanto
+
+Coisas que o modelo de dados já comporta, mas que não vamos construir agora
+porque o evento ainda não usa:
+
+- **Formato "todo mundo faz tudo junto"** (a equipe inteira em todas as
+  modalidades). Quando precisar, é uma opção a mais no passo 6.
+- **Chegada em massa** (marcar o tempo primeiro e escolher o dorsal depois).
+  Faz sentido quando várias equipes cruzam a linha juntas — o que não acontece
+  no formato atual, em que só uma pessoa de cada equipe faz o trecho final.
+- Identidade visual definitiva: cores e logo do Endurance Base Club.

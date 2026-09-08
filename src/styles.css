@@ -1,0 +1,277 @@
+/* ==================================================================
+   Endurance Base Club — estilos
+
+   TEMA CLARO POR PADRAO, de proposito: o app e usado na beira da pista,
+   no sol. Tela escura no sol vira espelho e o cronometrista erra o toque.
+   O tema escuro fica disponivel para quem prefere (prova de madrugada,
+   conferencia dos resultados depois em casa).
+
+   As cores vivem todas em variaveis: nenhum componente sabe qual tema
+   esta valendo, todos leem os mesmos nomes.
+   ================================================================== */
+
+:root {
+  --fundo:   #f4f6fa;
+  --fundo-2: #ffffff;
+  --card:    #ffffff;
+  --card-2:  #eef2f8;
+  --line:    #dde3ed;
+  --line-2:  #c2cbdb;
+  --text:    #0f1b2d;
+  --muted:   #5d6b82;
+
+  /* marca: o azul-profundo da agua e o laranja do sol */
+  --agua:    #0f6ea8;
+  --agua-2:  #0b4f79;
+  --sol:     #f2761b;
+  --verde:   #14875a;
+  --danger:  #c62b3c;
+  --ouro:    #c99700;
+
+  --agua-suave:  rgba(15, 110, 168, 0.10);
+  --sol-suave:   rgba(242, 118, 27, 0.12);
+  --verde-suave: rgba(20, 135, 90, 0.12);
+  --danger-suave:rgba(198, 43, 60, 0.10);
+
+  --sempre-claro:  #f7fbff;
+  --sempre-escuro: #0b1a2b;
+
+  --radius: 16px;
+  --shadow: 0 6px 20px rgba(15, 27, 45, 0.08);
+  color-scheme: light;
+}
+
+:root[data-tema="escuro"] {
+  --fundo:   #0b1420;
+  --fundo-2: #111e2e;
+  --card:    #16263a;
+  --card-2:  #1d3149;
+  --line:    rgba(247, 251, 255, 0.13);
+  --line-2:  rgba(247, 251, 255, 0.26);
+  --text:    #f7fbff;
+  --muted:   #9bb0c6;
+
+  --agua:    #3fa9e0;
+  --agua-2:  #6cc6f0;
+  --sol:     #ff9440;
+  --verde:   #3fd39a;
+  --danger:  #ff6b78;
+  --ouro:    #ffc940;
+
+  --agua-suave:  rgba(63, 169, 224, 0.16);
+  --sol-suave:   rgba(255, 148, 64, 0.16);
+  --verde-suave: rgba(63, 211, 154, 0.15);
+  --danger-suave:rgba(255, 107, 120, 0.15);
+
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { min-height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--fundo);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-text-size-adjust: 100%;
+  /* numeros de tempo alinhados em coluna, sem dancar a cada decimo */
+  font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3 { line-height: 1.2; margin: 0 0 8px; }
+h1 { font-size: 22px; }
+h2 { font-size: 18px; }
+h3 { font-size: 15px; }
+p  { margin: 0 0 10px; }
+
+/* ---------------- estrutura ---------------- */
+
+.app { max-width: 760px; margin: 0 auto; padding: 0 14px 96px; }
+
+.topo {
+  position: sticky; top: 0; z-index: 20;
+  margin: 0 -14px 12px;
+  padding: 10px 14px calc(10px + env(safe-area-inset-top));
+  padding-top: calc(10px + env(safe-area-inset-top));
+  background: var(--sempre-escuro);
+  color: var(--sempre-claro);
+  display: flex; align-items: center; gap: 10px;
+}
+.topo .titulo { font-weight: 800; font-size: 16px; letter-spacing: .2px; }
+.topo .sub { font-size: 12px; opacity: .75; }
+
+.abas {
+  position: sticky; top: 0; z-index: 15;
+  display: flex; gap: 6px; overflow-x: auto;
+  margin: 0 -14px 14px; padding: 8px 14px;
+  background: var(--fundo);
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+.abas::-webkit-scrollbar { display: none; }
+.abas button {
+  flex: none; border: 1px solid var(--line);
+  background: var(--card); color: var(--muted);
+  border-radius: 999px; padding: 8px 14px;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.abas button.on {
+  background: var(--agua); border-color: var(--agua);
+  color: var(--sempre-claro);
+}
+
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 14px;
+  box-shadow: var(--shadow); margin-bottom: 12px;
+}
+.card.plano { box-shadow: none; }
+
+.row { display: flex; align-items: center; gap: 10px; }
+.row.spread { justify-content: space-between; }
+.row.wrap { flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: 10px; }
+.crescer { flex: 1; min-width: 0; }
+.muted { color: var(--muted); }
+.pequeno { font-size: 13px; }
+.mini { font-size: 12px; }
+.forte { font-weight: 700; }
+.centro { text-align: center; }
+.truncar { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------------- botoes ---------------- */
+
+.btn {
+  border: 1px solid transparent; border-radius: 12px;
+  padding: 11px 16px; font-size: 15px; font-weight: 700;
+  background: var(--agua); color: var(--sempre-claro);
+  cursor: pointer; font-family: inherit;
+}
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.sol    { background: var(--sol); }
+.btn.perigo { background: var(--danger); }
+.btn.alt    { background: var(--card-2); color: var(--text); border-color: var(--line); }
+.btn.ghost  { background: transparent; color: var(--muted); border-color: var(--line); }
+.btn.sm     { padding: 7px 11px; font-size: 13px; border-radius: 10px; }
+.btn.lg     { padding: 16px 20px; font-size: 17px; border-radius: 14px; }
+.btn.bloco  { width: 100%; }
+
+/* ---------------- formularios ---------------- */
+
+label.campo { display: block; margin-bottom: 12px; }
+label.campo > span {
+  display: block; font-size: 13px; font-weight: 600;
+  color: var(--muted); margin-bottom: 5px;
+}
+input, select, textarea {
+  width: 100%; font-family: inherit; font-size: 16px; /* 16px evita o zoom do iOS */
+  color: var(--text); background: var(--fundo-2);
+  border: 1px solid var(--line-2); border-radius: 11px;
+  padding: 11px 12px;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--agua); outline-offset: 1px; border-color: var(--agua);
+}
+input[type="checkbox"], input[type="radio"] { width: auto; }
+
+.escolhas { display: flex; flex-direction: column; gap: 8px; }
+.escolha {
+  display: flex; gap: 10px; align-items: flex-start;
+  border: 1px solid var(--line-2); border-radius: 12px;
+  padding: 11px 12px; cursor: pointer; background: var(--fundo-2);
+}
+.escolha.on { border-color: var(--agua); background: var(--agua-suave); }
+.escolha input { margin-top: 2px; flex: none; }
+.escolha .desc { display: block; font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+/* ---------------- modalidades no assistente ---------------- */
+
+.modalidade {
+  display: flex; gap: 8px; align-items: flex-end;
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px; margin-bottom: 8px; background: var(--fundo-2);
+}
+.modalidade .ordem {
+  flex: none; width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center; font-weight: 800; font-size: 13px;
+  background: var(--agua-suave); color: var(--agua); margin-bottom: 10px;
+}
+.modalidade .dist { width: 84px; flex: none; }
+.modalidade .un { width: 66px; flex: none; }
+
+/* ---------------- listas ---------------- */
+
+.item {
+  display: flex; align-items: center; gap: 11px;
+  padding: 11px 0; border-bottom: 1px solid var(--line);
+}
+.item:last-child { border-bottom: 0; }
+
+.dorsal {
+  flex: none; min-width: 40px; height: 40px; padding: 0 7px;
+  border-radius: 10px; display: grid; place-items: center;
+  background: var(--sempre-escuro); color: var(--sempre-claro);
+  font-weight: 800; font-size: 16px;
+}
+
+.selo {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 700; padding: 3px 8px;
+  border-radius: 999px; background: var(--card-2); color: var(--muted);
+  white-space: nowrap;
+}
+.selo.agua   { background: var(--agua-suave);   color: var(--agua); }
+.selo.sol    { background: var(--sol-suave);    color: var(--sol); }
+.selo.verde  { background: var(--verde-suave);  color: var(--verde); }
+.selo.perigo { background: var(--danger-suave); color: var(--danger); }
+
+.vazio { text-align: center; color: var(--muted); padding: 28px 12px; }
+.vazio .big { display: block; font-size: 40px; margin-bottom: 8px; }
+
+/* ---------------- avisos ---------------- */
+
+.aviso {
+  border-radius: 12px; padding: 10px 12px; font-size: 13px;
+  border: 1px solid var(--line); background: var(--card-2); margin-bottom: 10px;
+}
+.aviso.perigo { background: var(--danger-suave); border-color: var(--danger); color: var(--danger); }
+.aviso.ok     { background: var(--verde-suave);  border-color: var(--verde);  color: var(--verde); }
+
+/* ---------------- modal e toast ---------------- */
+
+.modal-bg {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(8, 16, 28, .55);
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 0;
+}
+.modal {
+  background: var(--card); width: 100%; max-width: 560px;
+  border-radius: 18px 18px 0 0; padding: 16px;
+  max-height: 88vh; overflow: auto;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+}
+@media (min-width: 620px) {
+  .modal-bg { align-items: center; padding: 20px; }
+  .modal { border-radius: 18px; }
+}
+
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 80;
+  background: var(--sempre-escuro); color: var(--sempre-claro);
+  padding: 12px 16px; border-radius: 12px; font-size: 14px;
+  box-shadow: var(--shadow); max-width: 92vw;
+}
+
+/* ---------------- estado da sincronia ---------------- */
+
+.sinc { font-size: 11px; padding: 3px 9px; border-radius: 999px; font-weight: 700; }
+.sinc.saved   { background: rgba(255,255,255,.12); color: var(--sempre-claro); }
+.sinc.saving  { background: var(--sol); color: var(--sempre-escuro); }
+.sinc.pending { background: var(--ouro); color: var(--sempre-escuro); }
