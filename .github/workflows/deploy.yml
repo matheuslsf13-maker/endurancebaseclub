@@ -1,4 +1,15 @@
-name: Deploy (GitHub Pages)
+name: Publicar o site
+
+# Compila o app e publica o resultado na branch `gh-pages`.
+#
+# Por que uma branch em vez do deploy nativo do Pages: o Pages deste repositorio
+# esta configurado como "Deploy from a branch", e nesse modo ele serve os
+# ARQUIVOS CRUS da branch escolhida. O `index.html` do codigo-fonte aponta para
+# `/src/main.tsx`, que so existe durante o desenvolvimento -- servido cru, o app
+# nao carrega. A branch `gh-pages` carrega a pasta `dist/`, que e o app
+# compilado: HTML, CSS e JavaScript prontos.
+#
+# Em Settings -> Pages, a branch tem que ser `gh-pages` e a pasta `/ (root)`.
 
 on:
   push:
@@ -6,44 +17,52 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  build:
+  publicar:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+
       - run: npm ci
-      - name: Build
+
+      - name: Compilar
+        # Sem os secrets, estas variaveis chegam vazias e o app cai no que esta
+        # em src/config.ts -- que ja aponta para o Supabase do clube.
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: npm run build
-      - name: SPA fallback
-        run: cp dist/index.html dist/404.html
-      - uses: actions/configure-pages@v5
-        # liga o GitHub Pages automaticamente na primeira execucao
-        with:
-          enablement: true
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+
+      - name: Preparar a pasta publicada
+        run: |
+          # o app nao tem router, mas um endereco digitado errado deve abrir o
+          # app em vez da pagina de erro do GitHub
+          cp dist/index.html dist/404.html
+          # sem isto o Pages passa o Jekyll por cima e ignora arquivos e pastas
+          # que comecam com _
+          touch dist/.nojekyll
+
+      - name: Publicar na branch gh-pages
+        run: |
+          cd dist
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "site compilado de ${{ github.sha }}"
+          # -f porque esta branch e descartavel: ela e sempre reescrita inteira
+          # a partir do build mais recente, e nao guarda historico util
+          git push -f \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            HEAD:gh-pages
