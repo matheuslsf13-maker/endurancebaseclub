@@ -31,9 +31,11 @@ export function Modal({
   )
 }
 
-export function Toast({ mensagem }: { mensagem: string | null }) {
+export function Toast({ mensagem, acima }: { mensagem: string | null; acima?: boolean }) {
   if (!mensagem) return null
-  return <div className="toast">{mensagem}</div>
+  // `acima` sobe o toast quando a barra de desfazer esta na tela: os dois moram
+  // no rodape e, empilhados, o aviso tapava justamente o botao de corrigir
+  return <div className={`toast${acima ? ' acima' : ''}`}>{mensagem}</div>
 }
 
 export function useToast() {

@@ -29,9 +29,11 @@ npx tsc --noEmit # só a checagem de tipos
 ## Mapa do código
 
 ```
-src/pages/       telas: Eventos, FormEvento (o assistente), Evento, Atletas
-src/lib/         types (o modelo), tempo (pace/velocidade/formatos),
-                 relogio (sincronia entre aparelhos), store, tema
+src/pages/       Eventos, FormEvento (o assistente), Evento, Equipes,
+                 Cronometro (a tela mais importante), Conferencia, Atletas
+src/lib/         types (o modelo), prova (deriva o estado do log de marcacoes),
+                 tempo (pace/velocidade/formatos), relogio (sincronia entre
+                 aparelhos), feedback (apito e vibracao), store, tema
 src/data/        armazenamento: localRepo (navegador) e supabaseRepo, com
                  fila de escrita otimista que sobrevive a refresh (queue.ts)
 src/config.ts    URL e chave pública do Supabase (NUNCA a secret/service_role)
@@ -63,6 +65,16 @@ convidado pelo link.
 - **Todo tempo gravado passa pelo desvio do relógio** (`lib/relogio.ts`). Nunca
   use `Date.now()` cru para marcar tempo: com três celulares cronometrando, o
   relógio de cada um está em um lugar diferente.
+- **Na tela do cronômetro não se digita nada.** O único gesto é um toque no
+  card. Nem no modo grupo se escolhe nome: a configuração da equipe já diz quem
+  faz cada modalidade. Qualquer coisa que exija leitura, busca ou escolha no
+  meio da prova é bug de projeto, não recurso.
+- **Toque de outro cronometrista dentro de `JANELA_CONFIRMACAO` (45s) é voto no
+  mesmo trecho, não passagem nova** (`lib/prova.ts`). Sem isso, três pessoas
+  marcando a mesma chegada fariam a equipe pular três trechos.
+- **Quando há mais de uma marcação no trecho, o tempo é a MEDIANA**, nunca a
+  média — um toque atrasado por distração arrasta a média e não a mediana. A
+  média aparece na Conferência para você comparar, e a escolha final é humana.
 - **Horário é guardado em UTC e mostrado em America/Sao_Paulo.** Formatação só
   por `lib/tempo.ts`.
 - **O código do link do cronometrista mora em `eventos_codigo`**, tabela que

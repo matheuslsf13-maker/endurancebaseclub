@@ -10,4 +10,6 @@ export const CHAVE = {
   operador: 'ebc:operador',
   /** Codigo do evento que veio no link. */
   codigo: 'ebc:codigo',
+  /** Qual evento o link do cronometrista abre. */
+  eventoConvite: 'ebc:evento-convite',
 } as const

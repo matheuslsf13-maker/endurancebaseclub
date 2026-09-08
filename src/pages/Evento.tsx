@@ -12,10 +12,16 @@ const ROTULO_LARGADA: Record<string, string> = {
 export default function Evento({
   eventoId,
   onEditar,
+  onEquipes,
+  onCronometro,
+  onConferencia,
   onVoltar,
 }: {
   eventoId: string
   onEditar: () => void
+  onEquipes: () => void
+  onCronometro: () => void
+  onConferencia: () => void
   onVoltar: () => void
 }) {
   const { data, canEdit, salvarEvento, apagarEvento } = useStore()
@@ -43,7 +49,10 @@ export default function Evento({
   }
 
   const distanciaTotal = modalidades.reduce((s, m) => s + emKm(m), 0)
-  const linkCronometrista = `${location.origin}${location.pathname}#/cronometrar/${evento.codigo}`
+  // o id do evento vai no link porque quem recebe o convite nao tem permissao
+  // de ler a tabela dos codigos -- ele precisa saber de qual evento se trata
+  const linkCronometrista =
+    `${location.origin}${location.pathname}#/cronometrar/${evento.id}/${evento.codigo}`
 
   return (
     <div>
@@ -140,11 +149,28 @@ export default function Evento({
             ? 'Nenhuma equipe inscrita ainda.'
             : `${equipes.length} equipe(s) inscrita(s).`}
         </p>
-        <p className="mini muted" style={{ marginBottom: 0 }}>
-          A montagem das equipes e o cronômetro chegam nas próximas etapas
-          (ver <code>docs/PLANO.md</code>).
-        </p>
+        <button className="btn alt bloco" onClick={onEquipes}>
+          {equipes.length === 0 ? 'Inscrever equipes' : 'Ver e editar equipes'}
+        </button>
       </div>
+
+      <button
+        className="btn sol lg bloco"
+        style={{ marginBottom: 12 }}
+        onClick={onCronometro}
+        disabled={equipes.length === 0}
+      >
+        ⏱️ Cronometrar
+      </button>
+      {equipes.length === 0 && (
+        <p className="mini muted centro" style={{ marginTop: -6 }}>
+          Inscreva pelo menos uma equipe para poder cronometrar.
+        </p>
+      )}
+
+      <button className="btn alt bloco" style={{ marginBottom: 12 }} onClick={onConferencia}>
+        Conferência dos tempos
+      </button>
 
       {canEdit && (
         <button

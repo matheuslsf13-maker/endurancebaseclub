@@ -193,11 +193,44 @@ no log; o estado de cada equipe é **calculado** a partir dele. É impossível
 perder um tempo por sobrescrita, e toda correção fica auditável (quem, quando,
 o que era antes).
 
-### 6.4 Cliques duplicados entre cronometristas
+### 6.4 Vários cronometristas na mesma chegada: os tempos são votos
 
-Duas pessoas marcando o mesmo atleta com poucos segundos de diferença: o sistema
-**mantém o primeiro toque** e sinaliza os demais como duplicados para revisão.
-Não avança dois trechos de uma vez. Janela padrão: 15s, configurável.
+A primeira versão deste plano dizia "vence o primeiro toque, os outros são
+duplicados". **Estava errado** — jogava fora justamente a informação mais
+valiosa que ter três pessoas cronometrando produz.
+
+O modelo certo: quando mais de um cronometrista marca a mesma equipe no mesmo
+trecho, **todas as marcações são guardadas**, cada uma com o nome de quem
+marcou. Elas não competem entre si; juntas, elas dizem qual foi o tempo real.
+
+Durante a prova nada trava: a equipe avança para o próximo trecho no primeiro
+toque, e os toques seguintes dos outros cronometristas entram como marcações
+adicionais do mesmo trecho — não avançam nada de novo.
+
+**No fim, a tela de Conferência** mostra, para cada equipe e cada trecho:
+
+```
+Dupla 12 · Natação
+  Arthur (cel-1)   07:24:31
+  Mateus (cel-2)   07:24:33      diferença: 3s
+  João   (cel-3)   07:24:34
+                   ┌────────────────────────────┐
+  sugerido (mediana)  07:24:33   ← usar este
+  média               07:24:32,7
+```
+
+Você confirma o sugerido ou toca no tempo de um cronometrista específico para
+adotá-lo. O tempo escolhido entra como marcação de `ajuste` — as outras
+continuam gravadas, ninguém apaga nada.
+
+**Por que a mediana e não a média:** as duas aparecem na tela, mas o sugerido é
+a mediana. Se um cronometrista se distrai e toca 30 segundos atrasado, a média
+puxa o tempo de todos para longe; a mediana simplesmente ignora esse toque. Com
+2 marcações as duas dão no mesmo. Com 3 ou mais, a mediana é a que aguenta o
+erro humano — que é justamente o que acontece numa chegada em correria.
+
+A tela também destaca em vermelho os trechos em que os cronometristas
+discordaram muito (padrão: mais de 5s), que são os que merecem seu olho.
 
 ### 6.5 O link dos cronometristas
 
@@ -216,14 +249,28 @@ Se o link vazar, você **gera um código novo** e os antigos param de funcionar.
 
 ### 6.6 A tela do cronômetro
 
+**Regra número um: não se digita nada nesta tela.** Numa chegada de natação
+podem vir quatro duplas quase juntas — não dá para procurar, digitar nome nem
+escolher em menu. O único gesto é **um toque no card**.
+
 - Cronômetro da prova rodando no topo, em horário de Brasília.
-- **Um card grande por equipe**: dorsal, **quem está na prova agora**, modalidade
-  atual com ícone, tempo decorrido correndo ao vivo.
-- **Um toque no card marca a passagem.** Vibra, apita, o card muda de cor e
-  mostra `Corrida 24:31 ✓ → agora Ciclismo (Mateus)`.
-- **DESFAZER de 10 segundos** em toast grande — o clique errado é risco real.
-- Busca por dorsal/nome, filtros por modalidade, e ordenação por "próximo
-  esperado a chegar" (reduz procura no momento da chegada).
+- **Um card grande por equipe**, do tamanho do polegar: dorsal bem legível,
+  **quem está na prova agora**, modalidade atual, tempo decorrido correndo.
+- **Um toque no card fecha o trecho atual e abre o próximo automaticamente**,
+  na ordem que você configurou. Vibra, apita e o card muda de cor mostrando
+  `Natação 24:31 ✓ → agora Ciclismo (Mateus)`. Se era o último trecho, marca
+  **FINALIZADO** e congela o tempo total.
+- **Vale igual para solo, dupla, trio.** No grupo você **não escolhe o nome**: a
+  configuração do evento já disse quem faz cada modalidade, então o toque no
+  card do grupo fecha o trecho do Arthur e abre o do Mateus sozinho. É isso que
+  dá o tempo individual exato de cada um sem trabalho nenhum na hora da prova.
+- **DESFAZER de 10 segundos** em toast grande — o toque errado é risco real, e é
+  a única correção que precisa ser instantânea.
+- Ordenação por **"próximo esperado a chegar"**: quem está em prova há mais
+  tempo sobe para o topo, então o card que você procura tende a estar na mão.
+  Filtro por modalidade para quem está cobrindo só a saída da água.
+- Busca por dorsal existe, mas como **saída de emergência**, nunca no caminho
+  normal — o caminho normal é achar o card e tocar.
 - Rodapé: cronometristas online, itens na fila offline, estado do relógio.
 
 ## 7. Estatísticas
@@ -291,7 +338,7 @@ durante a prova. CSV continua disponível como alternativa leve.
 | 5 | Baterias | Só se a largada for em ondas |
 | 6 | Largada | Relógio de Brasília gigante, checagem de sincronia, botão **DAR LARGADA** |
 | 7 | **Cronômetro** | A tela principal (6.6) |
-| 8 | Revisão | Conferir marcações, corrigir horário, resolver duplicados, DNF/DNS |
+| 8 | Conferência | Os tempos de cada cronometrista lado a lado, o sugerido pela mediana, correção manual, DNF/DNS |
 | 9 | Resultados | Classificação geral/categoria/modalidade + **Exportar Excel** |
 | 10 | Perfil do atleta | Histórico completo, recordes, evolução, formações |
 | 11 | Estatísticas | Rankings do clube, acumulados, comparações |
@@ -305,7 +352,7 @@ durante a prova. CSV continua disponível como alternativa leve.
 | 2 | **Assistente de criação de evento**: modalidades livres com distância, categorias, formatos |
 | 3 | Atletas e equipes: cadastro, dorsais, montagem do "quem faz o quê" |
 | 4 | **Cronometragem**: sincronia de relógio, largada, tela de toque, log imutável, desfazer |
-| 5 | Multi-cronometrista: Realtime, fila offline, deduplicação, revisão e correção |
+| 5 | Multi-cronometrista: Realtime, fila offline, e a **Conferência** (tempos de todos lado a lado, mediana sugerida) |
 | 6 | Resultados e estatísticas do evento: classificações, pace, velocidade, percentis |
 | 7 | Histórico: perfil do atleta, recordes, evolução, retrospecto das formações |
 | 8 | **Exportação Excel** (multi-abas) e CSV |
@@ -326,7 +373,12 @@ que o problema do último evento foi resolvido.
 3. **Formatos:** só os dois que o evento usa hoje — solo e grupo com cada um
    fazendo uma parte (passo 6).
 4. **Supabase:** projeto novo, separado do Play de Todas, para os dados não se
-   misturarem.
+   misturarem. Criado em São Paulo (`sa-east-1`) — a distância até o servidor
+   entra direto na precisão da sincronia de relógio.
+5. **Nada de digitar na cronometragem:** um toque no card, e só. Nem no modo
+   grupo se escolhe nome — a configuração já sabe quem faz o quê (6.6).
+6. **Marcações de vários cronometristas são votos, não duplicatas:** todas são
+   guardadas com o nome de quem marcou, e a Conferência sugere a mediana (6.4).
 
 ## 12. Fora de escopo por enquanto
 

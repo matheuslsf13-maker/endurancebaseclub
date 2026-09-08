@@ -15,7 +15,7 @@ export type SyncState = 'saved' | 'saving' | 'pending'
 /** Quem esta usando o app agora. */
 export type Sessao =
   | { papel: 'organizador'; email: string }
-  | { papel: 'cronometrista'; nome: string; codigo: string }
+  | { papel: 'cronometrista'; nome: string; codigo: string; eventoId: string }
   | { papel: 'visitante' }
 
 type Ctx = {
@@ -48,8 +48,8 @@ type Ctx = {
 
   entrar: (email: string, senha: string) => Promise<void>
   sair: () => Promise<void>
-  /** Entrada do cronometrista: nome + codigo que veio no link. */
-  entrarComoCronometrista: (nome: string, codigo: string) => void
+  /** Entrada do cronometrista: nome + o evento e o codigo que vieram no link. */
+  entrarComoCronometrista: (nome: string, codigo: string, eventoId: string) => void
 
   atletaPorId: (id: string) => Atleta | undefined
   nomeDe: (id: string) => string
@@ -128,9 +128,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(cached === null)
   const [error, setError] = useState<string | null>(null)
   const [email, setEmail] = useState<string | null>(null)
-  const [cronometrista, setCronometrista] = useState<{ nome: string; codigo: string } | null>(
-    () => lerCronometrista(),
-  )
+  const [cronometrista, setCronometrista] = useState<
+    { nome: string; codigo: string; eventoId: string } | null
+  >(() => lerCronometrista())
   const [queue, setQueue] = useState<WriteOp[]>(() => (hasSupabase ? loadQueue() : []))
   const [syncing, setSyncing] = useState(false)
 
@@ -245,15 +245,23 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const porId = new Map(data.atletas.map((a) => [a.id, a]))
     const sync: SyncState = queue.length === 0 ? 'saved' : syncing ? 'saving' : 'pending'
     const local = repo.kind === 'local'
-    const sessao: Sessao = local
-      ? { papel: 'organizador', email: 'modo local' }
-      : email
-        ? { papel: 'organizador', email }
-        : cronometrista
-          ? { papel: 'cronometrista', nome: cronometrista.nome, codigo: cronometrista.codigo }
+    // ordem de precedencia: quem entrou com login e organizador; senao, quem
+    // veio pelo link e cronometrista; no modo local (sem banco) todo mundo
+    // organiza, porque nao ha ninguem para separar
+    const sessao: Sessao = email
+      ? { papel: 'organizador', email }
+      : cronometrista
+        ? {
+            papel: 'cronometrista',
+            nome: cronometrista.nome,
+            codigo: cronometrista.codigo,
+            eventoId: cronometrista.eventoId,
+          }
+        : local
+          ? { papel: 'organizador', email: 'modo local' }
           : { papel: 'visitante' }
     // o cronometrista so grava marcacao; ele nao mexe em cadastro
-    const codigo = sessao.papel === 'cronometrista' ? sessao.codigo : null
+    const codigo = sessao.papel === 'cronometrista' && !local ? sessao.codigo : null
 
     return {
       data,
@@ -294,9 +302,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         if (!supabase) return
         await supabase.auth.signOut()
       },
-      entrarComoCronometrista: (nome, cod) => {
-        guardarCronometrista(nome, cod)
-        setCronometrista({ nome, codigo: cod })
+      entrarComoCronometrista: (nome, cod, eventoId) => {
+        guardarCronometrista(nome, cod, eventoId)
+        setCronometrista({ nome, codigo: cod, eventoId })
       },
 
       atletaPorId: (id) => porId.get(id),
@@ -348,20 +356,22 @@ export function useStore(): Ctx {
 
 // ------------------------------------------------------------------
 
-function lerCronometrista(): { nome: string; codigo: string } | null {
+function lerCronometrista(): { nome: string; codigo: string; eventoId: string } | null {
   try {
     const nome = localStorage.getItem(CHAVE.operador)
     const codigo = localStorage.getItem(CHAVE.codigo)
-    return nome && codigo ? { nome, codigo } : null
+    const eventoId = localStorage.getItem(CHAVE.eventoConvite)
+    return nome && codigo && eventoId ? { nome, codigo, eventoId } : null
   } catch {
     return null
   }
 }
 
-function guardarCronometrista(nome: string, codigo: string) {
+function guardarCronometrista(nome: string, codigo: string, eventoId: string) {
   try {
     localStorage.setItem(CHAVE.operador, nome)
     localStorage.setItem(CHAVE.codigo, codigo)
+    localStorage.setItem(CHAVE.eventoConvite, eventoId)
   } catch {
     /* aba anonima: vale so nesta sessao */
   }
@@ -371,6 +381,7 @@ function esquecerCronometrista() {
   try {
     localStorage.removeItem(CHAVE.operador)
     localStorage.removeItem(CHAVE.codigo)
+    localStorage.removeItem(CHAVE.eventoConvite)
   } catch {
     /* nada a fazer */
   }

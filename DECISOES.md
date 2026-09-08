@@ -127,6 +127,62 @@ O terceiro aviso, esse sim, foi corrigido: `agora()` estava sem `search_path`
 fixo. Numa função que serve de relógio para a prova inteira, é o pior lugar
 possível para uma surpresa.
 
+## Nada de digitar no cronômetro
+
+Numa chegada de natação podem vir quatro duplas quase juntas. Não existe tempo
+para procurar numa lista, digitar nome nem escolher em menu — o gesto tem que
+ser um só: **tocar no card**.
+
+Isso decidiu o desenho de duas telas, não de uma. É porque a montagem das
+equipes já diz **quem faz cada modalidade** que o cronômetro pode ser burro: o
+toque fecha o trecho de quem estava nele e abre o do próximo sem perguntar
+nada. É daí que sai o tempo individual exato de cada um do grupo, sem trabalho
+nenhum na hora da prova.
+
+Busca por nome existe na tela, mas como saída de emergência, e só aparece com
+mais de 8 equipes. O caminho normal é achar o card e tocar.
+
+## Vários cronometristas: os toques são votos, não duplicatas
+
+A primeira versão do plano dizia "vence o primeiro toque, os outros são
+duplicados". Estava errado — jogava fora justamente o que ter três pessoas
+cronometrando produz de mais valioso.
+
+Hoje **todas as marcações são guardadas**, cada uma com o nome de quem marcou.
+Na Conferência elas aparecem lado a lado e o tempo final é escolhido.
+
+### A janela de 45 segundos
+
+Se cada toque avançasse um trecho, o terceiro cronometrista a reagir teria
+"terminado" a prova de uma equipe que acabou de sair da água. Então, por 45
+segundos depois de uma passagem, o toque conta como **outra marcação do mesmo
+trecho**.
+
+45s é folgado para o segundo e o terceiro reagirem, e curto o bastante para
+nunca alcançar o fim do trecho seguinte, que numa prova dura minutos. O card
+diz na cara o que o próximo toque vai fazer (`Corrida 24:31 ✓ — toque para
+confirmar (32s)`), para não virar adivinhação.
+
+### O card em confirmação sobe para o topo
+
+Descoberto testando: sem isso, o card que você acabou de tocar sai debaixo do
+seu dedo, porque a ordenação "quem está em prova há mais tempo primeiro" o
+empurra para baixo. Duas consequências ruins — os outros cronometristas não
+acham o card para confirmar, e o próximo toque de quem já tocou cai no card
+errado. Quem está na janela de confirmação fica acima de todos.
+
+### Mediana, não média
+
+As duas aparecem na Conferência, mas a **sugerida é a mediana**. Se alguém se
+distrai e toca 30 segundos atrasado, a média puxa o tempo de todos para longe;
+a mediana ignora esse toque. Com duas marcações as duas contas dão no mesmo — a
+diferença aparece exatamente quando há um toque torto no meio, que é o caso que
+importa proteger.
+
+E a decisão final é humana: dá para adotar o tempo de um cronometrista
+específico. O que for escolhido entra como marcação de `ajuste`; as outras
+continuam gravadas.
+
 ## Tema claro por padrão
 
 O app é usado na beira da pista, no sol. Tela escura no sol vira espelho e o
