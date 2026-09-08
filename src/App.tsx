@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Logo } from './components/ui'
 import { useStore } from './lib/store'
 import { aplicarTema, temaSalvo, type Tema } from './lib/tema'
+import Atleta from './pages/Atleta'
 import Atletas from './pages/Atletas'
 import Conferencia from './pages/Conferencia'
 import Cronometro from './pages/Cronometro'
@@ -10,6 +11,7 @@ import EntrarComoCronometrista from './pages/EntrarComoCronometrista'
 import Equipes from './pages/Equipes'
 import Evento from './pages/Evento'
 import Eventos from './pages/Eventos'
+import Resultados from './pages/Resultados'
 import FormEvento from './pages/FormEvento'
 
 /**
@@ -28,7 +30,9 @@ type Tela =
   | { t: 'equipes'; id: string }
   | { t: 'cronometro'; id: string }
   | { t: 'conferencia'; id: string }
+  | { t: 'resultados'; id: string }
   | { t: 'atletas' }
+  | { t: 'atleta'; id: string }
 
 type Convite = { eventoId: string; codigo: string }
 
@@ -55,7 +59,8 @@ export default function App() {
 
   useEffect(() => aplicarTema(tema), [tema])
 
-  const evento = 'id' in tela ? data.eventos.find((e) => e.id === tela.id) : undefined
+  const evento =
+    'id' in tela && tela.t !== 'atleta' ? data.eventos.find((e) => e.id === tela.id) : undefined
 
   // chegou pelo link e ainda nao disse o nome: e a primeira coisa a fazer
   if (convite && sessao.papel !== 'cronometrista' && sessao.papel !== 'organizador') {
@@ -105,12 +110,15 @@ export default function App() {
       {sessao.papel !== 'cronometrista' && (
         <nav className="abas">
           <button
-            className={tela.t !== 'atletas' ? 'on' : ''}
+            className={tela.t !== 'atletas' && tela.t !== 'atleta' ? 'on' : ''}
             onClick={() => setTela({ t: 'eventos' })}
           >
             Eventos
           </button>
-          <button className={tela.t === 'atletas' ? 'on' : ''} onClick={() => setTela({ t: 'atletas' })}>
+          <button
+            className={tela.t === 'atletas' || tela.t === 'atleta' ? 'on' : ''}
+            onClick={() => setTela({ t: 'atletas' })}
+          >
             Atletas
           </button>
           <span className="crescer" />
@@ -148,6 +156,7 @@ export default function App() {
           onEquipes={() => setTela({ t: 'equipes', id: tela.id })}
           onCronometro={() => setTela({ t: 'cronometro', id: tela.id })}
           onConferencia={() => setTela({ t: 'conferencia', id: tela.id })}
+          onResultados={() => setTela({ t: 'resultados', id: tela.id })}
           onVoltar={() => setTela({ t: 'eventos' })}
         />
       )}
@@ -180,7 +189,18 @@ export default function App() {
           <NaoAchou onVoltar={() => setTela({ t: 'eventos' })} />
         ))}
 
-      {tela.t === 'atletas' && <Atletas />}
+      {tela.t === 'resultados' &&
+        (evento ? (
+          <Resultados evento={evento} onVoltar={() => setTela({ t: 'evento', id: tela.id })} />
+        ) : (
+          <NaoAchou onVoltar={() => setTela({ t: 'eventos' })} />
+        ))}
+
+      {tela.t === 'atletas' && <Atletas onAbrir={(id) => setTela({ t: 'atleta', id })} />}
+
+      {tela.t === 'atleta' && (
+        <Atleta atletaId={tela.id} onVoltar={() => setTela({ t: 'atletas' })} />
+      )}
 
       {entrando && <Entrar onFechar={() => setEntrando(false)} />}
     </div>

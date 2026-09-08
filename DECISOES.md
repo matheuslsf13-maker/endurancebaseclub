@@ -183,6 +183,55 @@ E a decisão final é humana: dá para adotar o tempo de um cronometrista
 específico. O que for escolhido entra como marcação de `ajuste`; as outras
 continuam gravadas.
 
+## O Excel é escrito à mão, sem biblioteca
+
+Um `.xlsx` é um ZIP com alguns XML dentro. As bibliotecas prontas pesam algumas
+centenas de KB — caro num app que é aberto no celular na beira da pista, para
+uma função que só roda depois da prova.
+
+`src/lib/xlsx.ts` escreve o mínimo que o Excel, o LibreOffice e o Google
+Planilhas abrem: ZIP sem compressão (o método "store", que o formato aceita e
+dispensa implementar deflate) e planilhas com texto em linha, sem tabela de
+strings compartilhadas nem estilos. Dá ~200 linhas e zero dependência.
+
+O arquivo gerado foi conferido abrindo com o SheetJS — as sete abas, os
+cabeçalhos e os valores chegaram certos do outro lado.
+
+**Tempo vai como texto** (`1:24:31`), nunca como número. Duração mandada como
+número vira hora do dia na planilha de quem recebe, e é assim que uma planilha
+de prova chega errada sem ninguém perceber.
+
+## Comparar eventos: pace e percentil, nunca tempo
+
+"Melhor tempo de corrida" não quer dizer nada se num evento foram 3 km e no
+outro 8. Por isso:
+
+- o **recorde pessoal** é por modalidade **e distância** (`Corrida 3 km`);
+- a **evolução** entre eventos é medida em pace, não em tempo;
+- o **percentil** compara desempenho entre provas de tamanhos diferentes —
+  3º entre 20 vale mais que 3º entre 4.
+
+Nada disso existiria sem a distância obrigatória lá na criação do evento. É o
+mesmo campo pagando de novo.
+
+## Faixa etária de um grupo: a regra é literal
+
+Sexo de um grupo tem convenção: gente de sexos diferentes é "Misto", e ponto.
+
+Faixa etária não tem. A do mais velho? A média? A do primeiro? Escolher uma
+seria decidir premiação no lugar do organizador. Então a regra aqui é literal:
+o grupo só entra numa faixa se **todo mundo dele** estiver nela; senão fica em
+"Faixa mista" e disputa a geral.
+
+## Quem já marcou não fica preso na janela de confirmação
+
+A janela de 45s existe para o toque do SEGUNDO cronometrista virar confirmação
+em vez de passagem nova. Mas aplicá-la a quem já marcou travava a prova: o
+cronometrista ficava 45 segundos sem conseguir fechar o trecho seguinte.
+
+Hoje a janela vale só para quem ainda não votou naquele trecho. Quem já votou
+tem o próximo toque tratado normalmente — seu voto já está dado.
+
 ## Tema claro por padrão
 
 O app é usado na beira da pista, no sol. Tela escura no sol vira espelho e o

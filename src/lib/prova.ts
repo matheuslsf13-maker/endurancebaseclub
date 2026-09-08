@@ -67,7 +67,14 @@ export const DISCORDANCIA_ALTA = 5000
  */
 export const JANELA_CONFIRMACAO = 45000
 
-/** Esta equipe acabou de passar e ainda esta aceitando confirmacao? */
+/**
+ * Esta equipe acabou de passar e ainda esta aceitando confirmacao?
+ *
+ * Nao filtra por aparelho de proposito: a ordenacao dos cards precisa manter a
+ * equipe no topo enquanto QUALQUER cronometrista ainda puder confirmar. Quem
+ * decide se o toque daquele aparelho vale como confirmacao e a tela, que sabe
+ * quem ja marcou.
+ */
 export function confirmando(e: EstadoEquipe, agora: number): EstadoTrecho | null {
   const anterior =
     e.atual > 0

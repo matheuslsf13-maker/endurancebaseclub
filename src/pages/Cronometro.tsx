@@ -105,10 +105,17 @@ export default function Cronometro({ evento, onVoltar }: { evento: Evento; onVol
     if (e.status === 'aguardando' && evento.tipo_largada === 'individual') {
       return { tipo: 'largar' as const }
     }
-    // acabou de passar: este toque e outro cronometrista confirmando o mesmo
-    // momento, nao uma passagem nova
+    // Acabou de passar: o toque de QUEM AINDA NAO MARCOU aquele trecho e uma
+    // confirmacao do mesmo momento, nao uma passagem nova.
+    //
+    // Para quem ja marcou, a janela nao vale -- seu voto ja esta dado, entao o
+    // proximo toque fecha o trecho seguinte normalmente. Sem essa ressalva, o
+    // cronometrista que marcou ficava 45 segundos sem conseguir fechar o
+    // proximo trecho, o que trava a prova quando um trecho e curto.
     const anterior = confirmando(e, agora)
-    if (anterior) return { tipo: 'confirmar' as const, trecho: anterior }
+    if (anterior && !anterior.marcacoes.some((m) => m.dispositivo === dispositivo)) {
+      return { tipo: 'confirmar' as const, trecho: anterior }
+    }
     const aberto = trechoAberto(e)
     if (aberto) {
       const ultimo = e.atual === e.trechos.length - 1

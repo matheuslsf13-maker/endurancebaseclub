@@ -12,7 +12,7 @@ import { uid } from '../lib/types'
  * ver a evolucao dela. Por isso apagar atleta e evitado quando ele ja competiu:
  * some com o passado junto.
  */
-export default function Atletas() {
+export default function Atletas({ onAbrir }: { onAbrir: (id: string) => void }) {
   const { data, salvarAtleta, apagarAtleta, canEdit } = useStore()
   const [busca, setBusca] = useState('')
   const [editando, setEditando] = useState<Atleta | null>(null)
@@ -61,7 +61,10 @@ export default function Atletas() {
         ) : (
           lista.map((a) => (
             <div className="item" key={a.id}>
-              <div className="crescer truncar">
+              <button
+                className="crescer truncar linha-atleta"
+                onClick={() => onAbrir(a.id)}
+              >
                 <div className="forte truncar">{a.apelido?.trim() || a.nome}</div>
                 <div className="mini muted truncar">
                   {a.apelido?.trim() ? a.nome : ''}
@@ -70,7 +73,7 @@ export default function Atletas() {
                   {a.sexo && a.nascimento ? ' · ' : ''}
                   {a.nascimento ? `nasc. ${a.nascimento.split('-').reverse().join('/')}` : ''}
                 </div>
-              </div>
+              </button>
               <span className="selo">{participacoes.get(a.id) ?? 0} prova(s)</span>
               {canEdit && (
                 <button className="btn ghost sm" onClick={() => setEditando(a)}>editar</button>

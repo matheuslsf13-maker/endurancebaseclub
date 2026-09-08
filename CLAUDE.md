@@ -30,10 +30,14 @@ npx tsc --noEmit # só a checagem de tipos
 
 ```
 src/pages/       Eventos, FormEvento (o assistente), Evento, Equipes,
-                 Cronometro (a tela mais importante), Conferencia, Atletas
+                 Cronometro (a tela mais importante), Conferencia,
+                 Resultados, Atletas, Atleta (o perfil com o historico)
 src/lib/         types (o modelo), prova (deriva o estado do log de marcacoes),
-                 tempo (pace/velocidade/formatos), relogio (sincronia entre
-                 aparelhos), feedback (apito e vibracao), store, tema
+                 resultados (classificacao e desempenho), estatisticas
+                 (historico entre eventos), tempo (pace/velocidade/formatos),
+                 relogio (sincronia entre aparelhos), feedback (apito e
+                 vibracao), xlsx (escritor de Excel), exportar (as abas),
+                 store, tema
 src/data/        armazenamento: localRepo (navegador) e supabaseRepo, com
                  fila de escrita otimista que sobrevive a refresh (queue.ts)
 src/config.ts    URL e chave pública do Supabase (NUNCA a secret/service_role)
@@ -79,6 +83,11 @@ convidado pelo link.
   por `lib/tempo.ts`.
 - **O código do link do cronometrista mora em `eventos_codigo`**, tabela que
   `anon` não lê. Ele é um segredo; `eventos` tem leitura pública.
+- **Comparação entre eventos é sempre por PACE ou percentil, nunca por tempo.**
+  3 km e 5 km não se comparam por tempo; e 3º entre 20 vale mais que 3º entre 4.
+- **No Excel, tempo vai como TEXTO** (`1:24:31`). Duração mandada como número
+  vira hora do dia na planilha do outro lado — é assim que uma planilha de prova
+  chega errada sem ninguém perceber.
 
 ## Convenções
 

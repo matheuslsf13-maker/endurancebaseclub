@@ -15,6 +15,7 @@ export default function Evento({
   onEquipes,
   onCronometro,
   onConferencia,
+  onResultados,
   onVoltar,
 }: {
   eventoId: string
@@ -22,6 +23,7 @@ export default function Evento({
   onEquipes: () => void
   onCronometro: () => void
   onConferencia: () => void
+  onResultados: () => void
   onVoltar: () => void
 }) {
   const { data, canEdit, salvarEvento, apagarEvento } = useStore()
@@ -167,6 +169,10 @@ export default function Evento({
           Inscreva pelo menos uma equipe para poder cronometrar.
         </p>
       )}
+
+      <button className="btn alt bloco" style={{ marginBottom: 12 }} onClick={onResultados}>
+        🏆 Resultados e Excel
+      </button>
 
       <button className="btn alt bloco" style={{ marginBottom: 12 }} onClick={onConferencia}>
         Conferência dos tempos
