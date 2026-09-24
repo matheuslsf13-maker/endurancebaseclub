@@ -20,8 +20,30 @@ export interface OutboxItem {
   sent_at_version?: number;
 }
 
-interface OutboxData {
-  items: Record<string, OutboxItem>;
+// True for a non-null, non-array object — i.e. something that could plausibly
+// be a `{ [id]: OutboxItem }` map or a single OutboxItem, as opposed to a
+// primitive or an array that slipped in through hand-edited or corrupted
+// localStorage.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// `readJSON` only guards against unparsable JSON syntax (it catches
+// JSON.parse throwing). Well-formed JSON that parses to the wrong shape —
+// `'{}'`, `'null'`, `'[]'`, `'{"items":5}'`, or an `items` map whose entries
+// aren't `{mark, state, ...}` objects — parses fine and must be degraded to
+// empty here instead, so a corrupted/foreign value in the outbox's key can
+// never crash `all()`/`pendingCount()` (which assume `Record<string,
+// OutboxItem>`) or the constructor itself.
+function sanitizeItems(raw: unknown): Record<string, OutboxItem> {
+  if (!isRecord(raw)) return {};
+  const items: Record<string, OutboxItem> = {};
+  for (const [id, value] of Object.entries(raw)) {
+    if (isRecord(value) && isRecord(value.mark)) {
+      items[id] = value as unknown as OutboxItem;
+    }
+  }
+  return items;
 }
 
 export class Outbox {
@@ -34,7 +56,8 @@ export class Outbox {
     this.storage = storage;
     this.key = key;
     this.nowFn = now;
-    this.items = readJSON<OutboxData>(storage, key, { items: {} }).items;
+    const data = readJSON<unknown>(storage, key, { items: {} });
+    this.items = sanitizeItems(isRecord(data) ? data.items : undefined);
   }
 
   private persist(): void {

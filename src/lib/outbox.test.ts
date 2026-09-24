@@ -44,4 +44,13 @@ describe('Outbox', () => {
     const s = memoryStorage(); s.setItem('k', '{oops');
     expect(new Outbox(s, 'k').all()).toEqual([]);
   });
+  it('survives well-formed but wrong-shaped stored JSON', () => {
+    for (const raw of ['{}', 'null', '[]', '{"items":5}']) {
+      const s = memoryStorage(); s.setItem('k', raw);
+      const o = new Outbox(s, 'k');
+      expect(o.all()).toEqual([]);
+      o.upsert({ id: 'm1', ...base });
+      expect(o.get('m1')!.state).toBe('pending');
+    }
+  });
 });
