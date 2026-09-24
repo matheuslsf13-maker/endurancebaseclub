@@ -1,0 +1,7 @@
+node_modules
+dist
+.env.local
+tests/e2e/artifacts/*
+!tests/e2e/artifacts/.gitkeep
+*.log
+.vercel
