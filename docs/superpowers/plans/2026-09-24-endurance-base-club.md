@@ -2090,6 +2090,20 @@ describe('suggestLeg', () => {
 });
 ```
 
+- [ ] **Step 2b (Ruling 2): shared bib-assignment helper** — also export from `src/domain/suggestLeg.ts`:
+
+```ts
+export type AssignmentPlan =
+  | { entry: EntryRow; race: RaceRow; suggestion: LegSuggestion; warning: string | null }
+  | { error: string };
+export function planBibAssignment(args: {
+  entries: EntryRow[]; racesById: Map<string, RaceRow>; marks: MarkRow[];
+  markId: string | null; tsMs: number; bibText: string; athleteId?: string | null;
+}): AssignmentPlan;
+```
+
+It calls `resolveBib(entries, bibText)` (error → `{ error }`), finds the entry's race (missing → `{ error: 'Prova da inscrição não encontrada' }`), runs `suggestLeg` over `marks` **excluding `markId`**, and returns `warning` = the bib warning, or `Nº <bib> já concluiu — registrada como fim da <label> (<k+1>/<N>)` when `suggestion.warning === 'already_finished'` (bib warning wins if both). Tests in `suggestLeg.test.ts`: unknown bib → `{ error: 'Nº 999 não encontrado' }`; valid bib on a solo entry with a leg-0 mark 30 min earlier and `markId` of a different mark → `suggestion.leg_index === 1`; the mark being reassigned is ignored (passing its own id with the same timestamp does not produce `same_crossing`); DNS entry → warning `Nº … está marcado como DNS`. Tasks 22–24 use this helper instead of re-implementing the lookup.
+
 - [ ] **Step 3: Run** `npx vitest run src/domain` → FAIL. **Step 4: Implement** both modules per the algorithm above. **Step 5: Run** → PASS. **Step 6: Commit** (`feat(domain): median time consolidation, issues and leg suggestion`).
 
 ---
@@ -2427,13 +2441,15 @@ describe('helpers', () => {
 });
 ```
 
+(Ruling 3: put `sampleModel` in a non-test module `src/lib/xlsx/testModel.ts` — `export const sampleModel: WorkbookModel = …` — and import it in both tests; do not export it from `writer.test.ts`.)
+
 ```ts
 // src/lib/xlsx/reader.test.ts
 import { describe, it, expect } from 'vitest';
 import { zipSync, strToU8 } from 'fflate';
 import { readXlsxFirstSheet } from './reader';
 import { writeXlsx } from './writer';
-import { sampleModel } from './writer.test';
+import { sampleModel } from './testModel';
 
 describe('readXlsxFirstSheet', () => {
   it('roundtrips our own files', () => {
