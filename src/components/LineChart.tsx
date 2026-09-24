@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { EmptyState } from './ui';
 
@@ -15,10 +15,13 @@ export interface LineChartProps {
   height?: number;
 }
 
-// Internal coordinate system the SVG is drawn in; the element itself scales
-// to the container's actual width via `preserveAspectRatio="none"`, so these
-// are just convenient round numbers, not pixels.
-const VIEW_W = 640;
+// Fallback/initial SVG width in user units, used until a ResizeObserver
+// reports the container's real pixel width (and permanently in
+// environments without ResizeObserver, e.g. jsdom tests). The viewBox is
+// always set to the actual measured width x height with no
+// preserveAspectRatio stretching, so one user unit is one CSS pixel and
+// circles/slopes are never distorted.
+const FALLBACK_VIEW_W = 640;
 const MARGIN = { top: 16, right: 16, bottom: 28, left: 56 };
 const MAX_X_LABELS = 5;
 const MARKER_R = 5;
@@ -33,9 +36,41 @@ function evenIndices(n: number, max: number): Set<number> {
 }
 
 export function LineChart({ points, formatValue, title, height = 220 }: LineChartProps) {
+  // Mouse hover (continuous, clears on pointerleave), a sticky touch tap
+  // (survives pointerup/pointerleave; cleared by another tap, a tap
+  // outside, or blur) and keyboard focus are tracked independently so one
+  // input mode never clobbers another mid-interaction.
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [touchIndex, setTouchIndex] = useState<number | null>(null);
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
-  const activeIndex = hoverIndex ?? focusIndex;
+  const [measuredWidth, setMeasuredWidth] = useState(FALLBACK_VIEW_W);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const activeIndex = hoverIndex ?? touchIndex ?? focusIndex;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width && width > 0) setMeasuredWidth(width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // A tap outside the chart dismisses a sticky touch selection.
+  useEffect(() => {
+    if (touchIndex === null) return;
+    function onDocPointerDown(e: PointerEvent) {
+      const svg = svgRef.current;
+      if (svg && e.target instanceof Node && !svg.contains(e.target)) {
+        setTouchIndex(null);
+      }
+    }
+    document.addEventListener('pointerdown', onDocPointerDown);
+    return () => document.removeEventListener('pointerdown', onDocPointerDown);
+  }, [touchIndex]);
 
   if (points.length === 0) {
     return (
@@ -55,7 +90,7 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
   const domainMin = rawMin - pad;
   const domainMax = rawMax + pad;
 
-  const plotW = VIEW_W - MARGIN.left - MARGIN.right;
+  const plotW = measuredWidth - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
 
   const xAt = (i: number) =>
@@ -77,7 +112,7 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
 
   function nearestIndex(clientX: number, rect: DOMRect): number {
     const fraction = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
-    const vx = fraction * VIEW_W;
+    const vx = fraction * measuredWidth;
     let best = 0;
     let bestDist = Infinity;
     coords.forEach((c, i) => {
@@ -91,10 +126,15 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
   }
 
   function handlePointerMove(e: ReactPointerEvent<SVGSVGElement>) {
-    setHoverIndex(nearestIndex(e.clientX, e.currentTarget.getBoundingClientRect()));
+    const idx = nearestIndex(e.clientX, e.currentTarget.getBoundingClientRect());
+    if (e.pointerType === 'touch') setTouchIndex(idx);
+    else setHoverIndex(idx);
   }
 
-  function handlePointerLeave() {
+  function handlePointerLeave(e: ReactPointerEvent<SVGSVGElement>) {
+    // Touch is sticky: a tap stays selected through pointerup/pointerleave
+    // (there's no hover on touch) until another tap, a tap outside, or blur.
+    if (e.pointerType === 'touch') return;
     setHoverIndex(null);
   }
 
@@ -104,6 +144,7 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
 
   function handleBlur() {
     setFocusIndex(null);
+    setTouchIndex(null);
   }
 
   function handleKeyDown(e: ReactKeyboardEvent<SVGSVGElement>) {
@@ -126,12 +167,12 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
         <span className="text-xs text-muted">menor é melhor</span>
       </figcaption>
 
-      <div className="relative w-full" style={{ height }}>
+      <div ref={containerRef} className="relative w-full" style={{ height }}>
         <svg
+          ref={svgRef}
           role="img"
           aria-label={summary}
-          viewBox={`0 0 ${VIEW_W} ${height}`}
-          preserveAspectRatio="none"
+          viewBox={`0 0 ${measuredWidth} ${height}`}
           width="100%"
           height={height}
           pointerEvents="all"
@@ -150,7 +191,7 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
               <g key={i}>
                 <line
                   x1={MARGIN.left}
-                  x2={VIEW_W - MARGIN.right}
+                  x2={measuredWidth - MARGIN.right}
                   y1={y}
                   y2={y}
                   stroke="var(--border)"
@@ -232,8 +273,9 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
 
         {active && (
           <div
+            data-testid="line-chart-tooltip"
             className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs shadow-lg"
-            style={{ left: `${(active.x / VIEW_W) * 100}%`, top: `${Math.max(0, (active.y / height) * 100 - 4)}%` }}
+            style={{ left: `${(active.x / measuredWidth) * 100}%`, top: `${Math.max(0, (active.y / height) * 100 - 4)}%` }}
           >
             <div className="tabular font-semibold text-fg">{formatValue(active.point.value)}</div>
             <div className="text-muted">

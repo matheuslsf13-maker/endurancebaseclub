@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { Button } from './Button';
@@ -24,6 +24,7 @@ import { renderWithProviders } from '../../test/renderWithProviders';
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('Button', () => {
@@ -118,6 +119,43 @@ describe('Modal', () => {
       </Modal>,
     );
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+});
+
+describe('Modal focus management', () => {
+  function FocusHarness() {
+    const [open, setOpen] = useState(false);
+    return (
+      <div>
+        <button onClick={() => setOpen(true)}>Abrir modal</button>
+        <Modal open={open} onClose={() => setOpen(false)} title="Detalhes" footer={<button>Rodapé</button>}>
+          <button>Ação</button>
+        </Modal>
+      </div>
+    );
+  }
+
+  it('moves focus into the dialog on open, traps Tab inside it, and restores focus to the trigger on close', async () => {
+    const user = userEvent.setup();
+    render(<FocusHarness />);
+    const trigger = screen.getByText('Abrir modal');
+
+    await user.click(trigger);
+    const closeBtn = screen.getByLabelText('Fechar');
+    expect(closeBtn).toHaveFocus();
+
+    await user.tab();
+    expect(screen.getByText('Ação')).toHaveFocus();
+    await user.tab();
+    expect(screen.getByText('Rodapé')).toHaveFocus();
+    await user.tab();
+    expect(closeBtn).toHaveFocus(); // wraps from the last focusable back to the first
+
+    await user.tab({ shift: true });
+    expect(screen.getByText('Rodapé')).toHaveFocus(); // Shift+Tab from the first wraps to the last
+
+    await user.keyboard('{Escape}');
+    expect(trigger).toHaveFocus();
   });
 });
 
@@ -258,6 +296,41 @@ describe('useToast', () => {
     await user.click(screen.getByTestId('toast-undo'));
     expect(onUndo).toHaveBeenCalledTimes(1);
   });
+
+  it('pauses the auto-dismiss timer while hovered and resumes with the remaining time on mouseleave', () => {
+    vi.useFakeTimers();
+    const onUndo = vi.fn();
+    render(
+      <ToastProvider>
+        <ToastHarness onUndo={onUndo} />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByText('Disparar toast'));
+    const toast = screen.getByTestId('assign-toast');
+
+    // 2s of the 5s default elapse, then the pointer enters the toast.
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    fireEvent.mouseEnter(toast);
+
+    // Hovering well past the original 5s duration must not dismiss it.
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(screen.getByTestId('assign-toast')).toBeInTheDocument();
+
+    // Leaving resumes the countdown with the ~3s that remained.
+    fireEvent.mouseLeave(toast);
+    act(() => {
+      vi.advanceTimersByTime(2999);
+    });
+    expect(screen.getByTestId('assign-toast')).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(2);
+    });
+    expect(screen.queryByTestId('assign-toast')).not.toBeInTheDocument();
+  });
 });
 
 describe('Layout', () => {
@@ -322,6 +395,110 @@ describe('LineChart', () => {
   it('shows an empty state when there are no points', () => {
     render(<LineChart title="Evolução" formatValue={(v) => String(v)} points={[]} />);
     expect(screen.getByText('Sem dados para exibir')).toBeInTheDocument();
+  });
+});
+
+describe('LineChart touch interaction', () => {
+  function renderChart() {
+    return render(
+      <div>
+        <LineChart
+          title="Evolução 5 km corrida"
+          formatValue={(v) => `${Math.round(v / 1000)}s`}
+          points={[
+            { label: '10/2025', value: 1500000 },
+            { label: '03/2026', value: 1400000, tooltip: 'Prova X' },
+          ]}
+        />
+        <button>Fora do gráfico</button>
+      </div>,
+    );
+  }
+
+  it('keeps the tooltip after a tap ends (pointerup then pointerleave) on touch', () => {
+    renderChart();
+    const svg = screen.getByRole('img', { name: /Evolução 5 km corrida/ });
+
+    fireEvent.pointerDown(svg, { pointerType: 'touch', clientX: 10, clientY: 10 });
+    expect(screen.getByTestId('line-chart-tooltip')).toBeInTheDocument();
+
+    fireEvent.pointerUp(svg, { pointerType: 'touch', clientX: 10, clientY: 10 });
+    fireEvent.pointerLeave(svg, { pointerType: 'touch', clientX: 10, clientY: 10 });
+    expect(screen.getByTestId('line-chart-tooltip')).toBeInTheDocument();
+  });
+
+  it('still clears the tooltip on pointerleave for mouse (hover keeps its previous behavior)', () => {
+    renderChart();
+    const svg = screen.getByRole('img', { name: /Evolução 5 km corrida/ });
+
+    fireEvent.pointerMove(svg, { pointerType: 'mouse', clientX: 10, clientY: 10 });
+    expect(screen.getByTestId('line-chart-tooltip')).toBeInTheDocument();
+
+    fireEvent.pointerLeave(svg, { pointerType: 'mouse', clientX: 10, clientY: 10 });
+    expect(screen.queryByTestId('line-chart-tooltip')).not.toBeInTheDocument();
+  });
+
+  it('clears a sticky touch selection on a tap outside the chart', () => {
+    renderChart();
+    const svg = screen.getByRole('img', { name: /Evolução 5 km corrida/ });
+
+    fireEvent.pointerDown(svg, { pointerType: 'touch', clientX: 10, clientY: 10 });
+    expect(screen.getByTestId('line-chart-tooltip')).toBeInTheDocument();
+
+    fireEvent.pointerDown(screen.getByText('Fora do gráfico'), { pointerType: 'touch' });
+    expect(screen.queryByTestId('line-chart-tooltip')).not.toBeInTheDocument();
+  });
+});
+
+describe('LineChart responsive geometry', () => {
+  it('falls back to a fixed viewBox width with no forced stretch when ResizeObserver is unavailable', () => {
+    render(
+      <LineChart
+        title="Evolução"
+        formatValue={(v) => String(v)}
+        points={[
+          { label: 'A', value: 1 },
+          { label: 'B', value: 2 },
+        ]}
+        height={200}
+      />,
+    );
+    const svg = screen.getByRole('img', { name: /Evolução/ });
+    expect(svg).toHaveAttribute('viewBox', '0 0 640 200');
+    expect(svg).not.toHaveAttribute('preserveAspectRatio', 'none');
+  });
+
+  it('adopts the container width once a ResizeObserver reports it, keeping geometry uniform', () => {
+    let observedCallback: ResizeObserverCallback | null = null;
+    class FakeResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        observedCallback = cb;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+
+    render(
+      <LineChart
+        title="Evolução"
+        formatValue={(v) => String(v)}
+        points={[
+          { label: 'A', value: 1 },
+          { label: 'B', value: 2 },
+        ]}
+        height={200}
+      />,
+    );
+    const svg = screen.getByRole('img', { name: /Evolução/ });
+    expect(svg).toHaveAttribute('viewBox', '0 0 640 200');
+
+    act(() => {
+      observedCallback?.([{ contentRect: { width: 480 } }] as unknown as ResizeObserverEntry[], {} as unknown as ResizeObserver);
+    });
+
+    expect(svg).toHaveAttribute('viewBox', '0 0 480 200');
   });
 });
 
