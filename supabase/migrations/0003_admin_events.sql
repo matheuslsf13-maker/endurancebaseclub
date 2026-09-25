@@ -37,22 +37,22 @@ declare
   v_prev_max numeric; v_min numeric; v_max numeric; v_first boolean := true;
   v_ref_tk uuid;
 begin
-  if (p_config->>'age_rule') not in ('year_end', 'event_date') then
+  if (p_config->>'age_rule') is null or (p_config->>'age_rule') not in ('year_end', 'event_date') then
     raise exception 'Regra de idade inválida' using errcode = 'P0001';
   end if;
-  if (p_config->>'team_age_rule') not in ('sum', 'oldest', 'youngest') then
+  if (p_config->>'team_age_rule') is null or (p_config->>'team_age_rule') not in ('sum', 'oldest', 'youngest') then
     raise exception 'Regra de idade da equipe inválida' using errcode = 'P0001';
   end if;
-  if (p_config->>'time_source') not in ('median', 'reference') then
+  if (p_config->>'time_source') is null or (p_config->>'time_source') not in ('median', 'reference') then
     raise exception 'Fonte de tempo inválida' using errcode = 'P0001';
   end if;
   if jsonb_typeof(p_config->'cumulative') <> 'boolean' then
     raise exception 'Premiação cumulativa inválida' using errcode = 'P0001';
   end if;
-  if (p_config->>'same_crossing_window_s')::numeric not between 1 and 600 then
+  if (p_config->>'same_crossing_window_s') is null or (p_config->>'same_crossing_window_s')::numeric not between 1 and 600 then
     raise exception 'A janela de mesma passagem deve ser entre 1 e 600 segundos' using errcode = 'P0001';
   end if;
-  if (p_config->>'divergence_threshold_s')::numeric not between 0.1 and 600 then
+  if (p_config->>'divergence_threshold_s') is null or (p_config->>'divergence_threshold_s')::numeric not between 0.1 and 600 then
     raise exception 'O limite de divergência deve ser entre 0,1 e 600 segundos' using errcode = 'P0001';
   end if;
 
@@ -81,7 +81,7 @@ begin
        <> (select count(distinct d.val) from jsonb_array_elements_text(v_rk->'dims') as d(val)) then
       raise exception 'Dimensões de ranking repetidas' using errcode = 'P0001';
     end if;
-    if not ((v_rk->>'size')::int between 1 and 10) then
+    if (v_rk->>'size') is null or not ((v_rk->>'size')::int between 1 and 10) then
       raise exception 'O tamanho do pódio deve ser entre 1 e 10' using errcode = 'P0001';
     end if;
   end loop;
@@ -364,16 +364,27 @@ begin
     end if;
   end if;
 
+  -- The exists-check above closes the common case; this catch is only a backstop for a
+  -- concurrent insert/update racing between that check and this statement (TOCTOU), so the
+  -- unique constraint still surfaces as the pt-BR P0001 message, not a raw 23505.
   if is_insert then
-    insert into public.events (id, name, date, location, description, levels, status, is_public, public_slug, tk_enabled)
-    values (v_id, v_name, v_date, v_location, v_description, v_levels, v_status, v_is_public, v_slug, v_tk_enabled)
-    returning * into ev;
+    begin
+      insert into public.events (id, name, date, location, description, levels, status, is_public, public_slug, tk_enabled)
+      values (v_id, v_name, v_date, v_location, v_description, v_levels, v_status, v_is_public, v_slug, v_tk_enabled)
+      returning * into ev;
+    exception when unique_violation then
+      raise exception 'Endereço público já em uso' using errcode = 'P0001';
+    end;
   else
-    update public.events set
-      name = v_name, date = v_date, location = v_location, description = v_description,
-      levels = v_levels, status = v_status, is_public = v_is_public, public_slug = v_slug, tk_enabled = v_tk_enabled
-    where id = v_id
-    returning * into ev;
+    begin
+      update public.events set
+        name = v_name, date = v_date, location = v_location, description = v_description,
+        levels = v_levels, status = v_status, is_public = v_is_public, public_slug = v_slug, tk_enabled = v_tk_enabled
+      where id = v_id
+      returning * into ev;
+    exception when unique_violation then
+      raise exception 'Endereço público já em uso' using errcode = 'P0001';
+    end;
   end if;
 
   return to_jsonb(ev);
@@ -454,6 +465,7 @@ declare
   v_wave jsonb;
   v_wave_id uuid;
   v_keep_ids uuid[] := '{}';
+  v_process_waves boolean;
 begin
   perform public.assert_organizer();
 
@@ -520,7 +532,14 @@ begin
     v_position := v_existing.position;
   end if;
 
-  v_config := public.default_race_config(v_team_size) || coalesce(p_race->'config', '{}'::jsonb);
+  -- Ruling 14: on UPDATE, keep the organizer's stored customizations when the payload omits
+  -- config (or only sends a partial one) -- defaults fill gaps, existing config wins over
+  -- defaults, and an explicitly-sent field wins over the existing value.
+  if is_insert then
+    v_config := public.default_race_config(v_team_size) || coalesce(p_race->'config', '{}'::jsonb);
+  else
+    v_config := public.default_race_config(v_team_size) || v_existing.config || coalesce(p_race->'config', '{}'::jsonb);
+  end if;
   perform public.validate_race_config(v_config, v_event_id);
 
   if not is_insert then
@@ -550,24 +569,36 @@ begin
     returning * into ev_race;
   end if;
 
-  for v_wave in select el from jsonb_array_elements(coalesce(p_race->'waves', '[]'::jsonb)) as t(el) loop
-    v_wave_id := coalesce(nullif(v_wave->>'id', '')::uuid, gen_random_uuid());
-    insert into public.waves (id, race_id, name, position, start_at)
-    values (
-      v_wave_id, v_race_id,
-      coalesce(nullif(btrim(v_wave->>'name'), ''), 'Largada geral'),
-      coalesce((v_wave->>'position')::int, 0),
-      (v_wave->>'start_at')::timestamptz
-    )
-    on conflict (id) do update set
-      race_id = excluded.race_id, name = excluded.name, position = excluded.position, start_at = excluded.start_at;
-    v_keep_ids := v_keep_ids || v_wave_id;
-  end loop;
+  -- Ruling 12: on UPDATE, an ABSENT "waves" key -- or an explicit JSON null -- leaves existing
+  -- waves (and their recorded start_at) completely untouched: skip the loop, the delete and the
+  -- default-wave insert entirely. On INSERT, waves are always processed (absent/null/empty all
+  -- fall through to the "no waves" -> default-wave case below). A present array upserts by id and
+  -- deletes waves missing from it; if the race ends with zero waves, a default wave is created.
+  v_process_waves := is_insert
+    or ((p_race ? 'waves') and coalesce(jsonb_typeof(p_race->'waves'), 'null') <> 'null');
 
-  delete from public.waves where race_id = v_race_id and not (id = any(v_keep_ids));
+  if v_process_waves then
+    -- Ruling 16: admin_save_race never changes start_at of an existing wave -- the upsert sets
+    -- only race_id/name/position, and a newly inserted wave always starts with start_at null.
+    -- Start times change exclusively via admin_set_wave_start.
+    for v_wave in select el from jsonb_array_elements(coalesce(p_race->'waves', '[]'::jsonb)) as t(el) loop
+      v_wave_id := coalesce(nullif(v_wave->>'id', '')::uuid, gen_random_uuid());
+      insert into public.waves (id, race_id, name, position)
+      values (
+        v_wave_id, v_race_id,
+        coalesce(nullif(btrim(v_wave->>'name'), ''), 'Largada geral'),
+        coalesce((v_wave->>'position')::int, 0)
+      )
+      on conflict (id) do update set
+        race_id = excluded.race_id, name = excluded.name, position = excluded.position;
+      v_keep_ids := v_keep_ids || v_wave_id;
+    end loop;
 
-  if array_length(v_keep_ids, 1) is null then
-    insert into public.waves (race_id) values (v_race_id);
+    delete from public.waves where race_id = v_race_id and not (id = any(v_keep_ids));
+
+    if array_length(v_keep_ids, 1) is null then
+      insert into public.waves (race_id) values (v_race_id);
+    end if;
   end if;
 
   return jsonb_build_object(
