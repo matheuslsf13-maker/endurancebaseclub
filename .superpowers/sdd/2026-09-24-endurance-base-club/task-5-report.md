@@ -115,3 +115,78 @@ Both are exactly the files named in the task brief's Files block; nothing else w
 ## Concerns
 
 None blocking. No defects found in migrations 0001–0003 (read-only base for this task).
+
+## Fix round 1 (review finding: duplicated entry creation)
+
+**Finding:** `admin_import_athletes` and `admin_bulk_create_entries` each independently built a
+simple `team_size = 1` entry — look up the race's first wave by position, build the `0..N-1` legs
+array, call `next_bib`, insert into `entries`, insert into `entry_members` — with no shared code
+between the two call sites, risking silent drift on a future rule change.
+
+**What changed:** Factored the duplicated block into a new internal helper,
+`public.create_individual_entry(p_race public.races, p_athlete_id uuid) returns uuid`, placed right
+after `next_bib` (now function 2 of the file; every later function's leading comment number shifted
+by one, no functions renamed). It is `security definer`,
+`set search_path = public, extensions, pg_temp`, `language plpgsql`, and has no `admin_`/`tk_`/
+`pub_` prefix so the later least-privilege grants migration keeps it non-callable by clients (same
+convention as `entry_json`, `validate_race_config`, `next_unique_public_slug`). It does exactly what
+the two call sites did: selects the race's first wave by `position`, builds `generate_series(0,
+legs_count-1)`, calls `next_bib(p_race.event_id)`, inserts the `entries` row then the
+`entry_members` row, and returns the new entry id.
+
+Both call sites now call it in place of their inline block:
+- `admin_import_athletes`: `perform public.create_individual_entry(v_race, v_athlete_id);` (return
+  value unused there, same as before — only the counter increments). Removed its now-unused
+  `v_entry_id`/`v_bib`/`v_wave_id`/`v_legs` declarations.
+- `admin_bulk_create_entries`: `v_entry_id := public.create_individual_entry(v_race, v_athlete_id);`
+  (the id is still needed for the `v_created` array returned to the caller). Removed its now-unused
+  `v_wave_id`/`v_legs`/`v_bib` declarations.
+
+Behavior is unchanged: same bib sequencing (still sequential via `next_bib`, called once per
+created entry in the same order as before), same first-wave rule, same member legs (`0..N-1` on the
+lone member), same dedup/pre-checks at the call sites (the "already entered" `exists` check in each
+function still runs *before* calling the helper, exactly as before — the helper itself has no
+dedup logic, matching the original inline code which also had none).
+
+**Tests added** (in `supabase/tests/30_admin_athletes_entries.sql`), pinning the one behavior that
+wasn't yet directly asserted on the *entry itself* (only bib/count were checked before):
+- In the `admin_bulk_create_entries` block: both created entries' `wave_id` equal the race's first
+  wave (`wave_ind`), and both have `members[0].legs = [0]`.
+- After `admin_import_athletes`: read back (via `entry_json`) the entry it created for the "Ana
+  Souza" row and assert the same two things (first wave, legs `[0]`).
+  This raw table read needed `reset role` first (then `select tests.as_user(...)` to restore) —
+  `entries`/`entry_members` have RLS enabled with no policies yet (Task 7's job), so a direct table
+  read as the `authenticated` test role returns zero rows outside a `security definer` function;
+  every other direct-table check already in this test file follows the same `reset role` /
+  `as_user` pattern for the same reason. Caught this via a failing assertion, added debug `raise
+  notice`s to localize it to RLS rather than the refactor, then removed them once confirmed.
+
+No behavioral changes anywhere else in the file; no grants added (unchanged from the base — still
+Task 7's job).
+
+**Testing:**
+
+Command: `EBC_DB=ebc_t5 bash scripts/test-sql.sh` (resets `ebc_t5`, applies `dev/db/bootstrap.sql` +
+migrations 0001–0004, runs every `supabase/tests/*.sql`). Run three times (once mid-debugging with
+the failing new assertion before the RLS fix, then clean after the fix, then again post-commit) —
+final state:
+
+```
+PASS supabase/tests/00_helpers.sql
+PASS supabase/tests/10_schema.sql
+PASS supabase/tests/20_admin_events.sql
+PASS supabase/tests/30_admin_athletes_entries.sql
+```
+
+**Files changed:**
+- `/home/user/ebc-wt/t5/supabase/migrations/0004_admin_athletes_entries.sql` (new
+  `create_individual_entry` helper; both call sites simplified; comment numbering renumbered 2→11)
+- `/home/user/ebc-wt/t5/supabase/tests/30_admin_athletes_entries.sql` (new pinning assertions for
+  `admin_bulk_create_entries` and `admin_import_athletes`)
+
+**Commit:** `d0ae28b` — `refactor(db): share individual entry creation between import and bulk`, on
+`task/5` (parent `d415c39`). Not pushed.
+
+**Concerns:** None blocking. The RLS-driven test surprise above is expected/by-design (Task 7 adds
+the policies) and not a defect; flagging only so a future reader of this test file isn't puzzled by
+the `reset role` around the new assertion.
