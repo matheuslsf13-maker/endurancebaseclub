@@ -179,3 +179,5 @@ Task 6: fix round 1 applied (commits 2bfd23f..45a2f9e; SQL 5/5 PASS) — scoped 
 Task 7: implemented 4f48716 (task/7, base 2bfd23f; SQL 7/7 PASS; shim test 5/5) — touched supabase/tests/10_schema.sql (one stale assertion: anon table read now 42501) → accepted, file granted to T7
 - Ruling 35: 0006 also runs the role-global `alter default privileges revoke execute on functions from public` (the schema-scoped form cannot remove Postgres's built-in PUBLIC execute default — found by the T7 implementer), and 60_security proves a function created after the migration is not executable by anon/authenticated — cost if wrong: none.
 Task 7: amendment (Ruling 35) sent to the implementer before review
+Task 19: implemented 12747ed (task/19, base bae2379; 33 focused tests, full 320/321 — the 1 failure is T17's eventShell test asserting stub text "RacesTab") — review dispatched
+- Ruling 36: T17's shell/route tests must mock the page modules with marker components instead of asserting stub text (fixed in T17's fix round) — every screen task replaces a stub, so stub-text assertions are guaranteed collisions; screen branches merge after T17's fix — cost if wrong: none.
