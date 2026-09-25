@@ -159,6 +159,39 @@ describe('ReviewTab: resolving a divergence', () => {
     expect(mocks.clearResolution).toHaveBeenCalledWith('en1', 0);
   });
 
+  it('recovers when the chosen mark has since been discarded: warns, pre-selects system, saves system', async () => {
+    const user = userEvent.setup();
+    const a = makeMark({ at: L0, timekeeper_id: 'tk1' });
+    const b = makeMark({ at: L0 + 14 * SEC, timekeeper_id: 'tk2', discarded: true, discarded_by: 'organizer' });
+    const finish = makeMark({ at: T0 + 30 * MIN, leg_index: 1 });
+    const agg = makeAgg({
+      marks: [a, b, finish],
+      resolutions: [makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: b.id })],
+    });
+    renderReview(agg);
+
+    await user.click(screen.getByRole('button', { name: 'Resolver' }));
+    expect(screen.getByText('A marcação escolhida foi descartada — escolha outra decisão.')).toBeInTheDocument();
+    expect(screen.getByTestId('resolution-system')).toBeChecked();
+    // The discarded mark is still listed, with its badge and a way back.
+    expect(screen.getByText('Descartada')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restaurar' })).toBeInTheDocument();
+    // No radio exists for the discarded mark (computeCrossing excludes it from `candidates`).
+    expect(screen.queryByTestId(`resolution-mark-${b.id}`)).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId('resolution-save'));
+    expect(mocks.setResolution).toHaveBeenCalledWith('en1', 0, 'system', null, null, '');
+  });
+
+  it('gives the manual time input its own accessible name', async () => {
+    const user = userEvent.setup();
+    const { agg } = divergenceAgg();
+    renderReview(agg);
+
+    await user.click(screen.getByRole('button', { name: 'Resolver' }));
+    expect(screen.getByLabelText('Hora manual')).toBe(screen.getByTestId('resolution-manual-input'));
+  });
+
   it('discarding a candidate mark calls updateMark', async () => {
     const user = userEvent.setup();
     const { agg, a } = divergenceAgg();

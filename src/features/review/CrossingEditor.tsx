@@ -27,9 +27,16 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
   const legTiming = timing.byEntry.get(entryId)?.legs[legIndex];
   const crossing = legTiming?.crossing ?? null;
   const resolution = crossing?.resolution ?? null;
+  // A stored `mark` resolution can point at a mark that computeCrossing no longer lists among
+  // `candidates` (it was discarded since, or lost to a duplicate) — `crossing.chosen_mark_discarded`
+  // is the domain's own signal for exactly that "official time already fell back to the system
+  // time" case. Seeding the form from that stale resolution would leave no radio checked and
+  // silently resend the same broken decision, so start from `system` instead — the value the
+  // official time already shows — and say so.
+  const markMissing = resolution?.mode === 'mark' && !!crossing && !crossing.candidates.some((c) => c.mark_id === resolution.mark_id);
 
-  const [mode, setMode] = useState<ResolutionMode>(resolution?.mode ?? 'system');
-  const [markId, setMarkId] = useState<string | null>(resolution?.mode === 'mark' ? resolution.mark_id : null);
+  const [mode, setMode] = useState<ResolutionMode>(markMissing ? 'system' : (resolution?.mode ?? 'system'));
+  const [markId, setMarkId] = useState<string | null>(!markMissing && resolution?.mode === 'mark' ? resolution.mark_id : null);
   const [manualText, setManualText] = useState(() =>
     resolution?.mode === 'manual' && resolution.manual_ts ? formatClock(Date.parse(resolution.manual_ts), { millis: true }) : '',
   );
@@ -255,6 +262,11 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
 
         <fieldset className="flex flex-col gap-3">
           <legend className="text-sm font-medium">Decisão</legend>
+          {markMissing && (
+            <p className="rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+              A marcação escolhida foi descartada — escolha outra decisão.
+            </p>
+          )}
           <label className="flex min-h-11 items-center gap-2">
             <input type="radio" name="resolution" data-testid="resolution-system" checked={mode === 'system'} onChange={() => setMode('system')} />
             <span>
@@ -290,6 +302,7 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
                 setMode('manual');
               }}
               data-testid="resolution-manual-input"
+              aria-label="Hora manual"
               className="min-h-11 w-32 rounded-xl border border-border bg-surface px-2"
             />
           </label>
