@@ -1,0 +1,304 @@
+# Review package: 2427895..a466ec2 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+a466ec2 fix(db): keep resolution notes private, exact public ages
+
+## Files changed
+ supabase/migrations/0006_public_grants.sql | 26 +++++++++++-------
+ supabase/tests/50_public.sql               | 44 ++++++++++++++++++++++--------
+ supabase/tests/60_security.sql             |  3 ++
+ 3 files changed, 51 insertions(+), 22 deletions(-)
+
+## Diff
+diff --git a/supabase/migrations/0006_public_grants.sql b/supabase/migrations/0006_public_grants.sql
+index b7f170f..d5f2f77 100644
+--- a/supabase/migrations/0006_public_grants.sql
++++ b/supabase/migrations/0006_public_grants.sql
+@@ -8,43 +8,45 @@
+ --    it must stay ungranted (it is only ever called from inside another security definer function).
+ create or replace function public.resolve_public_event(p_slug text) returns public.events
+ language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
+ declare ev public.events;
+ begin
+   select * into ev from public.events where public_slug = p_slug and is_public;
+   if not found then raise exception 'Evento não encontrado' using errcode = 'P0001'; end if;
+   return ev;
+ end $$;
+ 
+--- 2. mark_public_json: the public mark projection (Ruling 4 + Ruling 29) -- strips the
+---    clock-audit fields (device_ts, clock_offset_ms, clock_rtt_ms) and, when present, the
+---    organizer-only org_edited flag that Task 6's fix round is adding to public.marks. Removing a
+---    jsonb key that does not exist is a no-op, so this works whether or not that column exists.
++-- 2. mark_public_json: the public mark projection (Ruling 4) -- strips the clock-audit fields
++--    (device_ts, clock_offset_ms, clock_rtt_ms) and the organizer-only org_edited flag (Ruling 27,
++--    added by Task 6's fix round to public.marks). Declared `stable`, not `immutable`: to_jsonb of
++--    a timestamptz column renders using the session's TimeZone setting, so the result isn't a pure
++--    function of the input row alone.
+ create or replace function public.mark_public_json(m public.marks) returns jsonb
+-language sql immutable set search_path = public, extensions, pg_temp as $$
++language sql stable set search_path = public, extensions, pg_temp as $$
+   select to_jsonb(m) - 'device_ts' - 'clock_offset_ms' - 'clock_rtt_ms' - 'org_edited'
+ $$;
+ 
+ -- 3. pub_events: public event list for the public home page.
+ create or replace function public.pub_events() returns jsonb
+ language sql stable security definer set search_path = public, extensions, pg_temp as $$
+   select coalesce(jsonb_agg(jsonb_build_object(
+     'id', e.id, 'public_slug', e.public_slug, 'name', e.name, 'date', e.date,
+     'location', e.location, 'status', e.status
+   ) order by e.date desc), '[]'::jsonb)
+   from public.events e where e.is_public
+ $$;
+ 
+ -- 4. pub_event: the full public snapshot for one event (PubEventPayload), shaped like
+ --    admin_get_event/tk_open minus tk_token/tk_enabled and every organizer-only field:
+---    entries never carry `notes` (Ruling 29), athletes never carry email/phone/birth_date, and
+---    marks never carry the clock-audit fields (mark_public_json above).
++--    entries never carry `notes` (Ruling 29), athletes never carry email/phone/birth_date, marks
++--    never carry the clock-audit fields (mark_public_json above), and resolutions never carry
++--    `note` (free text the organizer typed in the Review editor) or `decided_by` (their user id).
+ create or replace function public.pub_event(p_slug text) returns jsonb
+ language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
+ declare ev public.events := public.resolve_public_event(p_slug);
+ begin
+   return jsonb_build_object(
+     'event', to_jsonb(ev) - 'tk_token' - 'tk_enabled',
+     'races', coalesce((
+       select jsonb_agg(to_jsonb(r) order by r.position, r.name)
+       from public.races r where r.event_id = ev.id
+     ), '[]'::jsonb),
+@@ -55,38 +57,42 @@ begin
+     ), '[]'::jsonb),
+     'entries', coalesce((
+       select jsonb_agg(public.entry_json(en.id, true) - 'notes'
+                         order by case when en.bib ~ '^\d+$' then lpad(en.bib, 20, '0') else en.bib end)
+       from public.entries en where en.event_id = ev.id
+     ), '[]'::jsonb),
+     'athletes', coalesce((
+       select jsonb_agg(distinct jsonb_build_object(
+         'id', a.id, 'name', a.name, 'sex', a.sex, 'team_club', a.team_club, 'city', a.city,
+         'public_profile', a.public_profile,
+-        'age_event', date_part('year', age(ev.date, a.birth_date)),
++        -- explicit ::timestamp casts: `age(date, date)` otherwise resolves to the timestamptz
++        -- overload, which converts each date through the session TimeZone and can be off by a
++        -- day on a Brazilian DST-start date (that midnight doesn't exist, e.g. 2018-11-04 becomes
++        -- 01:00 local -- verified empirically to shift date_part('year', age(...)) by one).
++        'age_event', date_part('year', age(ev.date::timestamp, a.birth_date::timestamp)),
+         'age_year_end', extract(year from ev.date) - extract(year from a.birth_date)
+       ))
+       from public.athletes a
+       join public.entry_members m on m.athlete_id = a.id
+       join public.entries en on en.id = m.entry_id
+       where en.event_id = ev.id
+     ), '[]'::jsonb),
+     'timekeepers', coalesce((
+       select jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name) order by t.created_at)
+       from public.timekeepers t where t.event_id = ev.id
+     ), '[]'::jsonb),
+     'marks', coalesce((
+       select jsonb_agg(public.mark_public_json(mk) order by mk.ts)
+       from public.marks mk where mk.event_id = ev.id
+     ), '[]'::jsonb),
+     'resolutions', coalesce((
+-      select jsonb_agg(to_jsonb(res)) from public.resolutions res where res.event_id = ev.id
++      select jsonb_agg(to_jsonb(res) - 'note' - 'decided_by') from public.resolutions res where res.event_id = ev.id
+     ), '[]'::jsonb),
+     'results', coalesce((
+       select jsonb_agg(to_jsonb(res)) from public.results res where res.event_id = ev.id
+     ), '[]'::jsonb),
+     'version', ev.version,
+     'server_now', now()
+   );
+ end $$;
+ 
+ -- 5. pub_live: like admin_live, with the same public mark projection as pub_event (marks are a
+@@ -97,21 +103,21 @@ language plpgsql stable security definer set search_path = public, extensions, p
+ declare ev public.events := public.resolve_public_event(p_slug);
+ begin
+   return jsonb_build_object(
+     'server_now', now(),
+     'version', ev.version,
+     'marks', coalesce((
+       select jsonb_agg(public.mark_public_json(mk) order by mk.ts) from public.marks mk
+       where mk.event_id = ev.id and (p_since is null or mk.updated_at >= p_since)
+     ), '[]'::jsonb),
+     'resolutions', coalesce((
+-      select jsonb_agg(to_jsonb(res)) from public.resolutions res where res.event_id = ev.id
++      select jsonb_agg(to_jsonb(res) - 'note' - 'decided_by') from public.resolutions res where res.event_id = ev.id
+     ), '[]'::jsonb),
+     'waves', coalesce((
+       select jsonb_agg(to_jsonb(w) order by r.position, r.name, w.position)
+       from public.waves w join public.races r on r.id = w.race_id
+       where r.event_id = ev.id
+     ), '[]'::jsonb)
+   );
+ end $$;
+ 
+ -- 6. pub_athlete: only for athletes who opted into a public profile; results restricted to those
+diff --git a/supabase/tests/50_public.sql b/supabase/tests/50_public.sql
+index 50d002d..6458cd3 100644
+--- a/supabase/tests/50_public.sql
++++ b/supabase/tests/50_public.sql
+@@ -1,28 +1,33 @@
+ begin;
+ select tests.set('owner', public.bootstrap_owner('owner@ebc.test','senha-forte-1','Owner')::text);
+ select tests.as_user(tests.get('owner')::uuid);
+ 
+ -- fixtures: one event (created private), a relay race (swim leg 0, run leg 1), two athletes (one
+ -- with email/phone/birth_date, one without), a team entry bib 101, and the wave's start time set.
+-do $$ declare ev jsonb; ra jsonb; a jsonb; b jsonb; e jsonb; v_t0 timestamptz := now(); begin
++-- the event's date is a fixed literal (not derived from now()) so the age_event/age_year_end
++-- assertions below can use literal expected numbers instead of re-deriving the same formula.
++do $$ declare ev jsonb; ra jsonb; a jsonb; b jsonb; e jsonb; v_t0 timestamptz := now(); v_event_date constant date := '2026-11-15'; begin
+   perform tests.set('t0', v_t0::text);
+-  ev := public.admin_save_event(jsonb_build_object('name', 'Copa Pública', 'date', v_t0::date, 'is_public', false));
++  ev := public.admin_save_event(jsonb_build_object('name', 'Copa Pública', 'date', v_event_date, 'is_public', false));
+   perform tests.set('ev', ev ->> 'id');
+   perform tests.set('slug', ev ->> 'public_slug');
+ 
+   ra := public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'Revezamento', 'team_size', 2,
+         'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb));
+   perform tests.set('race', ra -> 'race' ->> 'id');
+   perform public.admin_set_wave_start((ra -> 'waves' -> 0 ->> 'id')::uuid, v_t0);
+ 
+-  a := public.admin_save_athlete('{"name":"Atleta A","sex":"M","email":"a@x.com","phone":"11999999999","birth_date":"1990-01-01"}'::jsonb);
++  -- birth_date is late in the year (Dec 31) so that, as of the Nov 15 event date, age_event
++  -- (35 -- the birthday hasn't happened yet that year) differs from age_year_end (36 -- plain
++  -- calendar-year difference): a discriminating fixture, not one where the two happen to agree.
++  a := public.admin_save_athlete('{"name":"Atleta A","sex":"M","email":"a@x.com","phone":"11999999999","birth_date":"1990-12-31"}'::jsonb);
+   perform tests.set('ath_a', a ->> 'id');
+   b := public.admin_save_athlete('{"name":"Atleta B","sex":"F"}'::jsonb);
+   perform tests.set('ath_b', b ->> 'id');
+ 
+   e := public.admin_save_entry(jsonb_build_object('race_id', ra -> 'race' ->> 'id', 'bib', '101', 'team_name', 'Equipe AB', 'notes', 'segredo da organização',
+         'members', jsonb_build_array(
+           jsonb_build_object('athlete_id', tests.get('ath_a'), 'legs', jsonb_build_array(0)),
+           jsonb_build_object('athlete_id', tests.get('ath_b'), 'legs', jsonb_build_array(1))
+         )));
+   perform tests.set('entry', e ->> 'id');
+@@ -46,76 +51,91 @@ do $$ begin perform public.admin_save_event(jsonb_build_object('id', tests.get('
+ reset role;
+ do $$ declare m1 uuid := gen_random_uuid(); m2 uuid := gen_random_uuid(); begin
+   insert into public.marks (id, event_id, ts, device_ts, clock_offset_ms, clock_rtt_ms, entry_id, leg_index, discarded, discarded_by)
+     values (m1, tests.get('ev')::uuid, tests.get('t0')::timestamptz + interval '10 minutes', now(), 120, 40, tests.get('entry')::uuid, 0, false, null);
+   insert into public.marks (id, event_id, ts, device_ts, clock_offset_ms, clock_rtt_ms, entry_id, leg_index, discarded, discarded_by)
+     values (m2, tests.get('ev')::uuid, tests.get('t0')::timestamptz + interval '11 minutes', now(), 80, 30, tests.get('entry')::uuid, 1, true, 'organizer');
+   perform tests.set('mark_live', m1::text);
+   perform tests.set('mark_discarded', m2::text);
+ end $$;
+ 
++-- a resolution on leg 0 pointing at the live mark, carrying an organizer-only note and (via
++-- decided_by) the organizer's own user id: pub_event/pub_live must never leak either field.
++select tests.as_user(tests.get('owner')::uuid);
++do $$ begin
++  perform public.admin_set_resolution(tests.get('entry')::uuid, 0, 'mark', tests.get('mark_live')::uuid, null,
++    'ajuste interno da organização, não divulgar');
++end $$;
++
+ -- pub_events(): now public.
+ select tests.as_anon();
+ do $$ begin
+   assert exists (
+     select 1 from jsonb_array_elements(public.pub_events()) x where x ->> 'id' = tests.get('ev')
+   ), 'the event should appear in pub_events() once public';
+ end $$;
+ 
+ -- pub_event: event has no tk_token/tk_enabled, entries include member names but not notes,
+ -- athletes never carry email/phone/birth_date, age_year_end/age_event are computed (null when
+ -- there is no birth_date), marks include the discarded one and never carry clock-audit fields.
+-do $$ declare pub jsonb; v_athlete jsonb; v_a jsonb; v_b jsonb; v_expected_year_end int; v_expected_age int; begin
++do $$ declare pub jsonb; v_athlete jsonb; v_a jsonb; v_b jsonb; begin
+   pub := public.pub_event(tests.get('slug'));
+ 
+   assert not (pub -> 'event' ? 'tk_token'), 'public event payload must not carry tk_token';
+   assert not (pub -> 'event' ? 'tk_enabled'), 'public event payload must not carry tk_enabled';
+ 
+   assert jsonb_array_length(pub -> 'entries') = 1;
+   assert (pub -> 'entries' -> 0 -> 'members' -> 0 ->> 'name') is not null, 'pub_event entries should include member names';
+   assert not (pub -> 'entries' -> 0 ? 'notes'), 'pub_event entries must not carry the organizer-only notes field';
+   assert (pub -> 'entries' -> 0 ->> 'status') is not null, 'pub_event entries should keep status';
+   assert (pub -> 'entries' -> 0 ->> 'penalty_ms') is not null, 'pub_event entries should keep penalty_ms';
+ 
+   assert jsonb_array_length(pub -> 'athletes') = 2;
+   for v_athlete in select el from jsonb_array_elements(pub -> 'athletes') as t(el) loop
+     assert not (v_athlete ? 'email'), 'pub_event athletes must not carry email';
+     assert not (v_athlete ? 'phone'), 'pub_event athletes must not carry phone';
+     assert not (v_athlete ? 'birth_date'), 'pub_event athletes must not carry birth_date';
+   end loop;
+ 
+   select el into v_a from jsonb_array_elements(pub -> 'athletes') as t(el) where el ->> 'id' = tests.get('ath_a');
+-  -- computed straight from t0 (== the event's own date), not by reading public.events directly:
+-  -- this whole block runs as anon, and anon has no table grants at all after 0006.
+-  v_expected_year_end := date_part('year', tests.get('t0')::timestamptz::date) - date_part('year', '1990-01-01'::date);
+-  v_expected_age := date_part('year', age(tests.get('t0')::timestamptz::date, '1990-01-01'::date));
+-  assert (v_a ->> 'age_year_end')::int = v_expected_year_end,
+-    'expected age_year_end ' || v_expected_year_end || ', got ' || (v_a ->> 'age_year_end');
+-  assert (v_a ->> 'age_event')::int = v_expected_age,
+-    'expected age_event ' || v_expected_age || ', got ' || (v_a ->> 'age_event');
++  -- literal expected numbers (event date 2026-11-15, birth_date 1990-12-31), not re-derived with
++  -- the same age()/extract() formula under test: age_event=35 (birthday not yet reached that
++  -- year) is deliberately one less than age_year_end=36 (plain calendar-year difference).
++  assert (v_a ->> 'age_year_end')::int = 36, 'expected age_year_end 36, got ' || (v_a ->> 'age_year_end');
++  assert (v_a ->> 'age_event')::int = 35, 'expected age_event 35, got ' || (v_a ->> 'age_event');
+ 
+   select el into v_b from jsonb_array_elements(pub -> 'athletes') as t(el) where el ->> 'id' = tests.get('ath_b');
+   assert (v_b ->> 'age_year_end') is null, 'age_year_end should be null without a birth_date';
+   assert (v_b ->> 'age_event') is null, 'age_event should be null without a birth_date';
+ 
+   assert jsonb_array_length(pub -> 'marks') = 2, 'pub_event marks should include the discarded one too';
+   assert not (pub -> 'marks' -> 0 ? 'device_ts'), 'pub_event marks must not carry device_ts';
+   assert not (pub -> 'marks' -> 0 ? 'clock_offset_ms'), 'pub_event marks must not carry clock_offset_ms';
+   assert not (pub -> 'marks' -> 0 ? 'clock_rtt_ms'), 'pub_event marks must not carry clock_rtt_ms';
++  assert not (pub -> 'marks' -> 0 ? 'org_edited'), 'pub_event marks must not carry org_edited';
++
++  assert jsonb_array_length(pub -> 'resolutions') = 1;
++  assert not (pub -> 'resolutions' -> 0 ? 'note'), 'pub_event resolutions must not carry the organizer note';
++  assert not (pub -> 'resolutions' -> 0 ? 'decided_by'), 'pub_event resolutions must not carry decided_by';
+ end $$;
+ 
+ -- pub_live: same delta semantics as admin_live, same mark projection, discarded included.
+ do $$ declare live jsonb; begin
+   live := public.pub_live(tests.get('slug'), null);
+   assert jsonb_array_length(live -> 'marks') = 2, 'pub_live should include the discarded mark too';
+   assert jsonb_array_length(live -> 'waves') = 1;
+   assert not (live -> 'marks' -> 0 ? 'device_ts');
++  assert not (live -> 'marks' -> 0 ? 'org_edited'), 'pub_live marks must not carry org_edited';
++
++  assert jsonb_array_length(live -> 'resolutions') = 1;
++  assert not (live -> 'resolutions' -> 0 ? 'note'), 'pub_live resolutions must not carry the organizer note';
++  assert not (live -> 'resolutions' -> 0 ? 'decided_by'), 'pub_live resolutions must not carry decided_by';
+ 
+   live := public.pub_live(tests.get('slug'), now() + interval '1 hour');
+   assert jsonb_array_length(live -> 'marks') = 0, 'marks after the cutoff should be empty';
+   assert jsonb_array_length(live -> 'waves') = 1, 'waves should always come back in full';
+ end $$;
+ select tests.assert_raises($$select public.pub_live('errado', null)$$, 'P0001', 'Evento não encontrado');
+ 
+ -- pub_athlete: finalize the public race (one result for both athletes of entry 101), plus a
+ -- second, private event+race+result for Atleta A only.
+ reset role;
+diff --git a/supabase/tests/60_security.sql b/supabase/tests/60_security.sql
+index 9fc5b82..7070b1c 100644
+--- a/supabase/tests/60_security.sql
++++ b/supabase/tests/60_security.sql
+@@ -15,17 +15,20 @@ do $$ begin
+ end $$;
+ 
+ select tests.as_anon();
+ select tests.assert_raises($$select * from public.events$$, '42501');
+ select tests.assert_raises($$select * from public.marks$$, '42501');
+ select tests.assert_raises($$select public.admin_list_events()$$, '42501');
+ select tests.assert_raises($$select public.internal_create_auth_user('a@b.co','12345678')$$, '42501');
+ select tests.assert_raises($$select public.bootstrap_owner('a@b.co','12345678','x')$$, '42501');
+ select tests.assert_raises($$select public.tk_event('x')$$, '42501');
+ select tests.assert_raises($$select public.entry_json(gen_random_uuid(), true)$$, '42501');
++-- resolve_public_event returns the full events row (including tk_token): ungranted, like tk_event.
++select tests.assert_raises($$select public.resolve_public_event('x')$$, '42501');
+ do $$ begin assert public.server_time() > 0; assert jsonb_typeof(public.pub_events()) = 'array'; end $$;
+ reset role;
+ select tests.as_user(tests.get('stranger')::uuid);
+ select tests.assert_raises($$select public.admin_list_events()$$, '42501');
+ select tests.assert_raises($$select * from public.athletes$$, '42501');
++select tests.assert_raises($$select public.resolve_public_event('x')$$, '42501');
+ reset role;
+ rollback;

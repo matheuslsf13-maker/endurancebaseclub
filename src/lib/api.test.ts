@@ -1,26 +1,40 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Mock } from 'vitest';
-import { supabase } from './supabase';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from './api';
 import type { EventRow, FinalizeRowInput, ImportRowInput, Leg, TkMarkInput } from './types';
 
-vi.mock('./supabase', () => ({ supabase: { rpc: vi.fn() } }));
-
-type RpcMock = Mock<(fn: string, args?: Record<string, unknown>) => Promise<unknown>>;
-const rpc = supabase.rpc as unknown as RpcMock;
+// supabase.rpc() returns a query builder: api.ts attaches its timeout signal with
+// .abortSignal() and awaits the builder. `answer` decides what the awaited builder yields.
+const sb = vi.hoisted(() => {
+  const answer = vi.fn<(fn: string, args: Record<string, unknown> | undefined, signal: AbortSignal) => Promise<unknown>>();
+  const rpc = vi.fn((fn: string, args?: Record<string, unknown>) => ({
+    abortSignal: (signal: AbortSignal) => answer(fn, args, signal),
+  }));
+  return { rpc, answer };
+});
+vi.mock('./supabase', () => ({ supabase: { rpc: sb.rpc } }));
+const { rpc, answer } = sb;
 
 const ok = (data: unknown) => ({ data, error: null, status: 200 });
+/** What postgrest-js resolves with when fetch() is aborted. */
+const aborted = { data: null, error: { message: 'AbortError: signal is aborted without reason', code: '' }, status: 0 };
+/** A request the server never answers; like fetch(), it gives up when the signal aborts. */
+const hangUntilAborted = (_fn: string, _args: unknown, signal: AbortSignal) =>
+  new Promise<unknown>((resolve) => signal.addEventListener('abort', () => resolve(aborted)));
 
 beforeEach(() => {
-  rpc.mockReset();
-  rpc.mockResolvedValue(ok(null));
+  rpc.mockClear();
+  answer.mockReset();
+  answer.mockResolvedValue(ok(null));
+});
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('api', () => {
   it('saves an event through admin_save_event with the payload as p_event', async () => {
     const e = { name: 'Copa EBC', date: '2026-10-11', location: 'Lago Paranoá', levels: ['Elite', 'Base'] };
     const saved = { ...e, id: 'ev1' } as EventRow;
-    rpc.mockResolvedValue(ok(saved));
+    answer.mockResolvedValue(ok(saved));
 
     await expect(api.admin.saveEvent(e)).resolves.toEqual(saved);
     expect(rpc.mock.calls).toEqual([['admin_save_event', { p_event: e }]]);
@@ -53,34 +67,88 @@ describe('api', () => {
   });
 
   it('throws an ApiError carrying the server message and code', async () => {
-    rpc.mockResolvedValue({ data: null, error: { message: 'Falhou', code: 'P0001' }, status: 400 });
+    answer.mockResolvedValue({ data: null, error: { message: 'Falhou', code: 'P0001' }, status: 400 });
     const err = await api.admin.deleteEvent('ev1').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ message: 'Falhou', code: 'P0001' });
   });
 
   it('turns a failed fetch into a "no connection" ApiError', async () => {
-    rpc.mockRejectedValue(new TypeError('Failed to fetch'));
+    answer.mockRejectedValue(new TypeError('Failed to fetch'));
     const err = await api.admin.listEvents().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
   });
 
   it('treats the status-0 result supabase-js resolves with on a network failure as "no connection"', async () => {
-    rpc.mockResolvedValue({ data: null, error: { message: 'TypeError: Failed to fetch', code: '' }, status: 0 });
+    answer.mockResolvedValue({ data: null, error: { message: 'TypeError: Failed to fetch', code: '' }, status: 0 });
     const err = await api.tk.open('tok').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
   });
 
+  it('keeps the HTTP status of a server error', async () => {
+    answer.mockResolvedValue({ data: null, error: { message: 'JWT expired', code: 'PGRST301' }, status: 401 });
+    const err = await api.admin.me().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ message: 'JWT expired', code: 'PGRST301', status: 401 });
+  });
+
+  it('gives every RPC a 15 s timeout, after which it fails as "no connection"', async () => {
+    vi.useFakeTimers();
+    answer.mockImplementation(hangUntilAborted);
+    let settled: unknown = 'pending';
+    const call = api.admin.live('ev1', null).then(
+      () => 'resolved',
+      (e: unknown) => e,
+    ).then((r) => { settled = r; });
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(settled).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1);
+    await call;
+    expect(settled).toBeInstanceOf(ApiError);
+    expect(settled).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
+  });
+
+  it('gives server_time only 5 s, so a stuck sample does not hold the clock sync', async () => {
+    vi.useFakeTimers();
+    answer.mockImplementation(hangUntilAborted);
+    const err = api.serverTime().catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(err).resolves.toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
+  });
+
+  it('also maps an abort that rejects (instead of resolving) to "no connection"', async () => {
+    vi.useFakeTimers();
+    answer.mockImplementation((_fn, _args, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+    }));
+    const err = api.tk.sync('t', 'k', 's', [], null).catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(err).resolves.toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
+  });
+
+  it('clears the timeout once the server answers', async () => {
+    vi.useFakeTimers();
+    await api.admin.listEvents();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(answer.mock.calls[0][2]).toBeInstanceOf(AbortSignal);
+    expect(answer.mock.calls[0][2].aborted).toBe(false);
+  });
+
   it('returns the server clock as epoch milliseconds', async () => {
-    rpc.mockResolvedValue(ok(1790000000000));
+    answer.mockResolvedValue(ok(1790000000000));
     await expect(api.serverTime()).resolves.toBe(1790000000000);
     expect(rpc.mock.calls).toEqual([['server_time']]);
   });
 
   it('rejects a server clock that is not a number instead of skewing the synced clock', async () => {
-    rpc.mockResolvedValue(ok(null));
+    answer.mockResolvedValue(ok(null));
     await expect(api.serverTime()).rejects.toBeInstanceOf(ApiError);
   });
 
