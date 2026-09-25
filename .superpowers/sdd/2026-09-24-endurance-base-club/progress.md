@@ -233,3 +233,5 @@ Task 23: review Needs fixes (sonnet) — Important: identical errorMessage helpe
 Task 23: minor (deferred): re-starting an already started wave uses the same confirm copy (no "já largou às…" warning); per-row "Ativo" checkbox names not distinct; no empty state when nobody is on course
 Task 18: fix round 1 applied (commits 3c55071..c5e16d8) — scoped re-review dispatched
 Resumed after interruption: T22 (resume), T20 fix (resume), T23 fix round 1 (resume), T7 re-review (retry), T18 re-review, T8 review (retry); T27 on hold until a slot frees
+Task 7: fix round 1/5 (4 addressed, 0 open — resolution note/decided_by private, timestamp age + discriminating test, mark_public_json stable + org_edited assert, resolve_public_event not executable; commits 2427895..a466ec2) — scoped re-review clean
+Task 7: complete (commits 2bfd23f..a466ec2, review clean; feat merged into task/7, SQL 7/7, shim 5/5) — merged into feat/ebc-app as 18dcd94
