@@ -256,3 +256,108 @@ RPC/error/bigint plumbing, not the app's grant model). Nothing else in the file 
 - Confirmed via `git diff`/`git status` that only `tests/integration/shim.test.ts` changed for this
   commit.
 - Dropped the shim test's leftover `ebc_shim` database afterward.
+
+## Fix round 1
+
+Commit `a466ec2` "fix(db): keep resolution notes private, exact public ages", on top of `d353d11`.
+Worktree now also carries a merge of the integration branch (`2427895 Merge branch 'feat/ebc-app'
+into task/7`), kept as instructed — my commits sit on top of it.
+
+### Changes
+
+**1. (Important) Organizer notes reaching anonymous users.** `pub_event` and `pub_live` projected
+resolutions with a bare `to_jsonb(res)`, which includes `note` (free text the organizer types in
+the Review editor) and `decided_by` (the organizer's `auth.users` id) — neither belongs in a public
+payload. Changed both to `to_jsonb(res) - 'note' - 'decided_by'`.
+
+**2. Age formula (Ruling 42) + discriminating test.** `age(ev.date, a.birth_date)` resolves to the
+`age(timestamptz, timestamptz)` overload (both `date` args get implicitly cast to `timestamptz`
+through the session `TimeZone`), which is provably wrong on a day a Brazilian DST transition made
+midnight not exist. Changed to `age(ev.date::timestamp, a.birth_date::timestamp)`, forcing the
+timezone-independent `timestamp` overload. Also switched the fixture's birth date to `1990-12-31`
+(late in the year) against a fixed literal event date `2026-11-15` (previously derived from `now()`)
+so `age_event` (35, birthday not yet reached) differs from `age_year_end` (36, plain calendar-year
+subtraction) — asserted with literal `35`/`36`, not the same formula re-derived.
+
+**3. `mark_public_json` mislabeled `immutable`; stale comment; new `org_edited` assertion.**
+`to_jsonb()` of a `timestamptz` column renders using the session's `TimeZone`, so the function isn't
+a pure function of its row argument alone — changed the declaration from `immutable` to `stable`.
+Rewrote the comment, which still said "Task 6's fix round is adding [org_edited]" even though that
+column now exists in `0005_timing.sql` (merged from the integration branch); cited Ruling 27 for the
+column and Ruling 4 for the mark projection generally. Added assertions in both `pub_event` and
+`pub_live` blocks of `50_public.sql` that a public mark carries no `org_edited` key.
+
+**4. `resolve_public_event` executability proof.** Added, in both the anon and the
+non-organizer-authenticated (`stranger`) sections of `60_security.sql`:
+`select tests.assert_raises($$select public.resolve_public_event('x')$$, '42501');` — it returns the
+full `events` row (including `tk_token`), so it must stay exactly as ungranted as `tk_event`.
+
+### Covering tests, RED → GREEN, and honesty about what each assertion actually catches
+
+- **Item 1** (the real security bug): confirmed RED by temporarily reverting the projection back to
+  `to_jsonb(res)` and re-running the suite —
+  `psql:supabase/tests/50_public.sql:119: ERROR: pub_event resolutions must not carry the organizer note`
+  — then restored the fix and confirmed GREEN.
+- **Item 2**: reverting the `::timestamp` casts and re-running the suite still shows **all PASS**,
+  because this sandbox's Postgres cluster's default `TimeZone` is `Etc/UTC` (verified with
+  `show timezone`), which has no DST discontinuities, so `age(date, date)` and
+  `age(date::timestamp, date::timestamp)` agree for any ordinary literal date pair here — the
+  discriminating assertion (35 vs. 36) exercises a *different*, real risk (an `age_event`/
+  `age_year_end` formula mix-up) rather than the DST-overload bug itself. I verified the DST bug and
+  its fix directly with manual SQL instead (isolated repro, not part of the committed test suite):
+  under `set timezone = 'America/Sao_Paulo'`, `age('2018-11-04'::date, '1990-12-31'::date)` (a
+  historical Brazilian DST-start day) gives `date_part('year', ...) = 7` for an exact 8-year gap
+  (`2026-11-04` vs `2018-11-04`... concretely: `age('2026-11-04'::date, '2018-11-04'::date)` →
+  `tstz_years = 7`, wrong), while
+  `age('2026-11-04'::date::timestamp, '2018-11-04'::date::timestamp)` → `ts_years = 8`, correct. I
+  did not add a `set local timezone = 'America/Sao_Paulo'` block to `50_public.sql` itself to
+  reproduce this exact scenario as a standing regression test, since that would change the ambient
+  TimeZone for the rest of that shared transaction/file and risk affecting other timestamp-rendering
+  assertions elsewhere in it; the fix itself (`::timestamp` casts) is unconditionally correct
+  regardless of the server's configured TimeZone, which is what actually matters in production.
+- **Item 3**: the `immutable`→`stable` change is not observable through any functional assertion
+  (both declarations produce identical output for a given row within one query); it's a planner/
+  correctness-of-declaration fix, not a behavior fix, so there is no meaningful RED for it. The new
+  `org_edited`-absent assertions in `50_public.sql` were already true before this fix round (marks
+  have excluded `org_edited` since `mark_public_json` was first written) — they add coverage for
+  existing-correct behavior rather than catching a regression.
+- **Item 4**: also already true before this fix round (`resolve_public_event` was never granted,
+  same as `tk_event`) — pure added coverage. To make sure the new assertion isn't vacuous, I
+  temporarily ran `grant execute on function public.resolve_public_event(text) to anon,
+  authenticated;` directly against `ebc_t7` and re-ran `60_security.sql` by hand: it then failed with
+  `expected errcode 42501 but got P0001 (Evento não encontrado)` — confirming the assertion does
+  catch a real regression — then revoked the grant again.
+
+Final commands, both green:
+```
+EBC_DB=ebc_t7 bash scripts/test-sql.sh
+PASS supabase/tests/00_helpers.sql
+PASS supabase/tests/10_schema.sql
+PASS supabase/tests/20_admin_events.sql
+PASS supabase/tests/30_admin_athletes_entries.sql
+PASS supabase/tests/40_timing.sql
+PASS supabase/tests/50_public.sql
+PASS supabase/tests/60_security.sql
+
+npx vitest run tests/integration/shim.test.ts -c vitest.integration.config.ts
+Test Files  1 passed (1)
+     Tests  5 passed (5)
+```
+(Re-ran `test-sql.sh` a second time after all manual sanity-check grants/reverts to confirm a clean
+fresh-reset reproduction; dropped every throwaway state — the sanity-check grant/revoke ran directly
+against `ebc_t7`, which the next `db-local.sh reset` recreates from scratch anyway, and the shim
+test's own `ebc_shim` database was dropped after each run.)
+
+### Files touched this round
+- `/home/user/ebc-wt/t7/supabase/migrations/0006_public_grants.sql`
+- `/home/user/ebc-wt/t7/supabase/tests/50_public.sql`
+- `/home/user/ebc-wt/t7/supabase/tests/60_security.sql`
+
+### Concerns carried forward
+- Item 2's committed test does not reproduce the exact DST-transition scenario (see above) — flagging
+  in case the controller wants a dedicated, isolated test (its own transaction/session, or a
+  separate test file) that sets `TimeZone` explicitly and pins a historical Brazilian DST-start
+  date. I judged this out of scope for a "cheap, same-file" fix and risky to bolt onto the shared
+  `50_public.sql` transaction.
+- "Other minors stay deferred" per the coordinator's message — I did not go looking for further
+  issues beyond the four items listed.
