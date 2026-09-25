@@ -213,3 +213,15 @@ Task 7: minor (deferred): pub_athlete sorts by snapshot date instead of joined e
 - Note for T29: Ruling 35's role-global default-privilege revoke applies to the role that runs apply_migration in production — verify after deploy with has_function_privilege checks as part of the SQL tests run in production.
 Task 19: fix round 1 applied (commits 12747ed..efd40e8; 36 focused tests) — scoped re-review dispatched
 Task 19: fix round 1/5 (2 addressed, 0 open — normalizeRaceConfig, moveItem helper; commits 12747ed..efd40e8) — scoped re-review clean → ready to merge after task/17 lands in feat (merge feat into task/19, full suite, then merge)
+Task 17: fix round 1/5 (5 addressed, 0 open — resilient session restore, .env.test, fresh timekeepers, RPC timeouts via AbortController+setTimeout, marker shell tests; commits 3cd4f76..a647630) — scoped re-review clean (opus)
+Task 17: minor (deferred): offline "Sair" with expired token is undone by TOKEN_REFRESHED when the network returns (dropSession ignores signOut error; remove ebc.auth or skip restore after explicit sign-out); restore running during a 42501 sign-in can apply(ANON) over FORBIDDEN (session.tsx:131); signed-in RPC timeout not a hard deadline while a token refresh hangs; persistent non-auth restore failure spins forever without a hint; timed-out writes may have committed (retry → duplicate); contracts.md ApiError lacks the new optional status field
+Task 17: complete (commits 7e293bd..a647630, review clean) — merged into feat/ebc-app as e699be5
+Task 19: complete (commits bae2379..efd40e8, review clean; feat merged into task/19: 343 tests green) — merged into feat/ebc-app as 4703006
+Task 25: review Approved (sonnet)
+Task 25: minor (deferred): entryLabel vs MemberNames duplicate member/leg formatting (' / ' vs ' · '); printed page repeats race name + badge; redundant null re-checks in finalize handlers
+Task 25: complete (commits bae2379..884253b, review clean; feat merged into task/25:       Tests  357 passed (357)) — merged into feat/ebc-app as 4af9aab
+Task 24: fix round 1 applied (commits 8c884af..c6c89d3; 14 focused tests) — scoped re-review dispatched
+Task 20: review Needs fixes (sonnet) — Important: AthleteForm nested submit bubbles to an outer form (reuse contract for T21); todayIsoBrasilia duplicated — fix round 1/5 dispatched (resume implementer; + sexLabel reuse)
+Task 20: minor (deferred): ageToday duplicates athleteAge fallback; table shows raw M/F; no .xlsx-path import test
+Task 27: dispatched (worktree /home/user/ebc-wt/t27 from feat/ebc-app, sonnet; Rulings 26 prompt-mode update, 30 lazy routes in App.tsx; grants: App.tsx, new src/components/UpdatePrompt.tsx, vercel.json headers for sw.js)
+Task 8: implemented fc400e9 (task/8, base 2427895; integration 16/16 incl. 11 flow; SQL 7/7) — review dispatched
