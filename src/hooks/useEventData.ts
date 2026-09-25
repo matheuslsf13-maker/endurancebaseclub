@@ -9,6 +9,9 @@ const LIVE_POLL_MS = 2_000;
 const IDLE_POLL_MS = 15_000;
 /** Mark deltas are requested from the last server time minus this overlap (ids deduplicate). */
 const OVERLAP_MS = 10_000;
+/** Live tabs also refetch the whole aggregate this often: admin_live carries no timekeepers, and
+ * their registrations / last_seen_at do not bump the event version (Ruling 33). */
+const LIVE_FULL_REFRESH_MS = 30_000;
 
 export interface EventData {
   agg: EventAggregate | undefined;
@@ -26,6 +29,13 @@ interface DeltaCursor {
   serverNow: string;
 }
 
+/** A mark from a timekeeper the aggregate does not list yet (registered after it was fetched). */
+function hasUnknownTimekeeper(agg: EventAggregate, delta: LiveDelta): boolean {
+  if (!delta.marks.some((m) => m.timekeeper_id !== null)) return false;
+  const known = new Set(agg.timekeepers.map((t) => t.id));
+  return delta.marks.some((m) => m.timekeeper_id !== null && !known.has(m.timekeeper_id));
+}
+
 function applyDelta(agg: EventAggregate, delta: LiveDelta, replaceLists: boolean): EventAggregate {
   const marks = mergeById(agg.marks, delta.marks);
   // Live endpoints return every resolution and wave of the event, so these are replaced
@@ -36,8 +46,9 @@ function applyDelta(agg: EventAggregate, delta: LiveDelta, replaceLists: boolean
 /**
  * The full event aggregate (TanStack query `['event', eventId]`) kept fresh by polling
  * `admin_live`: marks are merged by id, resolutions and waves replaced, and the aggregate is
- * refetched when the server's event version moves (structural changes). Polling pauses while
- * the page is hidden and catches up as soon as it is visible again.
+ * refetched when the server's event version moves (structural changes) or a mark names a
+ * timekeeper it does not know; live tabs also refetch it every 30 s. Polling pauses while the page
+ * is hidden and catches up as soon as it is visible again.
  */
 export function useEventData(eventId: string, opts: { live: boolean }): EventData {
   const queryClient = useQueryClient();
@@ -105,9 +116,8 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
             const replaceLists = !refetched && patches.current === patchesBefore;
             queryClient.setQueryData<EventAggregate>(key, applyDelta(current, delta, replaceLists));
             if (!refetched) cursor.current = { eventId, aggServerNow: current.server_now, serverNow: delta.server_now };
-            if (delta.version !== current.version && queryClient.isFetching({ queryKey: key, exact: true }) === 0) {
-              void refresh();
-            }
+            const stale = delta.version !== current.version || hasUnknownTimekeeper(current, delta);
+            if (stale && queryClient.isFetching({ queryKey: key, exact: true }) === 0) void refresh();
           }
         } catch {
           // Offline or a transient failure: keep what we have and try again on the next tick.
@@ -130,6 +140,18 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [loaded, eventId, intervalMs, queryClient, refresh]);
+
+  // Periodic full refetch on live tabs. Not TanStack's `refetchInterval`: its timer restarts on
+  // every cache update, so the 2 s delta poll would keep postponing it forever. A delta poll that
+  // overlaps this refetch is reconciled by the `refetched` check above.
+  const live = opts.live;
+  useEffect(() => {
+    if (!loaded || !live) return;
+    const timer = setInterval(() => {
+      if (!document.hidden && queryClient.isFetching({ queryKey: ['event', eventId], exact: true }) === 0) void refresh();
+    }, LIVE_FULL_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [loaded, live, eventId, queryClient, refresh]);
 
   return { agg: query.data, isLoading: query.isLoading, error: query.error, refresh, patchAgg };
 }

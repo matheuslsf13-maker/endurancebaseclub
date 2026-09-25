@@ -29,6 +29,37 @@ vi.mock('../../lib/api', async (importOriginal) => ({
 }));
 const { getEvent, live } = mocks;
 
+// Ruling 36: these tests check routing and outlet wiring, not the pages themselves, so each page
+// the routes lead to is replaced by a marker that later screen tasks cannot change.
+const marker = vi.hoisted(() => async (id: string) => {
+  const { createElement } = await import('react');
+  return { default: () => createElement('div', { 'data-testid': `page-${id}` }) };
+});
+vi.mock('../public/PublicHome', () => marker('public-home'));
+vi.mock('./EventsPage', () => marker('events'));
+vi.mock('../races/RacesTab', () => marker('races'));
+vi.mock('../entries/EntriesTab', () => marker('entries'));
+vi.mock('../timing/TimingTab', () => marker('timing'));
+vi.mock('../review/ReviewTab', () => marker('review'));
+vi.mock('../results/ResultsTab', () => marker('results'));
+vi.mock('../athletes/AthletesPage', () => marker('athletes'));
+vi.mock('../athletes/AthleteProfilePage', () => marker('athlete-profile'));
+vi.mock('../help/HelpPage', () => marker('help'));
+vi.mock('../settings/SettingsPage', () => marker('settings'));
+vi.mock('../timekeeper/TimekeeperPage', () => marker('timekeeper'));
+vi.mock('../public/PublicEventPage', () => marker('public-event'));
+vi.mock('../public/PublicAthletePage', () => marker('public-athlete'));
+// The Geral marker also proves the tabs render inside the event's context.
+vi.mock('./EventGeneralTab', async () => {
+  const { createElement } = await import('react');
+  const { useEventContext } = await import('./EventContext');
+  return {
+    default: function EventGeneralMarker() {
+      return createElement('div', { 'data-testid': 'page-event-general' }, useEventContext().agg.event.name);
+    },
+  };
+});
+
 function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
   return {
     event: makeEvent({ id: 'ev1', name: 'Copa EBC' }), races: [makeRace()], waves: [makeWave()], entries: [makeEntry()],
@@ -86,20 +117,20 @@ afterEach(() => {
 describe('routes', () => {
   it('/ shows the public home to visitors', () => {
     renderApp('/', fakeSession());
-    expect(screen.getByText('PublicHome')).toBeInTheDocument();
+    expect(screen.getByTestId('page-public-home')).toBeInTheDocument();
   });
 
   it('/ waits for the session before choosing', () => {
     renderApp('/', fakeSession({ status: 'loading' }));
     expect(screen.getByRole('status', { name: 'Carregando' })).toBeInTheDocument();
-    expect(screen.queryByText('PublicHome')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('page-public-home')).not.toBeInTheDocument();
   });
 
   it('/ sends organizers to /eventos inside the organizer layout', async () => {
     const session = organizer();
     const router = renderApp('/', session);
 
-    expect(await screen.findByText('EventsPage')).toBeInTheDocument();
+    expect(await screen.findByTestId('page-events')).toBeInTheDocument();
     expect(router.state.location.pathname).toBe('/eventos');
     await userEvent.click(screen.getByTestId('logout'));
     expect(session.signOut).toHaveBeenCalledTimes(1);
@@ -125,23 +156,24 @@ describe('routes', () => {
   it('admin routes explain when the account is not an organizer', () => {
     renderApp('/eventos', fakeSession({ status: 'forbidden' }));
     expect(screen.getByText('Esta conta não tem acesso de organização')).toBeInTheDocument();
-    expect(screen.queryByText('EventsPage')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('page-events')).not.toBeInTheDocument();
   });
 
   it.each([
-    ['/eventos', 'EventsPage'], ['/atletas', 'AthletesPage'], ['/atletas/a1', 'AthleteProfilePage'],
-    ['/ajuda', 'HelpPage'], ['/config', 'SettingsPage'],
-  ])('%s renders %s for organizers, inside the layout', (path, text) => {
+    ['/eventos', 'events'], ['/atletas', 'athletes'], ['/atletas/a1', 'athlete-profile'],
+    ['/ajuda', 'help'], ['/config', 'settings'],
+  ])('%s renders the %s page for organizers, inside the layout', (path, page) => {
     renderApp(path, organizer());
-    expect(screen.getByText(text)).toBeInTheDocument();
+    expect(screen.getByTestId(`page-${page}`)).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Principal' })).toBeInTheDocument();
   });
 
   it.each([
-    ['/c/tok123', 'TimekeeperPage'], ['/p/copa-ebc', 'PublicEventPage'], ['/atleta/a1', 'PublicAthletePage'],
-  ])('%s renders %s without a session', (path, text) => {
+    ['/c/tok123', 'timekeeper'], ['/p/copa-ebc', 'public-event'], ['/atleta/a1', 'public-athlete'],
+  ])('%s renders the %s page without a session', (path, page) => {
     renderApp(path, fakeSession());
-    expect(screen.getByText(text)).toBeInTheDocument();
+    expect(screen.getByTestId(`page-${page}`)).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Principal' })).not.toBeInTheDocument();
   });
 
   it('unknown paths render NotFound', () => {
@@ -164,7 +196,7 @@ describe('EventLayout', () => {
     }));
     const router = renderApp('/eventos/ev1', organizer());
 
-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
+    expect(await screen.findByTestId('page-event-general')).toHaveTextContent('Copa EBC');
     expect(router.state.location.pathname).toBe('/eventos/ev1/geral');
     expect(getEvent).toHaveBeenCalledWith('ev1');
     expect(screen.getByRole('heading', { name: 'Copa EBC' })).toBeInTheDocument();
@@ -182,7 +214,7 @@ describe('EventLayout', () => {
     getEvent.mockResolvedValue(makeAgg({ marks: [makeMark({ id: 'y1', at: T0 + 20 * MIN, leg_index: 1 })] }));
     renderApp('/eventos/ev1/geral', organizer());
 
-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
+    expect(await screen.findByTestId('page-event-general')).toBeInTheDocument();
     expect(screen.getByTestId('tab-revisao')).toHaveTextContent('Revisão1');
     expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-danger');
   });
@@ -191,17 +223,18 @@ describe('EventLayout', () => {
     getEvent.mockResolvedValue(makeAgg());
     renderApp('/eventos/ev1/geral', organizer());
 
-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
+    expect(await screen.findByTestId('page-event-general')).toBeInTheDocument();
     expect(screen.getByTestId('tab-revisao')).toHaveTextContent(/^Revisão$/);
   });
 
   it.each([
-    ['provas', 'RacesTab'], ['inscricoes', 'EntriesTab'], ['cronometragem', 'TimingTab'],
-    ['revisao', 'ReviewTab'], ['resultados', 'ResultsTab'],
-  ])('renders the %s tab', async (tab, text) => {
+    ['provas', 'races'], ['inscricoes', 'entries'], ['cronometragem', 'timing'],
+    ['revisao', 'review'], ['resultados', 'results'],
+  ])('renders the %s tab (%s page) under the event header', async (tab, page) => {
     getEvent.mockResolvedValue(makeAgg());
     renderApp(`/eventos/ev1/${tab}`, organizer());
-    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(await screen.findByTestId(`page-${page}`)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Copa EBC' })).toBeInTheDocument();
   });
 
   it('polls every 2 s only on the timing, review and results tabs', async () => {
@@ -209,7 +242,7 @@ describe('EventLayout', () => {
     getEvent.mockResolvedValue(makeAgg());
     const router = renderApp('/eventos/ev1/geral', organizer());
     await act(() => vi.advanceTimersByTimeAsync(5));
-    expect(screen.getByText('EventGeneralTab')).toBeInTheDocument();
+    expect(screen.getByTestId('page-event-general')).toBeInTheDocument();
 
     await act(() => vi.advanceTimersByTimeAsync(14_000));
     expect(live).not.toHaveBeenCalled();
@@ -236,7 +269,7 @@ describe('EventLayout', () => {
     expect(await screen.findByText('Evento não encontrado')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Voltar para eventos' })).toHaveAttribute('href', '/eventos');
     await userEvent.click(screen.getByRole('button', { name: 'Tentar novamente' }));
-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
+    expect(await screen.findByTestId('page-event-general')).toBeInTheDocument();
   });
 });
 
