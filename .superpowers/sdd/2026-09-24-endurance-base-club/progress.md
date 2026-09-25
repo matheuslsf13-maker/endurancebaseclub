@@ -131,3 +131,5 @@ Task 12: review Approved (4df3f5f..3741efa, no Critical/Important)
 - Ruling 20: pace_by_modality omits 'other' (brief) — spec §10 "other só tempo" is honored by records/history showing the time with an empty pace; a per-modality pace row for 'other' has no meaning — cost if wrong: StatsView lacks an "Outro" row in "Ritmo por modalidade".
 Task 12: minor (deferred): no test for leg with time but null distance; tie-breaks untested (record ties, evolution group ties follow input order, same-date history rows, partner count ties); record/evolution label taken from first/best leg
 Task 12: complete (commits 4df3f5f..3741efa, review clean) — merged into feat/ebc-app as 3bd3b4d
+Task 5: review — spec ✅, 1 Important (duplicated individual-entry creation block in admin_import_athletes and admin_bulk_create_entries) — fix round 1/5 dispatched (new implementer, sonnet; FIX_BASE d415c39)
+Task 5: minor (deferred): admin_bulk_create_entries surfaces raw FK error for unknown athlete id; malformed birth_date / non-numeric leg index → raw cast error; check-then-insert bib race → raw 23505; dead `en` variable in admin_save_entry
