@@ -132,6 +132,11 @@ do $$ declare created jsonb; begin
     array[tests.get('ath_a')::uuid, tests.get('ath_g')::uuid, tests.get('ath_h')::uuid]);
   assert jsonb_array_length(created) = 2, 'expected 2 entries (ath_a already entered), got ' || jsonb_array_length(created);
   assert (created -> 0 ->> 'bib') <> (created -> 1 ->> 'bib');
+  -- pins create_individual_entry's shared wave/legs rule at this call site too.
+  assert (created -> 0 ->> 'wave_id') = tests.get('wave_ind') and (created -> 1 ->> 'wave_id') = tests.get('wave_ind'),
+    'bulk-created entries should default to the race''s first wave';
+  assert (created -> 0 -> 'members' -> 0 -> 'legs') = '[0]'::jsonb and (created -> 1 -> 'members' -> 0 -> 'legs') = '[0]'::jsonb,
+    'bulk-created entries should assign every leg to the lone member';
 end $$;
 
 -- admin_update_entry_status / admin_delete_entry
@@ -218,6 +223,18 @@ do $$ declare list jsonb; arow jsonb; begin
   select x into arow from jsonb_array_elements(list) x where x ->> 'name' = 'ana souza';
   perform tests.set('ana', arow ->> 'id');
 end $$;
+-- the entry admin_import_athletes created for Ana should match create_individual_entry's rule
+-- (same one admin_bulk_create_entries goes through): the race's first wave, every leg assigned.
+-- (raw table read, so drop to the unrestricted role like the other direct-table checks above.)
+reset role;
+do $$ declare entry_ana jsonb; begin
+  select public.entry_json(e.id, true) into entry_ana
+  from public.entries e join public.entry_members m on m.entry_id = e.id
+  where m.athlete_id = tests.get('ana')::uuid and e.race_id = tests.get('race_ind')::uuid;
+  assert entry_ana ->> 'wave_id' = tests.get('wave_ind'), 'import-created entry should default to the race''s first wave';
+  assert (entry_ana -> 'members' -> 0 -> 'legs') = '[0]'::jsonb, 'import-created entry should assign every leg to the lone member';
+end $$;
+select tests.as_user(tests.get('owner')::uuid);
 
 -- admin_delete_athlete: blocked while the athlete has entries; succeeds otherwise.
 select tests.assert_raises($$select public.admin_delete_athlete(tests.get('ana')::uuid)$$, 'P0001', 'Atleta tem inscrições%');
