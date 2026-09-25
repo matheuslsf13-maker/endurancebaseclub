@@ -231,3 +231,5 @@ Task 24: fix round 1/5 (2 addressed, 0 open; commits 8c884af..c6c89d3) — scope
 Task 24: complete (commits bae2379..c6c89d3, review clean; feat merged into task/24:       Tests  371 passed (371)) — merged into feat/ebc-app as df991c9
 Task 23: review Needs fixes (sonnet) — Important: identical errorMessage helper in LiveBoard/TimekeepersPanel/TimingTab/WavesPanel — fix round 1/5 (resume implementer)
 Task 23: minor (deferred): re-starting an already started wave uses the same confirm copy (no "já largou às…" warning); per-row "Ativo" checkbox names not distinct; no empty state when nobody is on course
+Task 18: fix round 1 applied (commits 3c55071..c5e16d8) — scoped re-review dispatched
+Resumed after interruption: T22 (resume), T20 fix (resume), T23 fix round 1 (resume), T7 re-review (retry), T18 re-review, T8 review (retry); T27 on hold until a slot frees
