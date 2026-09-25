@@ -205,3 +205,93 @@ $ npm run build
 
 Status: **DONE_WITH_CONCERNS** (both concerns above are informational/expected, not blocking; the
 worktree is otherwise fully green: focused tests, typecheck and build all pass).
+
+## Fix round 1
+
+Review came back "Needs fixes" with two Important findings. Both fixed on `task/20`, commit
+`626ad10` (`fix(athletes): isolate nested athlete form submit, share date helper`), on top of a
+clean `git merge --no-edit feat/ebc-app` (commit `e95faf2`) that picked up Task 17's stub-text fix
+and everything merged into `feat/ebc-app` since (Tasks 18, 19, 23, 24, 25, …) — no conflicts.
+
+**1. Nested-form submit not stopped (`AthleteForm.tsx`).**
+`handleSubmit` only called `e.preventDefault()`. React bubbles synthetic events through the
+*component* tree, not the DOM tree, so a `Modal`'s `createPortal` doesn't stop it: when Task 21's
+`EntryForm` renders `AthleteForm` inside a `Modal` inside its own `<form>`, clicking `athlete-save`
+would also fire the outer form's `onSubmit`. Fixed with `e.stopPropagation()` right after
+`preventDefault()`, with a comment explaining why (portals don't stop React's synthetic bubbling).
+
+TDD for the fix, in `athletes.test.tsx`: added
+`'does not let its submit bubble into an outer form when reused inside a modal in another form (Task 21 nests it in EntryForm)'`,
+which renders `<form onSubmit={outerSpy}><Modal open ...><AthleteForm .../></Modal></form>` (the
+exact shape the finding describes), fills the name field, clicks `athlete-save`, and asserts
+`saveAthlete` was called but `outerSpy` was not.
+
+- **RED** (temporarily removed the `stopPropagation()` line to confirm the new test actually catches
+  the regression):
+  ```
+  $ npx vitest run src/features/athletes/athletes.test.tsx -t "does not let its submit bubble"
+   Tests  1 failed | 24 skipped (25)
+  AssertionError: expected "spy" to not be called at all, but actually been called 1 times
+  ```
+- **GREEN** (restored the fix):
+  ```
+  $ npx vitest run src/features/athletes/athletes.test.tsx
+   Test Files  1 passed (1)
+        Tests  25 passed (25)
+  ```
+
+**2. Duplicated `todayIsoBrasilia()` (`AthletesPage.tsx` / `AthleteProfilePage.tsx`).**
+Moved it (plus the `ageToday` wrapper already used by `AthletesPage`) into a new
+`src/features/athletes/athleteHelpers.ts` (granted by the controller for this fix), imported by
+both pages; `AthleteProfilePage` now computes its header's age with the same `ageToday` helper
+instead of duplicating the `ageOn` call. While there, also swapped `AthleteProfilePage`'s local
+`SEX_LABEL` map for `domain/categories`' `sexLabel()`, so the M/F → "Masculino"/"Feminino" rule
+lives in exactly one place (it already returns the same two labels for `Sex`, a subtype of the
+`EntrySex` it takes).
+
+No behavior change from fix 2, so no new test was added for it beyond the existing coverage
+(`AthletesPage`'s and `AthleteProfilePage`'s existing tests already exercise both call sites and
+kept passing unchanged).
+
+### Gate outputs (fix round 1)
+
+Focused:
+```
+$ npx vitest run src/features/athletes
+ Test Files  1 passed (1)
+      Tests  25 passed (25)
+```
+
+Full suite — now fully green (the Task-17 stub-text conflict from the first round is gone, as the
+coordinator noted):
+```
+$ npx vitest run
+ Test Files  30 passed (30)
+      Tests  382 passed (382)
+```
+
+Typecheck (clean):
+```
+$ npm run typecheck
+> tsc --noEmit -p tsconfig.json
+```
+
+Build:
+```
+$ npm run build
+✓ 252 modules transformed.
+✓ built in 920ms
+```
+(same pre-existing, unrelated ">500 kB chunk" advisory as round 1)
+
+### Files changed (fix round 1)
+
+- `src/features/athletes/AthleteForm.tsx` (submit isolation)
+- `src/features/athletes/athleteHelpers.ts` (new — shared `todayIsoBrasilia`/`ageToday`)
+- `src/features/athletes/AthletesPage.tsx` (imports the shared helper instead of its own copy)
+- `src/features/athletes/AthleteProfilePage.tsx` (imports the shared helper; uses `sexLabel()`)
+- `src/features/athletes/athletes.test.tsx` (new nested-form regression test)
+
+Status: **DONE** — both Important findings fixed and tested, full suite green (382/382),
+typecheck clean, build succeeds. No new concerns; the two round-1 concerns (no dedicated `.xlsx`
+import test, and the stray system-reminder `CLAUDE.md` mismatch) still stand as informational only.
