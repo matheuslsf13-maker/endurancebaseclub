@@ -42,7 +42,10 @@ slug=$(basename "$plan" .md)
 [ -n "$slug" ] && [ "$slug" != "." ] && [ "$slug" != ".." ] \
   || { echo "cannot derive a workspace name from: $plan" >&2; exit 2; }
 
-root=$(git rev-parse --show-toplevel)
+# Physical path of the repo root, spelled the same way as `pwd -P` below: on
+# Windows (Git Bash) `git rev-parse` prints C:/... while `pwd` prints /c/...,
+# which would make every in-repo plan look like an outside (absolute) one.
+root=$(CDPATH= cd -- "$(git rev-parse --show-toplevel)" && pwd -P)
 base="$root/.superpowers/sdd"
 
 # Normalize the plan path (physical directory, so relative/absolute/../
