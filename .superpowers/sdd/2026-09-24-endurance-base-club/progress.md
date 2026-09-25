@@ -225,3 +225,4 @@ Task 20: review Needs fixes (sonnet) — Important: AthleteForm nested submit bu
 Task 20: minor (deferred): ageToday duplicates athleteAge fallback; table shows raw M/F; no .xlsx-path import test
 Task 27: dispatched (worktree /home/user/ebc-wt/t27 from feat/ebc-app, sonnet; Rulings 26 prompt-mode update, 30 lazy routes in App.tsx; grants: App.tsx, new src/components/UpdatePrompt.tsx, vercel.json headers for sw.js)
 Task 8: implemented fc400e9 (task/8, base 2427895; integration 16/16 incl. 11 flow; SQL 7/7) — review dispatched
+Task 7: fix round 1 applied (commits 2427895..a466ec2; SQL 7/7, shim 5/5) — scoped re-review dispatched
