@@ -176,3 +176,6 @@ Task 17: review Needs fixes (opus; saved in task-17-review.md) — Important: se
 Task 17: fix round 1/5 dispatched (resume implementer) — Important 1 + Rulings 32, 33, 34 (other minors deferred)
 Task 17: minor (deferred): permanent poll errors swallowed / EventLayout ignores error after first load; refetchOnWindowFocus refetches aggregate; changePassword partial-success retry; "Revisão2" accessible name; test gaps (agg stability, SIGNED_OUT clears cache)
 Task 6: fix round 1 applied (commits 2bfd23f..45a2f9e; SQL 5/5 PASS) — scoped re-review dispatched
+Task 7: implemented 4f48716 (task/7, base 2bfd23f; SQL 7/7 PASS; shim test 5/5) — touched supabase/tests/10_schema.sql (one stale assertion: anon table read now 42501) → accepted, file granted to T7
+- Ruling 35: 0006 also runs the role-global `alter default privileges revoke execute on functions from public` (the schema-scoped form cannot remove Postgres's built-in PUBLIC execute default — found by the T7 implementer), and 60_security proves a function created after the migration is not executable by anon/authenticated — cost if wrong: none.
+Task 7: amendment (Ruling 35) sent to the implementer before review
