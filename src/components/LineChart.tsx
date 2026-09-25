@@ -44,20 +44,27 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
   const [touchIndex, setTouchIndex] = useState<number | null>(null);
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
   const [measuredWidth, setMeasuredWidth] = useState(FALLBACK_VIEW_W);
-  const containerRef = useRef<HTMLDivElement>(null);
+  // The container is tracked via a callback ref backed by state (not a
+  // plain useRef) so the ResizeObserver effect below re-runs whenever the
+  // *node itself* changes, including the first time it ever mounts. A
+  // plain useRef + a `useEffect(..., [])` keyed once at initial commit
+  // would miss a chart first rendered with `points=[]`: that render shows
+  // the EmptyState instead of this container, so the ref is null when the
+  // effect's only run happens, and it never gets a second chance to attach
+  // once real points arrive and the container mounts later.
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const activeIndex = hoverIndex ?? touchIndex ?? focusIndex;
 
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
+    if (!container || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width;
       if (width && width > 0) setMeasuredWidth(width);
     });
-    ro.observe(el);
+    ro.observe(container);
     return () => ro.disconnect();
-  }, []);
+  }, [container]);
 
   // A tap outside the chart dismisses a sticky touch selection.
   useEffect(() => {
@@ -167,7 +174,7 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
         <span className="text-xs text-muted">menor é melhor</span>
       </figcaption>
 
-      <div ref={containerRef} className="relative w-full" style={{ height }}>
+      <div ref={setContainer} className="relative w-full" style={{ height }}>
         <svg
           ref={svgRef}
           role="img"

@@ -500,6 +500,54 @@ describe('LineChart responsive geometry', () => {
 
     expect(svg).toHaveAttribute('viewBox', '0 0 480 200');
   });
+
+  it('attaches the ResizeObserver once the chart container mounts, even if it first rendered empty', () => {
+    let observedCallback: ResizeObserverCallback | null = null;
+    let observedTarget: Element | null = null;
+    class FakeResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        observedCallback = cb;
+      }
+      observe(target: Element) {
+        observedTarget = target;
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+
+    const { rerender } = render(
+      <LineChart title="Evolução" formatValue={(v) => String(v)} points={[]} height={200} />,
+    );
+    // points=[] renders the EmptyState, not the chart's container div, so
+    // nothing should be observed yet.
+    expect(observedTarget).toBeNull();
+
+    rerender(
+      <LineChart
+        title="Evolução"
+        formatValue={(v) => String(v)}
+        points={[
+          { label: 'A', value: 1 },
+          { label: 'B', value: 2 },
+        ]}
+        height={200}
+      />,
+    );
+
+    // The container mounts for the first time on this rerender (not on the
+    // component's first-ever commit) — the observer must attach now.
+    expect(observedTarget).not.toBeNull();
+
+    const svg = screen.getByRole('img', { name: /Evolução/ });
+    expect(svg).toHaveAttribute('viewBox', '0 0 640 200');
+
+    act(() => {
+      observedCallback?.([{ contentRect: { width: 480 } }] as unknown as ResizeObserverEntry[], {} as unknown as ResizeObserver);
+    });
+
+    expect(svg).toHaveAttribute('viewBox', '0 0 480 200');
+  });
 });
 
 describe('useNow', () => {
