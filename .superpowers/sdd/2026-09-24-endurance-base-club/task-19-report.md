@@ -171,3 +171,104 @@ No other files were touched (verified with `git status --porcelain`).
   substantial sections that would not fit comfortably in the kit's `Modal` at 390px width; this is
   a reasonable reading of "race editor" as a screen, not a dialog, but flagging the choice in case
   reviewers expected a modal.
+
+## Fix round 1
+
+Review came back "Needs fixes" with two Important findings. Both fixed on `task/19`.
+
+### 1. `normalizeRaceConfig` (listed in the brief's Consumes) was never used
+
+`raceToForm` took `race.config` verbatim instead of normalizing it against the race's
+`team_size`, so a partial or legacy config (missing keys added since it was last saved) would
+reach the editor's inputs with `undefined` fields instead of sane defaults.
+
+Fix in `src/features/races/raceForm.ts`: `raceToForm` now builds
+`config: normalizeRaceConfig(race.config, race.team_size)` instead of `config: race.config`, and
+imports `normalizeRaceConfig` alongside the already-imported `defaultRaceConfig`. (`presetToForm`
+needed no change — it already builds a fresh `defaultRaceConfig(preset.team_size)`, nothing to
+normalize.)
+
+New test in `raceForm.test.ts` (`raceToForm` describe block): a race whose config is missing keys
+(simulated with `{ cumulative: true } as unknown as RaceConfig`, since `RaceConfig`'s own type
+doesn't allow a partial object — a real legacy database row can still look like this) produces a
+form whose `config` equals `normalizeRaceConfig(legacyConfig, race.team_size)`, with `rankings`,
+`age_groups`, `divergence_threshold_s` and `time_source` filled in from
+`defaultRaceConfig(team_size)` while the one field the legacy config did carry (`cumulative`)
+survives.
+
+### 2. Verbatim duplicated reorder logic
+
+`LegsEditor.tsx`'s and `RankingsEditor.tsx`'s `move(i, dir)` functions were identical except for
+the array name (`legs` vs `rankings`).
+
+Fix: extracted `moveItem<T>(items: T[], i: number, dir: -1 | 1): T[]` into `raceForm.ts` — swaps
+the item at `i` with its neighbor at `i + dir`, returning a **new** array; out of bounds is a
+no-op that returns the **same** `items` reference unchanged (so a caller can skip calling
+`onChange` when nothing moved, exactly as the original early-return did). Both `LegsEditor.move`
+and `RankingsEditor.move` now call it:
+```ts
+function move(i: number, dir: -1 | 1) {
+  const next = moveItem(legs, i, dir); // or `rankings`
+  if (next !== legs) onChange(next);
+}
+```
+The waves list has no reorder control (only add/remove, per the brief — Largadas order is just
+array order), so there was nothing to change there.
+
+New tests in `raceForm.test.ts` (`moveItem` describe block): no-op at either bound returns the
+same array reference; a valid swap (up and down) returns a new array with the two items swapped,
+and the input array itself is never mutated.
+
+#### TDD evidence for this round
+
+**RED** (stashed the `raceForm.ts` changes, keeping the new tests):
+```
+$ git stash push -- src/features/races/raceForm.ts
+$ npx vitest run src/features/races/raceForm.test.ts
+ Test Files  1 failed (1)
+      Tests  3 failed | 23 passed (26)
+```
+(the normalization test failed on a mismatched `config` object — the old code returned
+`race.config` verbatim; both `moveItem` tests failed with `TypeError: moveItem is not a function`.)
+
+**GREEN** (restored `raceForm.ts`, `git stash pop`):
+```
+$ npx vitest run src/features/races/raceForm.test.ts
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+```
+
+#### Gate outputs for this round
+
+```
+$ npx vitest run src/features/races
+ Test Files  2 passed (2)
+      Tests  36 passed (36)
+```
+```
+$ npx vitest run
+ Test Files  1 failed | 26 passed (27)
+      Tests  1 failed | 323 passed (324)
+```
+The one remaining failure is the same `eventShell.test.tsx > EventLayout > renders the provas
+tab` noted in the first round (asserting the literal Task-17 stub text) — per the coordinator's
+note it is being fixed on Task 17's side, so it was left as is.
+```
+$ npm run typecheck
+> tsc --noEmit -p tsconfig.json
+(clean, no output)
+```
+```
+$ npm run build
+✓ 235 modules transformed.
+✓ built in 952ms
+```
+
+#### Files changed this round
+
+`src/features/races/raceForm.ts`, `src/features/races/raceForm.test.ts`,
+`src/features/races/LegsEditor.tsx`, `src/features/races/RankingsEditor.tsx` — all within this
+task's existing Files block; nothing else touched (`git status --porcelain` confirmed).
+
+Minor findings from the review were deferred, per the coordinator's instruction, and are not
+addressed here.
