@@ -155,3 +155,6 @@ Task 6: implemented 2bfd23f (task/6, base d415c39; SQL 5/5 PASS) — review disp
 Task 5: fix round 1/5 (1 addressed, 0 open — shared create_individual_entry; commits d415c39..d0ae28b) — scoped re-review clean
 Task 5: minor (deferred): create_individual_entry re-reads first wave + legs per athlete inside admin_bulk_create_entries (was hoisted before the loop) — N extra lookups, admin-only
 Task 5: complete (commits b9cb55e..d0ae28b, review clean; feat merged into task/5, SQL 4/4 PASS) — merged into feat/ebc-app as 9769dca
+Task 15: review Approved (d648fac..928844e, no Critical/Important)
+Task 15: minor (deferred): Resumo counts use raw TimingStatus (finished-without-start counted as Concluinte, unlike cls.finishers); crossingSourceLabel 'reference' matches by ts equality, untested; 'duplicada' situação untested; third copy of the pt-BR numeric bib Collator
+Task 15: complete (commits 61ead91..928844e, review clean) — merged into feat/ebc-app as 835235e
