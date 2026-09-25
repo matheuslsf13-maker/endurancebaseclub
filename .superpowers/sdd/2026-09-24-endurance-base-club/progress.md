@@ -120,3 +120,5 @@ Task 10: scoped re-review of fix round 1 dispatched (fb6c7d7..bc8513e, sonnet)
 Task 4: fix round 1/5 dispatched — NEW implementer (sonnet) in /home/user/ebc-wt/t4 (Rulings 12 incl. JSON null, 14, 16 + NULL-bypass minor; optional TOCTOU)
 Task 5: review dispatched (b9cb55e..d415c39, sonnet)
 Task 12: review dispatched (4df3f5f..3741efa, sonnet)
+- Ruling 19: Task 6 starts now from task/5 (d415c39) while T4's fix round and T5's review run (extends Ruling 6); T6 owns only 0005_timing.sql + 40_timing.sql, so later merges of T4/T5 fixes are conflict-free — cost if wrong: a follow-up fix if a T4/T5 fix changes entry_json or a helper T6 calls.
+Task 6: dispatched (worktree /home/user/ebc-wt/t6, branch task/6, base d415c39, sonnet)
