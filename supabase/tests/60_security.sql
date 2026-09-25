@@ -22,10 +22,13 @@ select tests.assert_raises($$select public.internal_create_auth_user('a@b.co','1
 select tests.assert_raises($$select public.bootstrap_owner('a@b.co','12345678','x')$$, '42501');
 select tests.assert_raises($$select public.tk_event('x')$$, '42501');
 select tests.assert_raises($$select public.entry_json(gen_random_uuid(), true)$$, '42501');
+-- resolve_public_event returns the full events row (including tk_token): ungranted, like tk_event.
+select tests.assert_raises($$select public.resolve_public_event('x')$$, '42501');
 do $$ begin assert public.server_time() > 0; assert jsonb_typeof(public.pub_events()) = 'array'; end $$;
 reset role;
 select tests.as_user(tests.get('stranger')::uuid);
 select tests.assert_raises($$select public.admin_list_events()$$, '42501');
 select tests.assert_raises($$select * from public.athletes$$, '42501');
+select tests.assert_raises($$select public.resolve_public_event('x')$$, '42501');
 reset role;
 rollback;

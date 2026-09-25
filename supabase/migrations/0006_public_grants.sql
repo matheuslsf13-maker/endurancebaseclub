@@ -15,12 +15,13 @@ begin
   return ev;
 end $$;
 
--- 2. mark_public_json: the public mark projection (Ruling 4 + Ruling 29) -- strips the
---    clock-audit fields (device_ts, clock_offset_ms, clock_rtt_ms) and, when present, the
---    organizer-only org_edited flag that Task 6's fix round is adding to public.marks. Removing a
---    jsonb key that does not exist is a no-op, so this works whether or not that column exists.
+-- 2. mark_public_json: the public mark projection (Ruling 4) -- strips the clock-audit fields
+--    (device_ts, clock_offset_ms, clock_rtt_ms) and the organizer-only org_edited flag (Ruling 27,
+--    added by Task 6's fix round to public.marks). Declared `stable`, not `immutable`: to_jsonb of
+--    a timestamptz column renders using the session's TimeZone setting, so the result isn't a pure
+--    function of the input row alone.
 create or replace function public.mark_public_json(m public.marks) returns jsonb
-language sql immutable set search_path = public, extensions, pg_temp as $$
+language sql stable set search_path = public, extensions, pg_temp as $$
   select to_jsonb(m) - 'device_ts' - 'clock_offset_ms' - 'clock_rtt_ms' - 'org_edited'
 $$;
 
@@ -36,8 +37,9 @@ $$;
 
 -- 4. pub_event: the full public snapshot for one event (PubEventPayload), shaped like
 --    admin_get_event/tk_open minus tk_token/tk_enabled and every organizer-only field:
---    entries never carry `notes` (Ruling 29), athletes never carry email/phone/birth_date, and
---    marks never carry the clock-audit fields (mark_public_json above).
+--    entries never carry `notes` (Ruling 29), athletes never carry email/phone/birth_date, marks
+--    never carry the clock-audit fields (mark_public_json above), and resolutions never carry
+--    `note` (free text the organizer typed in the Review editor) or `decided_by` (their user id).
 create or replace function public.pub_event(p_slug text) returns jsonb
 language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
 declare ev public.events := public.resolve_public_event(p_slug);
@@ -62,7 +64,11 @@ begin
       select jsonb_agg(distinct jsonb_build_object(
         'id', a.id, 'name', a.name, 'sex', a.sex, 'team_club', a.team_club, 'city', a.city,
         'public_profile', a.public_profile,
-        'age_event', date_part('year', age(ev.date, a.birth_date)),
+        -- explicit ::timestamp casts: `age(date, date)` otherwise resolves to the timestamptz
+        -- overload, which converts each date through the session TimeZone and can be off by a
+        -- day on a Brazilian DST-start date (that midnight doesn't exist, e.g. 2018-11-04 becomes
+        -- 01:00 local -- verified empirically to shift date_part('year', age(...)) by one).
+        'age_event', date_part('year', age(ev.date::timestamp, a.birth_date::timestamp)),
         'age_year_end', extract(year from ev.date) - extract(year from a.birth_date)
       ))
       from public.athletes a
@@ -79,7 +85,7 @@ begin
       from public.marks mk where mk.event_id = ev.id
     ), '[]'::jsonb),
     'resolutions', coalesce((
-      select jsonb_agg(to_jsonb(res)) from public.resolutions res where res.event_id = ev.id
+      select jsonb_agg(to_jsonb(res) - 'note' - 'decided_by') from public.resolutions res where res.event_id = ev.id
     ), '[]'::jsonb),
     'results', coalesce((
       select jsonb_agg(to_jsonb(res)) from public.results res where res.event_id = ev.id
@@ -104,7 +110,7 @@ begin
       where mk.event_id = ev.id and (p_since is null or mk.updated_at >= p_since)
     ), '[]'::jsonb),
     'resolutions', coalesce((
-      select jsonb_agg(to_jsonb(res)) from public.resolutions res where res.event_id = ev.id
+      select jsonb_agg(to_jsonb(res) - 'note' - 'decided_by') from public.resolutions res where res.event_id = ev.id
     ), '[]'::jsonb),
     'waves', coalesce((
       select jsonb_agg(to_jsonb(w) order by r.position, r.name, w.position)
