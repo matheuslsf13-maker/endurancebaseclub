@@ -115,9 +115,9 @@ afterEach(() => {
 });
 
 describe('routes', () => {
-  it('/ shows the public home to visitors', () => {
+  it('/ shows the public home to visitors', async () => {
     renderApp('/', fakeSession());
-    expect(screen.getByTestId('page-public-home')).toBeInTheDocument();
+    expect(await screen.findByTestId('page-public-home')).toBeInTheDocument();
   });
 
   it('/ waits for the session before choosing', () => {
@@ -136,14 +136,14 @@ describe('routes', () => {
     expect(session.signOut).toHaveBeenCalledTimes(1);
   });
 
-  it('/entrar renders the login page', () => {
+  it('/entrar renders the login page', async () => {
     renderApp('/entrar', fakeSession());
-    expect(screen.getByTestId('login-email')).toBeInTheDocument();
+    expect(await screen.findByTestId('login-email')).toBeInTheDocument();
   });
 
-  it('/trocar-senha renders the change-password page', () => {
+  it('/trocar-senha renders the change-password page', async () => {
     renderApp('/trocar-senha', organizer({ me: { ...ME, must_change_password: true } }));
-    expect(screen.getByTestId('newpass-1')).toBeInTheDocument();
+    expect(await screen.findByTestId('newpass-1')).toBeInTheDocument();
   });
 
   it('admin routes send visitors to /entrar, remembering where they were going', async () => {
@@ -162,23 +162,23 @@ describe('routes', () => {
   it.each([
     ['/eventos', 'events'], ['/atletas', 'athletes'], ['/atletas/a1', 'athlete-profile'],
     ['/ajuda', 'help'], ['/config', 'settings'],
-  ])('%s renders the %s page for organizers, inside the layout', (path, page) => {
+  ])('%s renders the %s page for organizers, inside the layout', async (path, page) => {
     renderApp(path, organizer());
-    expect(screen.getByTestId(`page-${page}`)).toBeInTheDocument();
+    expect(await screen.findByTestId(`page-${page}`)).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Principal' })).toBeInTheDocument();
   });
 
   it.each([
     ['/c/tok123', 'timekeeper'], ['/p/copa-ebc', 'public-event'], ['/atleta/a1', 'public-athlete'],
-  ])('%s renders the %s page without a session', (path, page) => {
+  ])('%s renders the %s page without a session', async (path, page) => {
     renderApp(path, fakeSession());
-    expect(screen.getByTestId(`page-${page}`)).toBeInTheDocument();
+    expect(await screen.findByTestId(`page-${page}`)).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'Principal' })).not.toBeInTheDocument();
   });
 
-  it('unknown paths render NotFound', () => {
+  it('unknown paths render NotFound', async () => {
     renderApp('/nada/aqui', fakeSession());
-    expect(screen.getByText('Página não encontrada')).toBeInTheDocument();
+    expect(await screen.findByText('Página não encontrada')).toBeInTheDocument();
   });
 });
 
