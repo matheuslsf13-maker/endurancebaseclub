@@ -172,3 +172,72 @@ dist/assets/index-lXL85mkY.js   623.05 kB │ gzip: 181.45 kB
 ```
 feat(review): pending issues and official time decisions
 ```
+
+## Fix round 1
+
+**Finding addressed (Important):** reopening a crossing whose resolution is `mode:'mark'`
+pointing at a mark that has since been discarded showed no decision radio checked and, if
+saved untouched, silently resent the same broken resolution.
+
+**Root cause:** `computeCrossing` excludes a discarded mark from `crossing.candidates` (that's
+what raises the `chosen_mark_discarded` issue and falls the official time back to the system
+time), but `CrossingEditor` seeded its `mode`/`markId` state straight from `resolution` without
+checking whether that mark was still among the candidates the radios are rendered from.
+
+**Fix (`CrossingEditor.tsx`):**
+- Added `markMissing`: true when `resolution.mode === 'mark'` and its `mark_id` is not among
+  `crossing.candidates` (covers both "discarded" and, as a side benefit, "lost to a duplicate").
+- `mode`/`markId` now initialize to `'system'`/`null` when `markMissing` is true, instead of
+  blindly copying the stale resolution — matching what `official_ms`/`official_source` already
+  fell back to.
+- Added a visible warning, "A marcação escolhida foi descartada — escolha outra decisão.",
+  rendered inside the Decisão fieldset whenever `markMissing` is true.
+- No change was needed for "the discarded mark still appears in the candidates table with its
+  badge and a Restaurar action" — `legMarks` was already built from all of the entry/leg's
+  marks (not just `crossing.candidates`), so a discarded mark already showed its "Descartada"
+  badge and a "Restaurar" button; this was verified by the new test, not newly added.
+- `save()` needed no change: with `mode` now correctly seeded to `'system'`, saving without
+  touching anything calls `setResolution(entryId, legIndex, 'system', null, null, note)`, which
+  is what the finding asked for.
+- Gave `resolution-manual-input` its own `aria-label="Hora manual"` (previously it had no
+  accessible name of its own, only the radio next to it did).
+
+**Test added** (`review.test.tsx`, `ReviewTab: resolving a divergence` describe block):
+- `recovers when the chosen mark has since been discarded: warns, pre-selects system, saves
+  system` — builds a resolution pointing at a mark that is `discarded: true`, opens the editor
+  via "Resolver", asserts the warning text and `resolution-system` checked, asserts the
+  discarded mark still shows its "Descartada" badge and a "Restaurar" button and that no
+  `resolution-mark-<id>` radio exists for it, then clicks `resolution-save` and asserts
+  `setResolution('en1', 0, 'system', null, null, '')`.
+- `gives the manual time input its own accessible name` — asserts `getByLabelText('Hora
+  manual')` resolves to the same element as `resolution-manual-input`.
+
+**Gates:**
+```
+$ npx vitest run src/features/review
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+```
+```
+$ npx vitest run
+ Test Files  1 failed | 25 passed (26)
+      Tests  1 failed | 301 passed (302)
+```
+(The one failure is the same pre-existing, out-of-scope `eventShell.test.tsx` stub-text case
+noted above — unrelated to this fix, per the coordinator's instruction to ignore it.)
+```
+$ npm run typecheck
+> tsc --noEmit -p tsconfig.json
+(clean, no output)
+```
+```
+$ npm run build
+✓ 233 modules transformed.
+✓ built in 1.00s
+```
+No console noise in the focused run (grepped for warn/error/act(/unhandled — no matches).
+
+**Files touched:** `src/features/review/CrossingEditor.tsx`, `src/features/review/review.test.tsx`
+only — no widening beyond the flagged component.
+
+**Commit:** `fix(review): explain and reset a resolution whose mark was discarded`

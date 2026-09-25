@@ -213,3 +213,35 @@ Task 7: minor (deferred): pub_athlete sorts by snapshot date instead of joined e
 - Note for T29: Ruling 35's role-global default-privilege revoke applies to the role that runs apply_migration in production — verify after deploy with has_function_privilege checks as part of the SQL tests run in production.
 Task 19: fix round 1 applied (commits 12747ed..efd40e8; 36 focused tests) — scoped re-review dispatched
 Task 19: fix round 1/5 (2 addressed, 0 open — normalizeRaceConfig, moveItem helper; commits 12747ed..efd40e8) — scoped re-review clean → ready to merge after task/17 lands in feat (merge feat into task/19, full suite, then merge)
+Task 17: fix round 1/5 (5 addressed, 0 open — resilient session restore, .env.test, fresh timekeepers, RPC timeouts via AbortController+setTimeout, marker shell tests; commits 3cd4f76..a647630) — scoped re-review clean (opus)
+Task 17: minor (deferred): offline "Sair" with expired token is undone by TOKEN_REFRESHED when the network returns (dropSession ignores signOut error; remove ebc.auth or skip restore after explicit sign-out); restore running during a 42501 sign-in can apply(ANON) over FORBIDDEN (session.tsx:131); signed-in RPC timeout not a hard deadline while a token refresh hangs; persistent non-auth restore failure spins forever without a hint; timed-out writes may have committed (retry → duplicate); contracts.md ApiError lacks the new optional status field
+Task 17: complete (commits 7e293bd..a647630, review clean) — merged into feat/ebc-app as e699be5
+Task 19: complete (commits bae2379..efd40e8, review clean; feat merged into task/19: 343 tests green) — merged into feat/ebc-app as 4703006
+Task 25: review Approved (sonnet)
+Task 25: minor (deferred): entryLabel vs MemberNames duplicate member/leg formatting (' / ' vs ' · '); printed page repeats race name + badge; redundant null re-checks in finalize handlers
+Task 25: complete (commits bae2379..884253b, review clean; feat merged into task/25:       Tests  357 passed (357)) — merged into feat/ebc-app as 4af9aab
+Task 24: fix round 1 applied (commits 8c884af..c6c89d3; 14 focused tests) — scoped re-review dispatched
+Task 20: review Needs fixes (sonnet) — Important: AthleteForm nested submit bubbles to an outer form (reuse contract for T21); todayIsoBrasilia duplicated — fix round 1/5 dispatched (resume implementer; + sexLabel reuse)
+Task 20: minor (deferred): ageToday duplicates athleteAge fallback; table shows raw M/F; no .xlsx-path import test
+Task 27: dispatched (worktree /home/user/ebc-wt/t27 from feat/ebc-app, sonnet; Rulings 26 prompt-mode update, 30 lazy routes in App.tsx; grants: App.tsx, new src/components/UpdatePrompt.tsx, vercel.json headers for sw.js)
+Task 8: implemented fc400e9 (task/8, base 2427895; integration 16/16 incl. 11 flow; SQL 7/7) — review dispatched
+Task 7: fix round 1 applied (commits 2427895..a466ec2; SQL 7/7, shim 5/5) — scoped re-review dispatched
+INTERRUPTION 2026-09-25 ~15:55 UTC: account session limit (HTTP 429, reset 16:20 UTC) stopped every running agent; container and worktrees survived, local Postgres restarted. State recovered from git: T18 fix committed (c5e16d8, re-review lost); T20 fix uncommitted in t20; T22 implementation uncommitted in t22 (was at final gates); T23 review came back before the cut (Needs fixes: errorMessage duplicated in 4 files); T24 re-review clean; T27 not started; T7 re-review and T8 review lost. Resuming with lower concurrency (≤ 6 agents).
+Task 24: fix round 1/5 (2 addressed, 0 open; commits 8c884af..c6c89d3) — scoped re-review clean
+Task 24: complete (commits bae2379..c6c89d3, review clean; feat merged into task/24:       Tests  371 passed (371)) — merged into feat/ebc-app as df991c9
+Task 23: review Needs fixes (sonnet) — Important: identical errorMessage helper in LiveBoard/TimekeepersPanel/TimingTab/WavesPanel — fix round 1/5 (resume implementer)
+Task 23: minor (deferred): re-starting an already started wave uses the same confirm copy (no "já largou às…" warning); per-row "Ativo" checkbox names not distinct; no empty state when nobody is on course
+Task 18: fix round 1 applied (commits 3c55071..c5e16d8) — scoped re-review dispatched
+Resumed after interruption: T22 (resume), T20 fix (resume), T23 fix round 1 (resume), T7 re-review (retry), T18 re-review, T8 review (retry); T27 on hold until a slot frees
+Task 7: fix round 1/5 (4 addressed, 0 open — resolution note/decided_by private, timestamp age + discriminating test, mark_public_json stable + org_edited assert, resolve_public_event not executable; commits 2427895..a466ec2) — scoped re-review clean
+Task 7: complete (commits 2bfd23f..a466ec2, review clean; feat merged into task/7, SQL 7/7, shim 5/5) — merged into feat/ebc-app as 18dcd94
+Task 18: fix round 1/5 (2 addressed, 0 open — eventHelpers.ts shared helpers, Ruling 40 dirty guard; commits 3c55071..c5e16d8) — scoped re-review clean
+Task 18: complete (commits bae2379..c5e16d8, review clean; feat merged into task/18: 396 tests green) — merged into feat/ebc-app as 943c7b5
+Task 23: fix round 1 applied (merge 51a34e6 + 03af4bf timingHelpers.ts; 393 tests green) — scoped re-review dispatched
+Task 20: fix round 1 applied (merge e95faf2 + 626ad10; 382 tests green) — scoped re-review dispatched
+Task 8: review Approved (sonnet)
+- Ruling 43: pub_event keeps returning discarded marks too (brief/T7 text: "all, including discarded so clients can drop them") over spec §6's "não descartadas" — live deltas must be able to carry a discard so public clients remove a mark they already hold; payload already strips audit fields — cost if wrong: a few extra rows in the public payload.
+Task 8: minor (deferred): timekeeper named "Ana" collides with athlete "Ana" in the flow (brief-mandated names)
+Task 8: complete (commits 2427895..fc400e9, review clean; feat merged into task/8, integration green) — merged into feat/ebc-app as 8c46b43
+Task 23: fix round 1/5 (1 addressed, 0 open — timingHelpers.ts; commits 51a34e6..03af4bf) — scoped re-review clean
+Task 23: complete (commits bae2379..03af4bf, review clean; feat merged into task/23:       Tests  418 passed (418)) — merged into feat/ebc-app as 812d13f

@@ -34,8 +34,9 @@ end $$;
 insert into public.entries (event_id, race_id, bib) values ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000a1', '10');
 select tests.assert_raises($$insert into public.entries (event_id, race_id, bib) values ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000a1', '10')$$, '23505');
 select tests.assert_raises($$insert into public.marks (id, event_id, ts, entry_id) select gen_random_uuid(), '00000000-0000-0000-0000-0000000000e1', now(), id from public.entries limit 1$$, '23514');
--- RLS denies direct reads for anon (grants are revoked later in 0006; here RLS alone returns no rows)
+-- Direct reads for anon are refused outright: 0006 revokes all table grants from anon/authenticated
+-- (RLS alone, with no policies, would otherwise just return no rows instead of erroring).
 select tests.as_anon();
-do $$ begin assert (select count(*) from public.events) = 0; end $$;
+select tests.assert_raises($$select count(*) from public.events$$, '42501');
 reset role;
 rollback;
