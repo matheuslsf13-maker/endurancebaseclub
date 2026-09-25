@@ -226,13 +226,16 @@ function entryIssues(
  * The marks that disagree with a divergent crossing (with exactly 2 candidates both do) and,
  * when one of them sits within the same-crossing window of another leg's median, that leg as
  * the suggested destination. The outlier behind the suggestion is listed first because the
- * Review tab moves `mark_ids[0]`.
+ * Review tab moves `mark_ids[0]`. When no candidate is beyond the threshold from the median
+ * (e.g. 0 s, 2 s, 4 s), the one farthest from it stands in, so the issue always names a mark
+ * (Ruling 11).
  */
 function divergenceRefs(c: Crossing, legs: LegTiming[], config: RaceConfig): Pick<Issue, 'mark_ids' | 'suggested_leg_index'> {
   const thresholdMs = config.divergence_threshold_s * 1000;
   const windowMs = config.same_crossing_window_s * 1000;
   const med = c.median_ms ?? 0;
-  const outliers = c.candidates.length === 2 ? c.candidates : c.candidates.filter(x => Math.abs(x.ts_ms - med) > thresholdMs);
+  const beyond = c.candidates.length === 2 ? c.candidates : c.candidates.filter(x => Math.abs(x.ts_ms - med) > thresholdMs);
+  const outliers = beyond.length > 0 ? beyond : [farthestFrom(c.candidates, med)];
 
   const move = findSuggestedMove(outliers, c.leg_index, legs, windowMs);
   const ids = outliers.map(o => o.mark_id);
@@ -250,6 +253,13 @@ function findSuggestedMove(outliers: Candidate[], legIndex: number, legs: LegTim
     }
   }
   return null;
+}
+
+/** The candidate farthest from `ms`; ties go to the earliest in `candidates` order. Needs ≥ 1 candidate. */
+function farthestFrom(candidates: Candidate[], ms: number): Candidate {
+  let far = candidates[0];
+  for (const x of candidates) if (Math.abs(x.ts_ms - ms) > Math.abs(far.ts_ms - ms)) far = x;
+  return far;
 }
 
 function lastLegWithCrossing(legs: LegTiming[]): number {

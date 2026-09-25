@@ -6,10 +6,14 @@ import { legAthleteId } from './eventModel';
 export interface LegSuggestion { leg_index: number; athlete_id: string | null; reason: 'same_crossing' | 'next'; warning: 'already_finished' | null }
 
 /**
- * Suggests which leg a new mark at `tsMs` ends for `entry` (spec §7.5): the leg of a crossing
- * already marked within the same-crossing window (another timekeeper confirming it), otherwise
- * the first leg after the last crossing that is clearly behind. Only the selected athlete's legs
- * are candidates when `athleteId` is a member with legs; otherwise every leg is.
+ * Suggests which leg a new mark at `tsMs` ends for `entry` (spec §7.5, Ruling 10):
+ * 1. same crossing — among ALL the entry's legs, the one whose crossing median (marks already
+ *    known) is closest to `tsMs` within the same-crossing window: another timekeeper confirming
+ *    it. `athleteId` is ignored here on purpose: at a relay handoff the on-course list already
+ *    shows the next athlete as current, so a confirming tap may name the wrong member;
+ * 2. otherwise the next leg — the first of the selected athlete's legs (every leg when
+ *    `athleteId` is not a member with legs) after the last crossing clearly behind `tsMs`
+ *    (taken over all legs); when none is left, the last of them with `already_finished`.
  */
 export function suggestLeg(args: { entry: EntryRow; race: RaceRow; marks: MarkRow[]; tsMs: number; athleteId?: string | null }): LegSuggestion {
   const { entry, race, tsMs, athleteId } = args;
@@ -29,16 +33,12 @@ export function suggestLeg(args: { entry: EntryRow; race: RaceRow; marks: MarkRo
     if (at !== null) crossingAt.set(k, at);
   }
 
-  const memberLegs = athleteId ? (entry.members.find(m => m.athlete_id === athleteId)?.legs ?? []) : [];
-  const candidateLegs = memberLegs.length > 0 ? [...memberLegs].sort((a, b) => a - b) : allLegs;
   const suggest = (leg: number, reason: LegSuggestion['reason'], warning: LegSuggestion['warning'] = null): LegSuggestion =>
     ({ leg_index: leg, athlete_id: legAthleteId(entry, leg), reason, warning });
 
   let closest: number | null = null;
   let closestGap = Infinity;
-  for (const k of candidateLegs) {
-    const at = crossingAt.get(k);
-    if (at === undefined) continue;
+  for (const [k, at] of crossingAt) {
     const gap = Math.abs(tsMs - at);
     if (gap <= windowMs && gap < closestGap) {
       closest = k;
@@ -47,6 +47,8 @@ export function suggestLeg(args: { entry: EntryRow; race: RaceRow; marks: MarkRo
   }
   if (closest !== null) return suggest(closest, 'same_crossing');
 
+  const memberLegs = athleteId ? (entry.members.find(m => m.athlete_id === athleteId)?.legs ?? []) : [];
+  const candidateLegs = memberLegs.length > 0 ? [...memberLegs].sort((a, b) => a - b) : allLegs;
   let last = -1;
   for (const [k, at] of crossingAt) if (at < tsMs - windowMs && k > last) last = k;
   const next = candidateLegs.find(k => k > last);
@@ -77,7 +79,7 @@ export function planBibAssignment(args: {
   const others = args.markId === null ? args.marks : args.marks.filter(m => m.id !== args.markId);
   const suggestion = suggestLeg({ entry, race, marks: others, tsMs: args.tsMs, athleteId: args.athleteId });
   const finishedWarning = suggestion.warning === 'already_finished'
-    ? `Nº ${entry.bib} já concluiu — registrada como fim da ${race.legs[suggestion.leg_index].label} (${suggestion.leg_index + 1}/${race.legs.length})`
+    ? `Nº ${entry.bib} já concluiu — registrada como fim da perna ${suggestion.leg_index + 1}/${race.legs.length} (${race.legs[suggestion.leg_index].label})`
     : null;
   return { entry, race, suggestion, warning: resolved.warning ?? finishedWarning };
 }
