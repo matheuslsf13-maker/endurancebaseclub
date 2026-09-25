@@ -63,6 +63,13 @@ describe('suggestLeg edge cases', () => {
     expect(suggestLeg({ entry: e, race: duo, marks, tsMs: T0 + 40 * MIN, athleteId: 'a2' })).toMatchObject({ leg_index: 1, athlete_id: 'a1', warning: null });
     expect(suggestLeg({ entry: e, race: duo, marks, tsMs: T0 + 40 * MIN, athleteId: 'zz' })).toMatchObject({ leg_index: 1, athlete_id: 'a1', warning: null });
   });
+  it('confirming a relay handoff finds the finished leg even with the next athlete selected', () => {
+    // The on-course list already shows a2 as current, so the second timekeeper taps a2 for a1's handoff.
+    const duo = makeRace({ team_size: 2 });
+    const e = makeEntry({ team_name: 'Tubarões', members: [{ athlete_id: 'a1', position: 0, legs: [0] }, { athlete_id: 'a2', position: 1, legs: [1] }] });
+    const marks = [makeMark({ at: T0 + 10 * MIN, leg_index: 0, timekeeper_id: 'tk1' })];
+    expect(suggestLeg({ entry: e, race: duo, marks, tsMs: T0 + 10 * MIN + 5 * SEC, athleteId: 'a2' })).toMatchObject({ leg_index: 0, reason: 'same_crossing', athlete_id: 'a1' });
+  });
 });
 
 describe('planBibAssignment', () => {
@@ -98,7 +105,7 @@ describe('planBibAssignment', () => {
     const marks = [makeMark({ at: T0 + 10 * MIN, leg_index: 0 }), makeMark({ at: T0 + 30 * MIN, leg_index: 1 })];
     const args = { racesById, marks, markId: null, tsMs: T0 + 60 * MIN, bibText: '101' };
     expect(planBibAssignment({ ...args, entries: [soloEntry] }))
-      .toMatchObject({ suggestion: { leg_index: 1, warning: 'already_finished' }, warning: 'Nº 101 já concluiu — registrada como fim da Corrida (2/2)' });
+      .toMatchObject({ suggestion: { leg_index: 1, warning: 'already_finished' }, warning: 'Nº 101 já concluiu — registrada como fim da perna 2/2 (Corrida)' });
     expect(planBibAssignment({ ...args, entries: [makeEntry({ status: 'dns' })] }))
       .toMatchObject({ suggestion: { leg_index: 1, warning: 'already_finished' }, warning: 'Nº 101 está marcado como DNS' });
   });

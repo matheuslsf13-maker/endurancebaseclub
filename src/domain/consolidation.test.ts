@@ -211,6 +211,14 @@ describe('computeEventTiming issue details', () => {
     const div = computeEventTiming({ ...base, marks: [swim, wrong, finish] }, now).issues.find(i => i.type === 'divergence')!;
     expect(div).toMatchObject({ entry_id: 'en1', race_id: 'r1', leg_index: 0, suggested_leg_index: 1, mark_ids: [wrong.id, swim.id] });
   });
+  it('a divergence with no mark beyond the threshold still names the mark farthest from the median', () => {
+    // 0 s, 2 s, 4 s: spread 4 s > 3 s, yet each mark is ≤ 2 s from the 2 s median; the 0 s / 4 s tie goes to the earlier candidate.
+    const first = makeMark({ at: L0, timekeeper_id: 'tk1' });
+    const marks = [makeMark({ at: L0 + 4 * SEC, timekeeper_id: 'tk3' }), makeMark({ at: L0 + 2 * SEC, timekeeper_id: 'tk2' }), first];
+    const div = computeEventTiming({ ...base, marks }, now).issues.find(i => i.type === 'divergence')!;
+    expect(div.mark_ids).toEqual([first.id]);
+    expect(div.suggested_leg_index).toBeUndefined();
+  });
   it('reports duplicates once per timekeeper', () => {
     const ana2 = makeMark({ at: L0 + 200, timekeeper_id: 'tk1' });
     const bia2 = makeMark({ at: L0 + 300, timekeeper_id: 'tk2' });
