@@ -1,12 +1,9 @@
 import { useState } from 'react';
 import { Badge, Card, Checkbox, EmptyState, Table } from '../../components/ui';
 import { useToast } from '../../components/ui/Toast';
-import { api, ApiError } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useEventContext } from '../events/EventContext';
-
-function errorMessage(e: unknown): string {
-  return e instanceof ApiError ? e.message : 'Erro inesperado';
-}
+import { errorMessage } from './timingHelpers';
 
 /** "há 12 s" / "há 3 min" / "há 2 h" / "há 5 d"; "nunca" when the timekeeper never synced. */
 function relativeAgo(atIso: string | null | undefined, nowMs: number): string {

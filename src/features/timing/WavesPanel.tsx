@@ -4,13 +4,10 @@ import { Button, Card, Table } from '../../components/ui';
 import { useConfirm } from '../../components/ui/Confirm';
 import { useToast } from '../../components/ui/Toast';
 import { formatClock, parseClockInput } from '../../lib/format';
-import { api, ApiError } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useEventContext } from '../events/EventContext';
 import type { WaveRow } from '../../lib/types';
-
-function errorMessage(e: unknown): string {
-  return e instanceof ApiError ? e.message : 'Erro inesperado';
-}
+import { errorMessage } from './timingHelpers';
 
 interface WaveRowItemProps {
   raceName: string;

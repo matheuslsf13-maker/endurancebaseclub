@@ -4,21 +4,18 @@ import { Link } from 'react-router';
 import { Badge, Button, Card, EmptyState, Table } from '../../components/ui';
 import { useToast } from '../../components/ui/Toast';
 import { formatClock, formatDuration } from '../../lib/format';
-import { api, ApiError } from '../../lib/api';
+import { api } from '../../lib/api';
 import { entryDisplayName, legAthleteId } from '../../domain/eventModel';
 import type { EventIndex } from '../../domain/eventModel';
 import { planBibAssignment } from '../../domain/suggestLeg';
 import { useEventContext } from '../events/EventContext';
 import { useNow } from '../../hooks/useNow';
 import type { EntryRow, MarkRow, RaceRow } from '../../lib/types';
+import { errorMessage } from './timingHelpers';
 
 const RECENT_MARKS_LIMIT = 30;
 /** Live per-leg timers refresh twice a second (spec §7.6 "cronômetro da perna"). */
 const LEG_TIMER_TICK_MS = 500;
-
-function errorMessage(e: unknown): string {
-  return e instanceof ApiError ? e.message : 'Erro inesperado';
-}
 
 /** Author label for a mark's feed row: "Organização" for an organizer mark, the timekeeper's
  * name when known, or "Cronometrista" for an id no longer in the loaded roster (Ruling 33). */

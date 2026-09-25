@@ -3,15 +3,12 @@ import { Button, Card, Checkbox, Input } from '../../components/ui';
 import { useConfirm } from '../../components/ui/Confirm';
 import { useToast } from '../../components/ui/Toast';
 import { QrCode } from '../../components/QrCode';
-import { api, ApiError } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useEventContext } from '../events/EventContext';
 import { TimekeepersPanel } from './TimekeepersPanel';
 import { WavesPanel } from './WavesPanel';
 import { LiveBoard } from './LiveBoard';
-
-function errorMessage(e: unknown): string {
-  return e instanceof ApiError ? e.message : 'Erro inesperado';
-}
+import { errorMessage } from './timingHelpers';
 
 /**
  * The timekeeper link (spec §7.1): the master copies it or shows the QR code, toggles whether
