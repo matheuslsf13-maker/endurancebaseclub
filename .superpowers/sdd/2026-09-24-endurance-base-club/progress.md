@@ -226,3 +226,8 @@ Task 20: minor (deferred): ageToday duplicates athleteAge fallback; table shows 
 Task 27: dispatched (worktree /home/user/ebc-wt/t27 from feat/ebc-app, sonnet; Rulings 26 prompt-mode update, 30 lazy routes in App.tsx; grants: App.tsx, new src/components/UpdatePrompt.tsx, vercel.json headers for sw.js)
 Task 8: implemented fc400e9 (task/8, base 2427895; integration 16/16 incl. 11 flow; SQL 7/7) — review dispatched
 Task 7: fix round 1 applied (commits 2427895..a466ec2; SQL 7/7, shim 5/5) — scoped re-review dispatched
+INTERRUPTION 2026-09-25 ~15:55 UTC: account session limit (HTTP 429, reset 16:20 UTC) stopped every running agent; container and worktrees survived, local Postgres restarted. State recovered from git: T18 fix committed (c5e16d8, re-review lost); T20 fix uncommitted in t20; T22 implementation uncommitted in t22 (was at final gates); T23 review came back before the cut (Needs fixes: errorMessage duplicated in 4 files); T24 re-review clean; T27 not started; T7 re-review and T8 review lost. Resuming with lower concurrency (≤ 6 agents).
+Task 24: fix round 1/5 (2 addressed, 0 open; commits 8c884af..c6c89d3) — scoped re-review clean
+Task 24: complete (commits bae2379..c6c89d3, review clean; feat merged into task/24:       Tests  371 passed (371)) — merged into feat/ebc-app as df991c9
+Task 23: review Needs fixes (sonnet) — Important: identical errorMessage helper in LiveBoard/TimekeepersPanel/TimingTab/WavesPanel — fix round 1/5 (resume implementer)
+Task 23: minor (deferred): re-starting an already started wave uses the same confirm copy (no "já largou às…" warning); per-row "Ativo" checkbox names not distinct; no empty state when nobody is on course
