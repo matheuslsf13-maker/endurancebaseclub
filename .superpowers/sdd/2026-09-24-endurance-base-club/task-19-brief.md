@@ -1,0 +1,19 @@
+## Task 19: Races tab — race editor (legs, waves, categories, podium, timing rules)
+
+**Files:**
+- Modify: `src/features/races/RacesTab.tsx`
+- Create: `src/features/races/RaceEditor.tsx`, `src/features/races/LegsEditor.tsx`, `src/features/races/AgeGroupsEditor.tsx`, `src/features/races/RankingsEditor.tsx`, `src/features/races/raceForm.ts`, `src/features/races/raceForm.test.ts`, `src/features/races/races.test.tsx`
+
+**Interfaces:**
+- Consumes: `useEventContext`, `api.admin.saveRace/deleteRace`, `RACE_PRESETS`, `defaultRaceConfig`, `normalizeRaceConfig`, `generateAgeGroups`, `validateAgeGroups`, `MODALITY_LABEL`.
+- Produces: `raceForm.ts` pure helpers: `raceToForm(race: RaceRow, waves: WaveRow[]): RaceForm`, `presetToForm(preset: RacePreset, eventId: string): RaceForm`, `validateRaceForm(f: RaceForm): string[]`, `formToPayload(f: RaceForm)` (matching `api.admin.saveRace`), where `RaceForm = { id?: string; event_id: string; name: string; position: number; team_size: number; legs: { modality: Modality; label: string; distance: string; unit: 'm'|'km' }[]; waves: { id?: string; name: string; position: number; start_at: string | null }[]; config: RaceConfig }` (distance typed as text so users can type `2,5`; `formToPayload` converts to meters: `km` → ×1000, comma decimal accepted; `other` legs may have empty distance → `null`).
+
+Behavior:
+- `RacesTab`: list of races (name, team size label "Individual/Dupla/Trio/Equipe de N", legs summary "Natação 750 m → Corrida 5 km", inscrições count, finalizada badge); "Nova prova" (`new-race`) → preset picker (`race-preset`, a `Select` of `RACE_PRESETS` names) → editor prefilled; edit/delete (confirm; server errors shown via toast).
+- `RaceEditor` sections: **Dados** (name `race-name`, team size `race-team-size` select 1..6 with labels; changing team size resets config defaults for rankings/age groups only if the user confirms); **Pernas** (`LegsEditor`: ordered rows with modality select, label, distance + unit, move up/down, remove, add `leg-add`; at least one leg); **Largadas** (list of waves with name, add `wave-add`, remove; start time is set in Cronometragem, show it read-only); **Categorias** (age rule radio: "Idade em 31/12 do ano da prova" / "Idade na data da prova"; team age rule for teams: Soma/Mais velho/Mais novo; `AgeGroupsEditor` with rows label/min/max, generator "de X em X anos a partir de Y até Z" using `generateAgeGroups`, validation messages from `validateAgeGroups`); **Pódio** (`RankingsEditor`: rows with name, dimension checkboxes Sexo/Faixa etária/Nível (Nível disabled when the event has no levels), size 1..10, move up/down, remove, add; checkbox "Premiação cumulativa" with help text explaining non-cumulative); **Cronometragem** (same-crossing window seconds, divergence threshold seconds, time source radio "Mediana (recomendado)" / "Cronometrista de referência" + select from `agg.timekeepers`). Save `race-save` → `formToPayload` → `api.admin.saveRace` → `refresh()` → toast "Prova salva". Show server validation errors inline in a banner.
+
+- [ ] **Step 1: Failing tests.** `raceForm.test.ts`: `presetToForm(triathlon-sprint)` → legs `[{swim,'750','m'},{bike,'20','km'},{run,'5','km'}]` (display km when divisible by 1000 and ≥ 1000); `formToPayload` converts `'2,5' km` → 2500 m and `other` empty → null; `validateRaceForm` reports `Informe o nome da prova`, `Adicione pelo menos uma perna`, `Distância inválida na perna 2`, age group overlap messages, and `O pódio "X" precisa de tamanho entre 1 e 10`. `races.test.tsx` (mock api): creating from the "Revezamento em dupla" preset and saving calls `saveRace` with `team_size 2`, two legs and default team config; moving a leg up reorders legs in the payload.
+- [ ] **Step 2:** FAIL. **Step 3:** implement. **Step 4:** PASS + typecheck. **Step 5: Commit** (`feat(races): race editor with legs, waves, categories and podium rules`).
+
+---
+
