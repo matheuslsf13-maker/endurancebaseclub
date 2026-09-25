@@ -19,6 +19,13 @@ beforeAll(async () => {
     create function public.shim_fail() returns void language plpgsql as
       $$ begin raise exception 'Falhou' using errcode = 'P0001'; end $$;
     create function public.shim_bigint() returns bigint language sql as $$ select 1790000000000::bigint $$;
+    -- 0006's grants (revoke execute on all functions, plus the role-global default-privileges
+    -- revoke from public per Ruling 35) mean a function created here, after the migrations have
+    -- already run, is no longer PUBLIC-executable by default. These probe functions exist only to
+    -- exercise the shim's own RPC/error/bigint plumbing, not the app's grant model, so grant them
+    -- explicitly (and only them) rather than weakening 0006 or dev/db/bootstrap.sql.
+    grant execute on function public.shim_echo(jsonb, int), public.shim_fail(), public.shim_bigint()
+      to anon, authenticated;
     insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
     values ('00000000-0000-0000-0000-000000000000', '11111111-1111-1111-1111-111111111111', 'authenticated', 'authenticated',
             'tester@ebc.test', extensions.crypt('senha-123', extensions.gen_salt('bf')), now(), '{}', '{}', now(), now());
