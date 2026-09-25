@@ -1,5 +1,18 @@
 -- Timing RPCs: organizer live tools (admin_live, marks, resolutions, timekeepers, finalize) and
 -- the timekeeper link (tk_*) (spec §6 "Cronometrista"/"Organização", §7 "Cronometragem").
+--
+-- Fix round 1 (task review, controller rulings 27-29) changed tk_sync and admin_update_mark from
+-- the task brief's literal text -- see the comments at those two functions below:
+--   - Ruling 27: marks.org_edited pins a mark's placement once the organizer has moved it, so a
+--     stale/replayed timekeeper request can never silently revert an organizer edit.
+--   - Ruling 28: tk_sync is replay-safe (insert ... on conflict do nothing, falling through to the
+--     update path) and never lets an optional hint/audit field (device_ts, clock_offset_ms,
+--     clock_rtt_ms, athlete_id) reject a mark; only P0001 validation errors become a rejection --
+--     any other error leaves the mark out of both accepted/rejected so the device retries it.
+--   - Ruling 29: tk_open hides the organizer-only `notes` field from entries.
+
+-- 0. marks.org_edited: true once admin_update_mark has changed a mark's entry_id/leg_index.
+alter table public.marks add column org_edited boolean not null default false;
 
 -- 1. tk_event: resolves the event behind a p_token, or raises if the link is wrong/disabled.
 --    Used by every tk_* endpoint below (anon + authenticated; no assert_organizer here).
@@ -30,7 +43,7 @@ begin
       where r.event_id = ev.id
     ), '[]'::jsonb),
     'entries', coalesce((
-      select jsonb_agg(public.entry_json(en.id, true)
+      select jsonb_agg(public.entry_json(en.id, true) - 'notes'
                         order by case when en.bib ~ '^\d+$' then lpad(en.bib, 20, '0') else en.bib end)
       from public.entries en where en.event_id = ev.id
     ), '[]'::jsonb),
@@ -61,13 +74,24 @@ begin
   return jsonb_build_object('timekeeper_id', v_id, 'secret', v_secret);
 end $$;
 
--- 4. tk_sync: the sync loop endpoint. Implemented exactly as specified (see task brief) --
---    per-mark failures are caught individually so one bad row never blocks the batch.
+-- 4. tk_sync: the sync loop endpoint. Per-mark failures are caught individually so one bad row
+--    never blocks the batch. Ruling 27: once the organizer has moved a mark (org_edited), any
+--    replayed request that would change its placement/athlete/discard state away from what the
+--    organizer set is rejected instead of silently reverting it; an identical (idempotent) resend
+--    still goes through. Ruling 28: (a) a new mark is inserted with `on conflict (id) do nothing`
+--    and, if that loses a race against a concurrent insert of the same id, falls through to the
+--    existing-row path below instead of erroring; (b) optional hint/audit fields never reject a
+--    mark -- a bad device_ts/clock_offset_ms/clock_rtt_ms becomes null, an unknown/non-member
+--    athlete_id becomes null, only `ts` stays strictly validated; (c) only a P0001 validation
+--    error becomes a rejection (pt-BR reason = sqlerrm) -- any other error (e.g. a genuinely
+--    unexpected race or malformed input) leaves the mark out of both accepted and rejected, so the
+--    device keeps it pending and retries it next cycle instead of showing a raw/English error.
 create or replace function public.tk_sync(p_token text, p_timekeeper_id uuid, p_secret text, p_marks jsonb, p_since timestamptz)
 returns jsonb language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare ev public.events := public.tk_event(p_token);
         tk public.timekeepers; m jsonb; v_id uuid; ex public.marks; v_entry public.entries; v_legs int;
         v_entry_id uuid; v_leg int; v_discarded boolean; v_ts timestamptz;
+        v_device_ts timestamptz; v_offset int; v_rtt int; v_athlete_id uuid;
         accepted jsonb := '[]'; rejected jsonb := '[]';
 begin
   select * into tk from public.timekeepers where id = p_timekeeper_id and event_id = ev.id and secret = p_secret;
@@ -86,26 +110,59 @@ begin
         select jsonb_array_length(legs) into v_legs from public.races where id = v_entry.race_id;
         if v_leg is null or v_leg < 0 or v_leg >= v_legs then raise exception 'Perna inválida'; end if;
       end if;
+
+      -- optional hint/audit fields: sanitize instead of rejecting (Ruling 28b).
+      v_device_ts := null;
+      begin v_device_ts := (m ->> 'device_ts')::timestamptz; exception when others then v_device_ts := null; end;
+      v_offset := null;
+      begin v_offset := round((m ->> 'clock_offset_ms')::numeric)::int; exception when others then v_offset := null; end;
+      v_rtt := null;
+      begin v_rtt := round((m ->> 'clock_rtt_ms')::numeric)::int; exception when others then v_rtt := null; end;
+      v_athlete_id := null;
+      begin v_athlete_id := nullif(m ->> 'athlete_id', '')::uuid; exception when others then v_athlete_id := null; end;
+      if v_athlete_id is not null and not exists (
+        select 1 from public.entry_members em where em.entry_id = v_entry_id and em.athlete_id = v_athlete_id
+      ) then
+        v_athlete_id := null;
+      end if;
+
       select * into ex from public.marks where id = v_id;
       if not found then
         v_ts := (m ->> 'ts')::timestamptz;
         if v_ts is null or abs(extract(epoch from v_ts - now())) > 172800 then raise exception 'Horário inválido'; end if;
         insert into public.marks (id, event_id, timekeeper_id, ts, device_ts, clock_offset_ms, clock_rtt_ms,
                                   entry_id, leg_index, athlete_id, discarded, discarded_by)
-        values (v_id, ev.id, tk.id, v_ts, (m ->> 'device_ts')::timestamptz, (m ->> 'clock_offset_ms')::int,
-                (m ->> 'clock_rtt_ms')::int, v_entry_id, v_leg, nullif(m ->> 'athlete_id', '')::uuid,
-                v_discarded, case when v_discarded then 'timekeeper' end);
-      else
+        values (v_id, ev.id, tk.id, v_ts, v_device_ts, v_offset, v_rtt, v_entry_id, v_leg, v_athlete_id,
+                v_discarded, case when v_discarded then 'timekeeper' end)
+        on conflict (id) do nothing;
+        if not found then
+          -- lost the insert race with a concurrent send of the same id (Ruling 28a): treat this
+          -- request as an update against the row that is now there instead of erroring.
+          select * into ex from public.marks where id = v_id;
+        end if;
+      end if;
+
+      if ex.id is not null then
         if ex.timekeeper_id is distinct from tk.id then raise exception 'Marcação pertence a outro cronometrista'; end if;
+        if ex.org_edited and (
+          v_entry_id is distinct from ex.entry_id or v_leg is distinct from ex.leg_index
+          or v_athlete_id is distinct from ex.athlete_id or v_discarded is distinct from ex.discarded
+        ) then
+          raise exception 'Alterada pela organização';
+        end if;
         if ex.discarded_by = 'organizer' and not v_discarded then raise exception 'Descartada pela organização'; end if;
         update public.marks set entry_id = v_entry_id, leg_index = v_leg,
-               athlete_id = nullif(m ->> 'athlete_id', '')::uuid, discarded = v_discarded,
+               athlete_id = v_athlete_id, discarded = v_discarded,
                discarded_by = case when v_discarded then coalesce(ex.discarded_by, 'timekeeper') end
          where id = v_id;
       end if;
+
       accepted := accepted || to_jsonb(v_id::text);
-    exception when others then
-      rejected := rejected || jsonb_build_object('id', m ->> 'id', 'reason', sqlerrm);
+    exception
+      when sqlstate 'P0001' then
+        rejected := rejected || jsonb_build_object('id', m ->> 'id', 'reason', sqlerrm);
+      when others then
+        null;
     end;
   end loop;
   update public.timekeepers set last_seen_at = now() where id = tk.id;
@@ -145,12 +202,13 @@ begin
 end $$;
 
 -- 6. admin_update_mark: reassign/unassign a mark to a different entry+leg, or discard/restore it
---    from the organizer's side (Review tab).
+--    from the organizer's side (Review tab). Changing entry_id or leg_index (including unassigning)
+--    flips org_edited to true, so tk_sync will refuse a stale replay that would revert it (Ruling 27).
 create or replace function public.admin_update_mark(p_mark_id uuid, p_patch jsonb) returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare
   m public.marks; v_entry public.entries; v_entry_id uuid; v_leg int; v_legs int;
-  v_discarded boolean; v_discarded_by text;
+  v_discarded boolean; v_discarded_by text; v_org_edited boolean;
 begin
   perform public.assert_organizer();
   select * into m from public.marks where id = p_mark_id;
@@ -186,8 +244,11 @@ begin
     v_discarded_by := m.discarded_by;
   end if;
 
+  v_org_edited := m.org_edited or (v_entry_id is distinct from m.entry_id) or (v_leg is distinct from m.leg_index);
+
   update public.marks set
-    entry_id = v_entry_id, leg_index = v_leg, discarded = v_discarded, discarded_by = v_discarded_by
+    entry_id = v_entry_id, leg_index = v_leg, discarded = v_discarded, discarded_by = v_discarded_by,
+    org_edited = v_org_edited
   where id = p_mark_id
   returning * into m;
 
