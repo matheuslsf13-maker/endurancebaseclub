@@ -127,3 +127,7 @@ Task 10: complete (commits f7c9c74..bc8513e, review clean) — merged into feat/
 Task 11: complete (commits fb6c7d7..b8eb0df, review clean) — merged into feat/ebc-app as d648fac
 Task 15: feat/ebc-app (d648fac) merged into task/15 (9f0f4c1); completion implementer dispatched (sonnet) — review BASE = d648fac
 Task 17: feat/ebc-app (d648fac) merged into task/17 (8066ba6); completion implementer dispatched (opus) — review BASE = d648fac
+Task 12: review Approved (4df3f5f..3741efa, no Critical/Important)
+- Ruling 20: pace_by_modality omits 'other' (brief) — spec §10 "other só tempo" is honored by records/history showing the time with an empty pace; a per-modality pace row for 'other' has no meaning — cost if wrong: StatsView lacks an "Outro" row in "Ritmo por modalidade".
+Task 12: minor (deferred): no test for leg with time but null distance; tie-breaks untested (record ties, evolution group ties follow input order, same-date history rows, partner count ties); record/evolution label taken from first/best leg
+Task 12: complete (commits 4df3f5f..3741efa, review clean) — merged into feat/ebc-app as 3bd3b4d
