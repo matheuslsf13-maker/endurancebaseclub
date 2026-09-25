@@ -193,3 +193,5 @@ Task 7: amendment 2 d353d11 (Ruling 37; shim 5/5); feat f532a4e merged into task
 Task 24: review dispatched (bae2379..8c884af, sonnet)
 Task 8: dispatched (worktree /home/user/ebc-wt/t8, branch task/8 from task/7 2427895, sonnet; own DB ebc_t8 + shim port 54331) — Ruling 6 style while T7's review runs
 Task 8: dispatched above. Task 17: fix round 1 applied (commits 3cd4f76..a647630; 24 files/287 tests, typecheck, build ok; ApiError gains optional `status`) — scoped re-review dispatched
+Task 19: review Needs fixes (sonnet) — Important: normalizeRaceConfig (brief Consumes) unused in raceToForm; verbatim duplicated move() in LegsEditor/RankingsEditor — fix round 1/5 dispatched (resume implementer)
+Task 19: minor (deferred): blank leg label silently replaced by modality default (no validation, server requires a name); AgeGroups generator silently no-ops on invalid input; no client range check for window/threshold; per-row fields share accessible names; no direct tests for LegsEditor label-keep / AgeGroupsEditor / RankingsEditor toggles; no h1 while editing
