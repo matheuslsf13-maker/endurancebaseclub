@@ -2,19 +2,11 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api';
-import { ageOn } from '../../domain/categories';
+import { sexLabel } from '../../domain/categories';
 import { Badge, Button, Card, Modal, Spinner, useConfirm, useToast } from '../../components/ui';
 import { AthleteForm } from './AthleteForm';
 import { StatsView } from './StatsView';
-
-const TZ = 'America/Sao_Paulo';
-
-/** Today's date, in Brasília, as 'aaaa-mm-dd' (see AthletesPage for the same helper). */
-function todayIsoBrasilia(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-}
-
-const SEX_LABEL: Record<'M' | 'F', string> = { M: 'Masculino', F: 'Feminino' };
+import { ageToday } from './athleteHelpers';
 
 export default function AthleteProfilePage() {
   const { athleteId } = useParams();
@@ -80,7 +72,7 @@ export default function AthleteProfilePage() {
   }
 
   const { athlete, results } = query.data;
-  const age = athlete.birth_date ? ageOn(athlete.birth_date, todayIsoBrasilia(), 'event_date') : null;
+  const age = ageToday(athlete.birth_date);
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
@@ -93,7 +85,7 @@ export default function AthleteProfilePage() {
           <div>
             <h1 className="brand-title text-xl font-semibold">{athlete.name}</h1>
             <p className="mt-1 text-sm text-muted">
-              {SEX_LABEL[athlete.sex]}
+              {sexLabel(athlete.sex)}
               {age !== null ? ` · ${age} anos` : ''}
               {athlete.city ? ` · ${athlete.city}` : ''}
               {athlete.team_club ? ` · ${athlete.team_club}` : ''}

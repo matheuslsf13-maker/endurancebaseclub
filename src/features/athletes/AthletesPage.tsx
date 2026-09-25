@@ -2,23 +2,11 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api';
-import { ageOn } from '../../domain/categories';
 import { Button, Card, EmptyState, Input, Modal, Select, Spinner, Table, useConfirm, useToast } from '../../components/ui';
 import type { AthleteRow } from '../../lib/types';
 import { AthleteForm } from './AthleteForm';
 import { ImportDialog } from './ImportDialog';
-
-const TZ = 'America/Sao_Paulo';
-
-/** Today's date, in Brasília, as 'aaaa-mm-dd' — the app-wide rule that every date is shown in
- * America/Sao_Paulo applies here too, even though "idade hoje" has nothing to do with an event. */
-function todayIsoBrasilia(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-}
-
-function ageToday(birthDate: string | null): number | null {
-  return birthDate ? ageOn(birthDate, todayIsoBrasilia(), 'event_date') : null;
-}
+import { ageToday } from './athleteHelpers';
 
 function foldAccents(s: string): string {
   return s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();

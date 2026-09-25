@@ -39,6 +39,10 @@ export function AthleteForm({ initial, onSaved, onCancel }: AthleteFormProps) {
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    // React synthetic events bubble through the whole component tree, portals included: when the
+    // entries form (Task 21) renders this form inside its own <form>, an un-stopped submit here
+    // would also fire the outer form's onSubmit. Stop it here so this form can be nested safely.
+    e.stopPropagation();
 
     const trimmedName = name.trim();
     const hasNameError = trimmedName === '';

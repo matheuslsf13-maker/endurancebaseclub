@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FormEvent } from 'react';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { renderWithProviders } from '../../test/renderWithProviders';
+import { Modal } from '../../components/ui';
 import type { AthleteRow, ImportResult, ResultRow, ResultSnapshot } from '../../lib/types';
 
 const mocks = vi.hoisted(() => ({
@@ -116,6 +118,26 @@ describe('AthleteForm', () => {
     renderWithProviders(<AthleteForm onSaved={vi.fn()} onCancel={onCancel} />);
     await user.click(screen.getByRole('button', { name: 'Cancelar' }));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let its submit bubble into an outer form when reused inside a modal in another form (Task 21 nests it in EntryForm)', async () => {
+    const user = userEvent.setup();
+    saveAthlete.mockResolvedValue(makeAthlete());
+    const outerSpy = vi.fn((e: FormEvent<HTMLFormElement>) => e.preventDefault());
+
+    renderWithProviders(
+      <form onSubmit={outerSpy}>
+        <Modal open onClose={vi.fn()} title="Novo atleta">
+          <AthleteForm onSaved={vi.fn()} onCancel={vi.fn()} />
+        </Modal>
+      </form>,
+    );
+
+    await user.type(screen.getByTestId('athlete-name'), 'Fulano');
+    await user.click(screen.getByTestId('athlete-save'));
+
+    await waitFor(() => expect(saveAthlete).toHaveBeenCalled());
+    expect(outerSpy).not.toHaveBeenCalled();
   });
 });
 
