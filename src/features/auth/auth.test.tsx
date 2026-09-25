@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -15,16 +15,22 @@ import LoginPage from './LoginPage';
 import ChangePasswordPage from './ChangePasswordPage';
 import RequireOrganizer from './RequireOrganizer';
 
-const sb = vi.hoisted(() => ({
-  rpc: vi.fn(),
-  auth: {
-    getSession: vi.fn(),
-    onAuthStateChange: vi.fn(),
-    signInWithPassword: vi.fn(),
-    signOut: vi.fn(),
-    updateUser: vi.fn(),
-  },
-}));
+// supabase.rpc() returns a query builder that api.ts awaits after attaching its timeout signal;
+// `rpcAnswer` decides what the awaited builder yields.
+const sb = vi.hoisted(() => {
+  const rpcAnswer = vi.fn();
+  return {
+    rpcAnswer,
+    rpc: vi.fn((...args: unknown[]) => ({ abortSignal: () => rpcAnswer(...args) })),
+    auth: {
+      getSession: vi.fn(),
+      onAuthStateChange: vi.fn(),
+      signInWithPassword: vi.fn(),
+      signOut: vi.fn(),
+      updateUser: vi.fn(),
+    },
+  };
+});
 vi.mock('../../lib/supabase', () => ({ supabase: sb }));
 
 const ME: AdminMe = { user_id: 'u1', email: 'ana@ebc.test', name: 'Ana', role: 'owner', must_change_password: false };
@@ -232,7 +238,7 @@ describe('SessionProvider', () => {
     sb.auth.signInWithPassword.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
     sb.auth.signOut.mockResolvedValue({ error: null });
     sb.auth.updateUser.mockResolvedValue({ data: { user: { id: 'u1' } }, error: null });
-    sb.rpc.mockResolvedValue(rpcOk(ME));
+    sb.rpcAnswer.mockResolvedValue(rpcOk(ME));
   });
 
   it('is anonymous when no session is stored', async () => {
@@ -303,7 +309,7 @@ describe('SessionProvider', () => {
   });
 
   it('marks accounts that are not organizers as forbidden and signs them out', async () => {
-    sb.rpc.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
+    sb.rpcAnswer.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
     renderProvider();
     await waitFor(() => expect(status()).toHaveTextContent('anon'));
 
@@ -311,13 +317,15 @@ describe('SessionProvider', () => {
 
     expect(status()).toHaveTextContent('forbidden');
     expect(current.me).toBeNull();
+    // Only this device: a global sign-out would also log the organizer out everywhere else.
     expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
+    expect(sb.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
   });
 
   it('changes the password, clears the provisional flag and reloads the profile', async () => {
     let mustChange = true;
     sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
-    sb.rpc.mockImplementation(async (fn: string) => {
+    sb.rpcAnswer.mockImplementation(async (fn: string) => {
       if (fn === 'admin_me') return rpcOk({ ...ME, must_change_password: mustChange });
       if (fn === 'admin_password_changed') {
         mustChange = false;
@@ -353,7 +361,7 @@ describe('SessionProvider', () => {
     vi.useFakeTimers();
     try {
       sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
-      sb.rpc.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(rpcOk(ME));
+      sb.rpcAnswer.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(rpcOk(ME));
       renderProvider();
       await act(() => vi.advanceTimersByTimeAsync(100));
       expect(status()).toHaveTextContent('loading');
@@ -365,6 +373,130 @@ describe('SessionProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('restoring a stored session', () => {
+    const SESSION = { data: { session: { access_token: 't' } }, error: null };
+    let onAuthEvent: (event: string) => void;
+    const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      onAuthEvent = () => {};
+      sb.auth.onAuthStateChange.mockImplementation((cb: (event: string) => void) => {
+        onAuthEvent = cb;
+        return { data: { subscription: { unsubscribe: vi.fn() } } };
+      });
+      sb.auth.getSession.mockResolvedValue(SESSION);
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('stays loading when an expired token cannot be refreshed offline, then recovers', async () => {
+      // supabase-js keeps the stored session and reports the failed refresh as retryable.
+      sb.auth.getSession.mockResolvedValueOnce({
+        data: { session: null }, error: { name: 'AuthRetryableFetchError', message: 'Failed to fetch', status: 0 },
+      });
+      renderProvider();
+      await advance(100);
+      expect(status()).toHaveTextContent('loading');
+      expect(sb.auth.signOut).not.toHaveBeenCalled();
+      expect(sb.rpc).not.toHaveBeenCalled();
+
+      await advance(3_000);
+      expect(status()).toHaveTextContent('organizer');
+    });
+
+    it('recovers as soon as supabase-js refreshes the token', async () => {
+      sb.auth.getSession.mockResolvedValueOnce({
+        data: { session: null }, error: { name: 'AuthRetryableFetchError', message: 'Failed to fetch', status: 0 },
+      });
+      renderProvider();
+      await advance(100);
+      expect(status()).toHaveTextContent('loading');
+
+      act(() => onAuthEvent('TOKEN_REFRESHED'));
+      await advance(10);
+
+      expect(status()).toHaveTextContent('organizer');
+      expect(sb.rpc).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the session through server errors, retrying with backoff', async () => {
+      const unavailable = { data: null, error: { message: 'Could not query the database for the schema cache', code: 'PGRST002' }, status: 503 };
+      sb.rpcAnswer.mockResolvedValueOnce(unavailable).mockResolvedValueOnce(unavailable).mockResolvedValue(rpcOk(ME));
+      renderProvider();
+      await advance(100);
+      expect(status()).toHaveTextContent('loading');
+      expect(sb.rpc).toHaveBeenCalledTimes(1);
+
+      await advance(3_000);
+      expect(sb.rpc).toHaveBeenCalledTimes(2);
+      expect(status()).toHaveTextContent('loading');
+      await advance(5_000);
+      expect(sb.rpc).toHaveBeenCalledTimes(2);
+      await advance(1_000);
+      expect(sb.rpc).toHaveBeenCalledTimes(3);
+      expect(status()).toHaveTextContent('organizer');
+      expect(sb.auth.signOut).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an expired JWT (PGRST301)', { message: 'JWT expired', code: 'PGRST301' }],
+      ['invalid JWT claims (PGRST303)', { message: 'JWT claims validation failed', code: 'PGRST303' }],
+      ['an HTTP 401', { message: 'Invalid JWT', code: '' }],
+    ])('drops the session on this device only when the server rejects it: %s', async (_name, error) => {
+      sb.rpcAnswer.mockResolvedValue({ data: null, error, status: 401 });
+      renderProvider();
+      await advance(100);
+
+      expect(status()).toHaveTextContent('anon');
+      expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
+      expect(sb.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
+    });
+
+    it('is anonymous when the server refused to refresh the stored session', async () => {
+      sb.auth.getSession.mockResolvedValue({
+        data: { session: null },
+        error: { name: 'AuthApiError', message: 'Invalid Refresh Token: Refresh Token Not Found', status: 400, code: 'refresh_token_not_found' },
+      });
+      renderProvider();
+      await advance(100);
+
+      expect(status()).toHaveTextContent('anon');
+      expect(sb.rpc).not.toHaveBeenCalled();
+      await advance(60_000);
+      expect(sb.auth.getSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('loads the organizer when another tab signs in', async () => {
+      sb.auth.getSession.mockResolvedValueOnce({ data: { session: null }, error: null });
+      renderProvider();
+      await advance(100);
+      expect(status()).toHaveTextContent('anon');
+
+      act(() => onAuthEvent('SIGNED_IN'));
+      await advance(10);
+
+      expect(status()).toHaveTextContent('organizer');
+    });
+
+    it('does not load the profile twice for its own sign-in', async () => {
+      sb.auth.getSession.mockResolvedValueOnce({ data: { session: null }, error: null });
+      sb.auth.signInWithPassword.mockImplementation(async () => {
+        onAuthEvent('SIGNED_IN');
+        return { data: { session: { access_token: 't' } }, error: null };
+      });
+      renderProvider();
+      await advance(100);
+
+      await act(() => current.signIn('ana@ebc.test', 'senha-segura'));
+      await advance(10);
+
+      expect(status()).toHaveTextContent('organizer');
+      expect(sb.rpc).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('returns to anonymous when the session ends elsewhere', async () => {
@@ -390,6 +522,7 @@ describe('SessionProvider', () => {
     await act(() => current.signOut());
 
     expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
+    expect(sb.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
     expect(status()).toHaveTextContent('anon');
     expect(current.me).toBeNull();
   });
