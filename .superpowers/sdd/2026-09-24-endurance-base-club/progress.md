@@ -245,3 +245,6 @@ Task 8: minor (deferred): timekeeper named "Ana" collides with athlete "Ana" in 
 Task 8: complete (commits 2427895..fc400e9, review clean; feat merged into task/8, integration green) — merged into feat/ebc-app as 8c46b43
 Task 23: fix round 1/5 (1 addressed, 0 open — timingHelpers.ts; commits 51a34e6..03af4bf) — scoped re-review clean
 Task 23: complete (commits bae2379..03af4bf, review clean; feat merged into task/23:       Tests  418 passed (418)) — merged into feat/ebc-app as 812d13f
+Task 20: fix round 1/5 (2 addressed, 0 open — AthleteForm stopPropagation + nested-form test, athleteHelpers.ts + sexLabel; commits e95faf2..626ad10) — scoped re-review clean
+Task 20: complete (commits bae2379..626ad10, review clean; feat merged into task/20:       Tests  443 passed (443)) — merged into feat/ebc-app as 221d2db
+Wave 2b: T21 (sonnet) and T26 (sonnet) dispatched from feat/ebc-app 221d2db (worktrees /home/user/ebc-wt/t21, t26)
