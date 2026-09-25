@@ -175,3 +175,4 @@ Task 17: review Needs fixes (opus; saved in task-17-review.md) — Important: se
 - Ruling 34 (promotes T17 Minor 1, load-bearing for T22's single-flight sync and the clock): api.ts gives every RPC a timeout (AbortSignal.timeout, 15 s; `server_time` 5 s) mapped to ApiError('Sem conexão com o servidor','network') — otherwise one request hung on bad 4G freezes the timekeeper's sync loop and clock resync — cost if wrong: a very slow response is retried instead of awaited.
 Task 17: fix round 1/5 dispatched (resume implementer) — Important 1 + Rulings 32, 33, 34 (other minors deferred)
 Task 17: minor (deferred): permanent poll errors swallowed / EventLayout ignores error after first load; refetchOnWindowFocus refetches aggregate; changePassword partial-success retry; "Revisão2" accessible name; test gaps (agg stability, SIGNED_OUT clears cache)
+Task 6: fix round 1 applied (commits 2bfd23f..45a2f9e; SQL 5/5 PASS) — scoped re-review dispatched
