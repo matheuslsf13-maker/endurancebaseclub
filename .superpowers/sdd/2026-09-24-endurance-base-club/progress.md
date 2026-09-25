@@ -133,3 +133,5 @@ Task 12: minor (deferred): no test for leg with time but null distance; tie-brea
 Task 12: complete (commits 4df3f5f..3741efa, review clean) — merged into feat/ebc-app as 3bd3b4d
 Task 5: review — spec ✅, 1 Important (duplicated individual-entry creation block in admin_import_athletes and admin_bulk_create_entries) — fix round 1/5 dispatched (new implementer, sonnet; FIX_BASE d415c39)
 Task 5: minor (deferred): admin_bulk_create_entries surfaces raw FK error for unknown athlete id; malformed birth_date / non-numeric leg index → raw cast error; check-then-insert bib race → raw 23505; dead `en` variable in admin_save_entry
+Task 4: fix round 1 applied (commits b9cb55e..a322dee; SQL 3/3 PASS) — scoped re-review dispatched
+Task 4: minor (deferred): explicit whole-payload "config": null on UPDATE makes the jsonb merge an array → generic P0001 (no data loss)

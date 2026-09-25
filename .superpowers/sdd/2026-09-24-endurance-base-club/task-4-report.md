@@ -230,3 +230,125 @@ found with them.
 5. `admin_delete_organizer`/`admin_delete_event`/`admin_delete_race` on a non-existent id
    silently succeed (0 rows affected, no error) — matches the brief's terse description for
    these ("deletes (cascades)"), not flagged as a defect.
+
+## Fix round 1 (review findings + Rulings 12, 14, 16)
+
+Worktree: `/home/claude/ebc-wt/t4` (== `/home/user/ebc-wt/t4`), branch `task/4`, base commit
+`b9cb55e`. Own database used throughout: `EBC_DB=ebc_t4 bash scripts/test-sql.sh`.
+
+### What changed, per finding
+
+1. **Ruling 12 — waves wiped on UPDATE when `waves` is absent** (`0003_admin_events.sql`,
+   `admin_save_race`). Added `v_process_waves`, computed as
+   `is_insert or ((p_race ? 'waves') and coalesce(jsonb_typeof(p_race->'waves'), 'null') <> 'null')`.
+   The entire wave block (upsert loop, delete-missing, ensure-default) is now gated on this
+   flag. On UPDATE with `waves` absent, or an explicit JSON `null`, the block is skipped
+   entirely — existing waves and their `start_at` are left completely untouched. On INSERT the
+   flag is always true, so absent/null/empty all still fall through to "ensure one default
+   wave" as before. A present array on UPDATE still upserts by id, deletes waves missing from
+   the array, and creates a default wave if the race ends with zero waves.
+   Test: rewrote `supabase/tests/20_admin_events.sql` lines 107–142 (renaming the race with no
+   `waves` key → the previously-set wave, same id, same `start_at`, survives) and added a new
+   block for explicit `"waves": null` (same assertions). Also added a block for a present
+   **empty** array (`'waves', '[]'::jsonb`) proving that case still deletes and recreates a
+   fresh default — the one behavior that is genuinely different between "absent/null" and
+   "present-but-empty".
+
+2. **Ruling 14 — config reset to bare defaults on UPDATE when `config` is omitted**
+   (`admin_save_race`). Changed the config formula to branch on `is_insert`: INSERT keeps
+   `default_race_config(team_size) || coalesce(payload.config, '{}')` (unchanged); UPDATE is
+   now `default_race_config(new team_size) || existing.config || coalesce(payload.config, '{}')`.
+   Test: new block in `20_admin_events.sql` (right after the main owner-flow `do` block) —
+   customizes `divergence_threshold_s` to 5, saves again with no `config` key at all (asserts
+   the customization survives), then saves with a different partial config
+   (`same_crossing_window_s: 45`) and asserts the earlier customization (`divergence_threshold_s`)
+   is still 5 while the new field merges in.
+
+3. **Ruling 16 — wave upsert took `start_at` from the payload**. The `on conflict (id) do
+   update` now sets only `race_id`, `name`, `position` (dropped `start_at = excluded.start_at`).
+   New wave inserts also dropped `start_at` from the column list, so a newly created wave
+   always starts with `start_at` null (column default), regardless of anything sent in the
+   payload. Start times change exclusively via `admin_set_wave_start`.
+   Test: reworked the "same leg count/order/team_size still succeeds" block — it now resends
+   the existing wave with an explicit `"start_at": null` and asserts the previously-recorded
+   start (`2026-10-11T11:00:00Z`, set earlier via `admin_set_wave_start`) survives, proving the
+   payload's `start_at` is ignored rather than merely happening to match.
+
+4. **NULL bypass in `validate_race_config`**. In plpgsql, `IF NULL THEN` is false, so an
+   explicit JSON `null` for a validated scalar field slipped through every `not in (...)` /
+   `not between ...` check whose left side was `(p_config->>'field')` (`->>` on a JSON `null`
+   scalar returns SQL `NULL`). Fixed by mirroring the existing `age_groups.min` pattern
+   (`is null or ...`) on: `age_rule`, `team_age_rule`, `time_source`, `same_crossing_window_s`,
+   `divergence_threshold_s`, and each ranking's `size`. `cumulative` was already safe (its check
+   uses `jsonb_typeof(...) <> 'boolean'`, which is `'null' <> 'boolean'` = true for a JSON null,
+   already rejecting it) and needed no change.
+   Test: added `select tests.assert_raises(... 'config', '{"same_crossing_window_s": null}' ...,
+   'P0001')` right after the three given negative `admin_save_race` cases.
+
+5. **`public_slug` TOCTOU (minor, optional)**. Wrapped both the INSERT and UPDATE of
+   `public.events` in `admin_save_event` in a nested `begin ... exception when unique_violation
+   then raise exception 'Endereço público já em uso' using errcode = 'P0001'; end;` block, so a
+   concurrent collision that slips past the pre-check `exists (...)` still surfaces the pt-BR
+   P0001 message instead of a raw `23505`. No dedicated test added (true concurrent races aren't
+   reproducible in this single-connection test harness); the existing slug-collision test
+   (`-2` suffix) continues to exercise the normal, non-racing path and still passes.
+
+### TDD evidence
+
+**RED** — new tests (Ruling 14's config-merge assertions in particular) run against the
+pre-fix migration (`git stash push -- supabase/migrations/0003_admin_events.sql`, keeping the
+new test file), `EBC_DB=ebc_t4 bash scripts/test-sql.sh`:
+
+```
+PASS supabase/tests/00_helpers.sql
+PASS supabase/tests/10_schema.sql
+FAIL supabase/tests/20_admin_events.sql
+...
+psql:supabase/tests/20_admin_events.sql:83: ERROR:  omitting config on UPDATE must keep the existing customization (Ruling 14), got 3
+CONTEXT:  PL/pgSQL function inline_code_block line 15 at ASSERT
+```
+
+(Confirms the review's finding #2 exactly: without the fix, a config-omitting update resets
+`divergence_threshold_s` back to the bare default of `3`.)
+
+**GREEN** — migration fix restored, full suite, run three times for stability (including once
+right after a `git stash pop`):
+
+```
+$ EBC_DB=ebc_t4 bash scripts/test-sql.sh
+PASS supabase/tests/00_helpers.sql
+PASS supabase/tests/10_schema.sql
+PASS supabase/tests/20_admin_events.sql
+```
+
+All three runs green, no flakiness.
+
+### Files changed
+
+- `/home/user/ebc-wt/t4/supabase/migrations/0003_admin_events.sql` — `validate_race_config`
+  null-checks (finding 4); `admin_save_event` insert/update wrapped for TOCTOU (finding 5);
+  `admin_save_race` config formula (Ruling 14) and waves block gating + upsert column list
+  (Rulings 12 and 16).
+- `/home/user/ebc-wt/t4/supabase/tests/20_admin_events.sql` — new Ruling 14 config-merge block;
+  rewrote the Ruling 12/16 waves section (absent key, explicit null, present-empty-array cases);
+  new NULL-bypass negative assertion.
+
+### Concerns
+
+- None of the five findings required touching `0001_schema.sql` or `0002_internal.sql`; both
+  were read (to confirm `waves.start_at` has no column default other than `NULL`, and that
+  `races.config`/`waves` types are as assumed) but not modified.
+- The whole-config-explicit-`null` edge case (payload sends `"config": null` on UPDATE, not
+  just a null *field inside* config) was not given a dedicated test, since it isn't among the
+  five findings. Verified by hand that Postgres's `jsonb || jsonb` treats an object concatenated
+  with a JSON `null` scalar as forming a 2-element **array** (`[obj, null]`), so
+  `existing.config || null` would turn `v_config` into an array; every subsequent
+  `p_config->>'field'` lookup on an array silently returns SQL `NULL` (no error), which the
+  finding-4 fix now correctly rejects as `P0001` on the first checked field (`age_rule`,
+  "Regra de idade inválida") rather than crashing or silently passing. The message is
+  slightly generic for that specific case, but the payload is still safely rejected, and this
+  is not a data-loss path (no write happens before validation). Flagging for awareness only —
+  not treated as a defect since it's outside the five findings and already fails safely.
+- Grants/PostgREST exposure of `entry_json`/`next_unique_public_slug`/`validate_race_config`
+  are still Task 7's responsibility, per Ruling 15 (unchanged by this fix round; not part of
+  this task's findings).
