@@ -188,3 +188,7 @@ Task 6: complete (commits d415c39..45a2f9e, review clean; feat merged into task/
 Task 18: implemented 3c55071 (task/18, base bae2379; 16 focused tests; 9 full-suite failures = T17 eventShell stub-text tests → Ruling 36) — review dispatched
 Task 7: amendment 598995f (Ruling 35; RED→GREEN) — side effect: shim.test's ad hoc probe functions lost implicit PUBLIC execute (3/5 failing)
 - Ruling 37: tests/integration/shim.test.ts granted to T7 to add explicit grants to its own probe functions (the least-privilege default is the intended behavior; bootstrap.sql and 0006 untouched) — cost if wrong: none.
+Task 24: implemented 8c884af (task/24, base bae2379; 12 focused tests; 1 full-suite failure = T17 stub-text test → Ruling 36) — review dispatched
+Task 7: amendment 2 d353d11 (Ruling 37; shim 5/5); feat f532a4e merged into task/7 → 2427895 (SQL 7/7 PASS, shim 5/5) — review dispatched (f532a4e..2427895, opus)
+Task 24: review dispatched (bae2379..8c884af, sonnet)
+Task 8: dispatched (worktree /home/user/ebc-wt/t8, branch task/8 from task/7 2427895, sonnet; own DB ebc_t8 + shim port 54331) — Ruling 6 style while T7's review runs

@@ -229,3 +229,30 @@ broken.
 
 Both throwaway databases created during this verification (`zz_probe3`, and the shim test's own
 `ebc_shim`) were dropped afterward; no residue left in `ebc_t7`.
+
+## Amendment 2 (Ruling 37)
+
+Commit `d353d11` "test: grant shim probe functions explicitly after least-privilege defaults", on
+top of `598995f`.
+
+### What changed
+I was granted `tests/integration/shim.test.ts` for this one change (previously out of scope).
+In its `beforeAll`, right after `create function public.shim_echo/shim_fail/shim_bigint`, added:
+```sql
+grant execute on function public.shim_echo(jsonb, int), public.shim_fail(), public.shim_bigint()
+  to anon, authenticated;
+```
+with a comment explaining why it's needed (0006's grants, specifically Ruling 35's role-global
+default-privileges revoke, mean any function created after migrations run no longer gets `PUBLIC`
+execute automatically — these three probe functions exist only to exercise the shim server's own
+RPC/error/bigint plumbing, not the app's grant model). Nothing else in the file changed.
+`dev/db/bootstrap.sql` and `0006_public_grants.sql` were **not** touched.
+
+### Verification
+- `npx vitest run tests/integration/shim.test.ts -c vitest.integration.config.ts` → **5 passed, 0
+  failed** (back to fully green).
+- `EBC_DB=ebc_t7 bash scripts/test-sql.sh` → all 7 files PASS (unaffected, since this change is
+  confined to the test-only file).
+- Confirmed via `git diff`/`git status` that only `tests/integration/shim.test.ts` changed for this
+  commit.
+- Dropped the shim test's leftover `ebc_shim` database afterward.
