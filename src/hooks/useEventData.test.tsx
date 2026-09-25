@@ -48,6 +48,7 @@ beforeEach(() => {
   live.mockReset();
   hidden = false;
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') });
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 });
 afterEach(() => {
@@ -228,6 +229,66 @@ describe('useEventData', () => {
     live.mockResolvedValue(delta({ resolutions: [] }));
     await advance(2_000);
     expect(cached()?.resolutions).toEqual([]);
+  });
+
+  it('refetches the aggregate when a mark comes from a timekeeper it does not know yet', async () => {
+    const tk9 = makeTimekeeper({ id: 'tk9', name: 'Bruno' });
+    getEvent
+      .mockResolvedValueOnce(makeAgg())
+      .mockResolvedValueOnce(makeAgg({ timekeepers: [makeTimekeeper(), tk9], server_now: iso(T0 + 63 * SEC) }));
+    live
+      // Known timekeeper and an organizer mark (no timekeeper): nothing to refetch.
+      .mockResolvedValueOnce(delta({ marks: [makeMark({ id: 'k1', at: T0 }), makeMark({ id: 'o1', at: T0, timekeeper_id: null })] }))
+      .mockResolvedValueOnce(delta({ marks: [makeMark({ id: 'n1', at: T0 + 61 * SEC, timekeeper_id: 'tk9' })] }))
+      .mockResolvedValue(delta());
+    renderEventData(true);
+    await settle();
+
+    await advance(2_000);
+    expect(getEvent).toHaveBeenCalledTimes(1);
+    await advance(2_000);
+    expect(getEvent).toHaveBeenCalledTimes(2);
+    await settle();
+    expect(cached()?.timekeepers.map((t) => t.id)).toEqual(['tk1', 'tk9']);
+    await advance(2_000);
+    expect(getEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetches the whole aggregate every 30 s on live tabs, while visible', async () => {
+    // Server answers carry the (fake) current time, as the real server_now does.
+    vi.setSystemTime(T0 + 60 * SEC);
+    const tk9 = makeTimekeeper({ id: 'tk9', name: 'Bruno' });
+    getEvent
+      .mockResolvedValueOnce(makeAgg())
+      .mockImplementation(async () => makeAgg({ timekeepers: [makeTimekeeper(), tk9], server_now: iso(Date.now()) }));
+    live.mockImplementation(async () => delta({ server_now: iso(Date.now()) }));
+    renderEventData(true);
+    await settle();
+
+    await advance(29_990);
+    expect(getEvent).toHaveBeenCalledTimes(1);
+    await advance(10);
+    expect(getEvent).toHaveBeenCalledTimes(2);
+    // The delta polls continue from the refetch without undoing its lists.
+    await advance(2_000);
+    expect(live).toHaveBeenLastCalledWith('ev1', iso(T0 + 80 * SEC));
+    await advance(2_000);
+    expect(cached()?.timekeepers.map((t) => t.id)).toEqual(['tk1', 'tk9']);
+
+    hidden = true;
+    await advance(30_000);
+    expect(getEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refetch the whole aggregate on idle tabs', async () => {
+    getEvent.mockResolvedValue(makeAgg());
+    live.mockResolvedValue(delta());
+    renderEventData(false);
+    await settle();
+
+    await advance(60_000);
+
+    expect(getEvent).toHaveBeenCalledTimes(1);
   });
 
   it('refresh() refetches the aggregate', async () => {
