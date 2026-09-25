@@ -144,6 +144,16 @@ revoke execute on all functions in schema public from public, anon, authenticate
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 alter default privileges in schema public revoke execute on functions from public, anon, authenticated;
+-- Ruling 35: the schema-scoped form above cannot remove Postgres's built-in "PUBLIC gets EXECUTE
+-- on new functions" default (verified empirically: once a schema-scoped REVOKE from PUBLIC leaves
+-- nothing else granted, Postgres just drops that override row instead of storing it, so CREATE
+-- FUNCTION falls back to the hard-coded default again). Only the role-global form (no `in schema`)
+-- actually suppresses it, so every function created from now on -- in any schema, by anything this
+-- migration runs as -- starts truly PUBLIC-execute-free; this only needs to be set once (it is not
+-- schema-scoped, so later migrations don't need to repeat it). The schema-scoped anon/authenticated
+-- revokes above stay too, since they also undo dev/db/bootstrap.sql's (and Supabase's own) default
+-- grants to those two roles specifically.
+alter default privileges revoke execute on functions from public;
 do $$ declare f record; begin
   for f in select p.oid::regprocedure as sig, p.proname from pg_proc p
            join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' loop
