@@ -204,3 +204,5 @@ Task 18: minor (deferred): per-card/per-row action buttons (Duplicar/Excluir/Rem
 Task 25: implemented 884253b (task/25, base bae2379; 14 focused tests; 1 full-suite failure = T17 stub-text test → Ruling 36) — review dispatched
 - Ruling 41: ClassificationTable and PodiumView take an extra required prop `athletesById: Map<string, AthleteRow>` (admin entries carry only athlete ids; names come from the aggregate's athletes) — accepted as the contract; T26 passes the map built from pub_event's athletes — cost if wrong: none.
 Task 23: implemented c03ef19 (task/23, base bae2379; 22 focused tests; 1 full-suite failure = T17 stub-text → Ruling 36) — review dispatched
+Task 24: review Needs fixes (sonnet) — Important: chosen_mark_discarded crossing reopens with no radio checked and re-saves the broken resolution — fix round 1/5 dispatched (resume implementer; + a11y name of resolution-manual-input, same component)
+Task 24: minor (deferred): "Mover" mini-form leg select silently ignored when a bib is typed; empty "Mover" is a silent no-op
