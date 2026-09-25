@@ -235,3 +235,7 @@ Task 18: fix round 1 applied (commits 3c55071..c5e16d8) — scoped re-review dis
 Resumed after interruption: T22 (resume), T20 fix (resume), T23 fix round 1 (resume), T7 re-review (retry), T18 re-review, T8 review (retry); T27 on hold until a slot frees
 Task 7: fix round 1/5 (4 addressed, 0 open — resolution note/decided_by private, timestamp age + discriminating test, mark_public_json stable + org_edited assert, resolve_public_event not executable; commits 2427895..a466ec2) — scoped re-review clean
 Task 7: complete (commits 2bfd23f..a466ec2, review clean; feat merged into task/7, SQL 7/7, shim 5/5) — merged into feat/ebc-app as 18dcd94
+Task 18: fix round 1/5 (2 addressed, 0 open — eventHelpers.ts shared helpers, Ruling 40 dirty guard; commits 3c55071..c5e16d8) — scoped re-review clean
+Task 18: complete (commits bae2379..c5e16d8, review clean; feat merged into task/18: 396 tests green) — merged into feat/ebc-app as 943c7b5
+Task 23: fix round 1 applied (merge 51a34e6 + 03af4bf timingHelpers.ts; 393 tests green) — scoped re-review dispatched
+Task 20: fix round 1 applied (merge e95faf2 + 626ad10; 382 tests green) — scoped re-review dispatched
