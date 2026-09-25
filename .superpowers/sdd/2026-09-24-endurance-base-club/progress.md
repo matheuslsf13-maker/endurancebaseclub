@@ -192,3 +192,4 @@ Task 24: implemented 8c884af (task/24, base bae2379; 12 focused tests; 1 full-su
 Task 7: amendment 2 d353d11 (Ruling 37; shim 5/5); feat f532a4e merged into task/7 → 2427895 (SQL 7/7 PASS, shim 5/5) — review dispatched (f532a4e..2427895, opus)
 Task 24: review dispatched (bae2379..8c884af, sonnet)
 Task 8: dispatched (worktree /home/user/ebc-wt/t8, branch task/8 from task/7 2427895, sonnet; own DB ebc_t8 + shim port 54331) — Ruling 6 style while T7's review runs
+Task 8: dispatched above. Task 17: fix round 1 applied (commits 3cd4f76..a647630; 24 files/287 tests, typecheck, build ok; ApiError gains optional `status`) — scoped re-review dispatched
