@@ -1,0 +1,249 @@
+# Review package: fb6c7d7..bc8513e (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+bc8513e fix(domain): leg suggestion across all legs, divergence mark fallback, pt-BR wording
+
+## Files changed
+ src/domain/consolidation.test.ts |  8 ++++++++
+ src/domain/consolidation.ts      | 14 ++++++++++++--
+ src/domain/suggestLeg.test.ts    |  9 ++++++++-
+ src/domain/suggestLeg.ts         | 22 ++++++++++++----------
+ 4 files changed, 40 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/src/domain/consolidation.test.ts b/src/domain/consolidation.test.ts
+index 595d7a8..be99265 100644
+--- a/src/domain/consolidation.test.ts
++++ b/src/domain/consolidation.test.ts
+@@ -204,20 +204,28 @@ describe('computeEventTiming issue details', () => {
+     expect(r.issues.find(i => i.type === type)?.message).toBe(message);
+   });
+   it('two timekeepers: the misassigned mark comes first in mark_ids so it can be moved (Review Focus 1)', () => {
+     // tk2 missed the swim finish, then tapped the run finish offline and it was filed as leg 0.
+     const swim = makeMark({ at: L0, timekeeper_id: 'tk1', leg_index: 0 });
+     const wrong = makeMark({ at: T0 + 30 * MIN + SEC, timekeeper_id: 'tk2', leg_index: 0 });
+     const finish = makeMark({ at: T0 + 30 * MIN, timekeeper_id: 'tk1', leg_index: 1 });
+     const div = computeEventTiming({ ...base, marks: [swim, wrong, finish] }, now).issues.find(i => i.type === 'divergence')!;
+     expect(div).toMatchObject({ entry_id: 'en1', race_id: 'r1', leg_index: 0, suggested_leg_index: 1, mark_ids: [wrong.id, swim.id] });
+   });
++  it('a divergence with no mark beyond the threshold still names the mark farthest from the median', () => {
++    // 0 s, 2 s, 4 s: spread 4 s > 3 s, yet each mark is ≤ 2 s from the 2 s median; the 0 s / 4 s tie goes to the earlier candidate.
++    const first = makeMark({ at: L0, timekeeper_id: 'tk1' });
++    const marks = [makeMark({ at: L0 + 4 * SEC, timekeeper_id: 'tk3' }), makeMark({ at: L0 + 2 * SEC, timekeeper_id: 'tk2' }), first];
++    const div = computeEventTiming({ ...base, marks }, now).issues.find(i => i.type === 'divergence')!;
++    expect(div.mark_ids).toEqual([first.id]);
++    expect(div.suggested_leg_index).toBeUndefined();
++  });
+   it('reports duplicates once per timekeeper', () => {
+     const ana2 = makeMark({ at: L0 + 200, timekeeper_id: 'tk1' });
+     const bia2 = makeMark({ at: L0 + 300, timekeeper_id: 'tk2' });
+     const marks = [makeMark({ at: L0, timekeeper_id: 'tk1' }), ana2, makeMark({ at: L0 + 100, timekeeper_id: 'tk2' }), bia2];
+     const dups = computeEventTiming({ ...base, marks }, now).issues.filter(i => i.type === 'duplicate');
+     expect(dups.map(i => [i.message, i.mark_ids])).toEqual([
+       ['Nº 101 · Perna 1 (Natação): Ana marcou mais de uma vez', [ana2.id]],
+       ['Nº 101 · Perna 1 (Natação): Bia marcou mais de uma vez', [bia2.id]],
+     ]);
+   });
+diff --git a/src/domain/consolidation.ts b/src/domain/consolidation.ts
+index 82d6736..9ebb3a8 100644
+--- a/src/domain/consolidation.ts
++++ b/src/domain/consolidation.ts
+@@ -219,46 +219,56 @@ function entryIssues(
+   if (timing.status === 'on_course') {
+     issues.push({ type: 'not_finished', severity: 'info', message: `Nº ${entry.bib}: ainda em prova`, ...refs });
+   }
+   return issues;
+ }
+ 
+ /**
+  * The marks that disagree with a divergent crossing (with exactly 2 candidates both do) and,
+  * when one of them sits within the same-crossing window of another leg's median, that leg as
+  * the suggested destination. The outlier behind the suggestion is listed first because the
+- * Review tab moves `mark_ids[0]`.
++ * Review tab moves `mark_ids[0]`. When no candidate is beyond the threshold from the median
++ * (e.g. 0 s, 2 s, 4 s), the one farthest from it stands in, so the issue always names a mark
++ * (Ruling 11).
+  */
+ function divergenceRefs(c: Crossing, legs: LegTiming[], config: RaceConfig): Pick<Issue, 'mark_ids' | 'suggested_leg_index'> {
+   const thresholdMs = config.divergence_threshold_s * 1000;
+   const windowMs = config.same_crossing_window_s * 1000;
+   const med = c.median_ms ?? 0;
+-  const outliers = c.candidates.length === 2 ? c.candidates : c.candidates.filter(x => Math.abs(x.ts_ms - med) > thresholdMs);
++  const beyond = c.candidates.length === 2 ? c.candidates : c.candidates.filter(x => Math.abs(x.ts_ms - med) > thresholdMs);
++  const outliers = beyond.length > 0 ? beyond : [farthestFrom(c.candidates, med)];
+ 
+   const move = findSuggestedMove(outliers, c.leg_index, legs, windowMs);
+   const ids = outliers.map(o => o.mark_id);
+   if (!move) return { mark_ids: ids };
+   return { mark_ids: [move.mark_id, ...ids.filter(id => id !== move.mark_id)], suggested_leg_index: move.leg_index };
+ }
+ 
+ function findSuggestedMove(outliers: Candidate[], legIndex: number, legs: LegTiming[], windowMs: number): { mark_id: string; leg_index: number } | null {
+   for (const o of outliers) {
+     for (const other of legs) {
+       const med = other.crossing.median_ms;
+       if (other.leg_index !== legIndex && med !== null && Math.abs(o.ts_ms - med) <= windowMs) {
+         return { mark_id: o.mark_id, leg_index: other.leg_index };
+       }
+     }
+   }
+   return null;
+ }
+ 
++/** The candidate farthest from `ms`; ties go to the earliest in `candidates` order. Needs ≥ 1 candidate. */
++function farthestFrom(candidates: Candidate[], ms: number): Candidate {
++  let far = candidates[0];
++  for (const x of candidates) if (Math.abs(x.ts_ms - ms) > Math.abs(far.ts_ms - ms)) far = x;
++  return far;
++}
++
+ function lastLegWithCrossing(legs: LegTiming[]): number {
+   for (let k = legs.length - 1; k >= 0; k--) if (legs[k].crossing.official_ms !== null) return k;
+   return -1;
+ }
+ 
+ function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+   const list = map.get(key);
+   if (list) list.push(value);
+   else map.set(key, [value]);
+ }
+diff --git a/src/domain/suggestLeg.test.ts b/src/domain/suggestLeg.test.ts
+index a3e1234..e0f91cc 100644
+--- a/src/domain/suggestLeg.test.ts
++++ b/src/domain/suggestLeg.test.ts
+@@ -56,20 +56,27 @@ describe('suggestLeg edge cases', () => {
+     const marks = [makeMark({ at: T0 + 55 * MIN, leg_index: 1 })];
+     expect(suggestLeg({ entry: e, race: trio, marks, tsMs: T0 + 70 * MIN, athleteId: 'a1' })).toMatchObject({ leg_index: 2, reason: 'next', athlete_id: 'a1' });
+   });
+   it('falls back to all legs when the athlete is not a member or has no legs', () => {
+     const duo = makeRace({ team_size: 2 });
+     const e = makeEntry({ team_name: 'Dupla', members: [{ athlete_id: 'a1', position: 0, legs: [0, 1] }, { athlete_id: 'a2', position: 1, legs: [] }] });
+     const marks = [makeMark({ at: T0 + 10 * MIN, leg_index: 0 })];
+     expect(suggestLeg({ entry: e, race: duo, marks, tsMs: T0 + 40 * MIN, athleteId: 'a2' })).toMatchObject({ leg_index: 1, athlete_id: 'a1', warning: null });
+     expect(suggestLeg({ entry: e, race: duo, marks, tsMs: T0 + 40 * MIN, athleteId: 'zz' })).toMatchObject({ leg_index: 1, athlete_id: 'a1', warning: null });
+   });
++  it('confirming a relay handoff finds the finished leg even with the next athlete selected', () => {
++    // The on-course list already shows a2 as current, so the second timekeeper taps a2 for a1's handoff.
++    const duo = makeRace({ team_size: 2 });
++    const e = makeEntry({ team_name: 'Tubarões', members: [{ athlete_id: 'a1', position: 0, legs: [0] }, { athlete_id: 'a2', position: 1, legs: [1] }] });
++    const marks = [makeMark({ at: T0 + 10 * MIN, leg_index: 0, timekeeper_id: 'tk1' })];
++    expect(suggestLeg({ entry: e, race: duo, marks, tsMs: T0 + 10 * MIN + 5 * SEC, athleteId: 'a2' })).toMatchObject({ leg_index: 0, reason: 'same_crossing', athlete_id: 'a1' });
++  });
+ });
+ 
+ describe('planBibAssignment', () => {
+   const racesById = new Map([[solo.id, solo]]);
+   it('reports an unknown bib', () => {
+     expect(planBibAssignment({ entries: [soloEntry], racesById, marks: [], markId: null, tsMs: T0 + 10 * MIN, bibText: '999' })).toEqual({ error: 'Nº 999 não encontrado' });
+   });
+   it('reports an entry whose race is not loaded', () => {
+     expect(planBibAssignment({ entries: [soloEntry], racesById: new Map(), marks: [], markId: null, tsMs: T0 + 10 * MIN, bibText: '101' })).toEqual({ error: 'Prova da inscrição não encontrada' });
+   });
+@@ -91,15 +98,15 @@ describe('planBibAssignment', () => {
+   });
+   it('warns (without blocking) for a DNS entry', () => {
+     const dns = makeEntry({ status: 'dns' });
+     expect(planBibAssignment({ entries: [dns], racesById, marks: [], markId: null, tsMs: T0 + 10 * MIN, bibText: '101' }))
+       .toMatchObject({ entry: { id: 'en1' }, suggestion: { leg_index: 0 }, warning: 'Nº 101 está marcado como DNS' });
+   });
+   it('warns when the entry already finished, and the bib warning wins over it', () => {
+     const marks = [makeMark({ at: T0 + 10 * MIN, leg_index: 0 }), makeMark({ at: T0 + 30 * MIN, leg_index: 1 })];
+     const args = { racesById, marks, markId: null, tsMs: T0 + 60 * MIN, bibText: '101' };
+     expect(planBibAssignment({ ...args, entries: [soloEntry] }))
+-      .toMatchObject({ suggestion: { leg_index: 1, warning: 'already_finished' }, warning: 'Nº 101 já concluiu — registrada como fim da Corrida (2/2)' });
++      .toMatchObject({ suggestion: { leg_index: 1, warning: 'already_finished' }, warning: 'Nº 101 já concluiu — registrada como fim da perna 2/2 (Corrida)' });
+     expect(planBibAssignment({ ...args, entries: [makeEntry({ status: 'dns' })] }))
+       .toMatchObject({ suggestion: { leg_index: 1, warning: 'already_finished' }, warning: 'Nº 101 está marcado como DNS' });
+   });
+ });
+diff --git a/src/domain/suggestLeg.ts b/src/domain/suggestLeg.ts
+index 858333a..4b0cc5a 100644
+--- a/src/domain/suggestLeg.ts
++++ b/src/domain/suggestLeg.ts
+@@ -1,59 +1,61 @@
+ import type { EntryRow, MarkRow, RaceRow } from '../lib/types';
+ import { resolveBib } from './bib';
+ import { median } from './consolidation';
+ import { legAthleteId } from './eventModel';
+ 
+ export interface LegSuggestion { leg_index: number; athlete_id: string | null; reason: 'same_crossing' | 'next'; warning: 'already_finished' | null }
+ 
+ /**
+- * Suggests which leg a new mark at `tsMs` ends for `entry` (spec §7.5): the leg of a crossing
+- * already marked within the same-crossing window (another timekeeper confirming it), otherwise
+- * the first leg after the last crossing that is clearly behind. Only the selected athlete's legs
+- * are candidates when `athleteId` is a member with legs; otherwise every leg is.
++ * Suggests which leg a new mark at `tsMs` ends for `entry` (spec §7.5, Ruling 10):
++ * 1. same crossing — among ALL the entry's legs, the one whose crossing median (marks already
++ *    known) is closest to `tsMs` within the same-crossing window: another timekeeper confirming
++ *    it. `athleteId` is ignored here on purpose: at a relay handoff the on-course list already
++ *    shows the next athlete as current, so a confirming tap may name the wrong member;
++ * 2. otherwise the next leg — the first of the selected athlete's legs (every leg when
++ *    `athleteId` is not a member with legs) after the last crossing clearly behind `tsMs`
++ *    (taken over all legs); when none is left, the last of them with `already_finished`.
+  */
+ export function suggestLeg(args: { entry: EntryRow; race: RaceRow; marks: MarkRow[]; tsMs: number; athleteId?: string | null }): LegSuggestion {
+   const { entry, race, tsMs, athleteId } = args;
+   const windowMs = race.config.same_crossing_window_s * 1000;
+   const allLegs = race.legs.map((_, k) => k);
+ 
+   const timesByLeg = new Map<number, number[]>();
+   for (const m of args.marks) {
+     if (m.entry_id !== entry.id || m.discarded || m.leg_index === null) continue;
+     const list = timesByLeg.get(m.leg_index);
+     if (list) list.push(Date.parse(m.ts));
+     else timesByLeg.set(m.leg_index, [Date.parse(m.ts)]);
+   }
+   const crossingAt = new Map<number, number>();
+   for (const k of allLegs) {
+     const at = median(timesByLeg.get(k) ?? []);
+     if (at !== null) crossingAt.set(k, at);
+   }
+ 
+-  const memberLegs = athleteId ? (entry.members.find(m => m.athlete_id === athleteId)?.legs ?? []) : [];
+-  const candidateLegs = memberLegs.length > 0 ? [...memberLegs].sort((a, b) => a - b) : allLegs;
+   const suggest = (leg: number, reason: LegSuggestion['reason'], warning: LegSuggestion['warning'] = null): LegSuggestion =>
+     ({ leg_index: leg, athlete_id: legAthleteId(entry, leg), reason, warning });
+ 
+   let closest: number | null = null;
+   let closestGap = Infinity;
+-  for (const k of candidateLegs) {
+-    const at = crossingAt.get(k);
+-    if (at === undefined) continue;
++  for (const [k, at] of crossingAt) {
+     const gap = Math.abs(tsMs - at);
+     if (gap <= windowMs && gap < closestGap) {
+       closest = k;
+       closestGap = gap;
+     }
+   }
+   if (closest !== null) return suggest(closest, 'same_crossing');
+ 
++  const memberLegs = athleteId ? (entry.members.find(m => m.athlete_id === athleteId)?.legs ?? []) : [];
++  const candidateLegs = memberLegs.length > 0 ? [...memberLegs].sort((a, b) => a - b) : allLegs;
+   let last = -1;
+   for (const [k, at] of crossingAt) if (at < tsMs - windowMs && k > last) last = k;
+   const next = candidateLegs.find(k => k > last);
+   if (next !== undefined) return suggest(next, 'next');
+   return suggest(candidateLegs[candidateLegs.length - 1], 'next', 'already_finished');
+ }
+ 
+ export type AssignmentPlan =
+   | { entry: EntryRow; race: RaceRow; suggestion: LegSuggestion; warning: string | null }
+   | { error: string };
+@@ -70,14 +72,14 @@ export function planBibAssignment(args: {
+ }): AssignmentPlan {
+   const resolved = resolveBib(args.entries, args.bibText);
+   if ('error' in resolved) return { error: resolved.error };
+   const { entry } = resolved;
+   const race = args.racesById.get(entry.race_id);
+   if (!race) return { error: 'Prova da inscrição não encontrada' };
+ 
+   const others = args.markId === null ? args.marks : args.marks.filter(m => m.id !== args.markId);
+   const suggestion = suggestLeg({ entry, race, marks: others, tsMs: args.tsMs, athleteId: args.athleteId });
+   const finishedWarning = suggestion.warning === 'already_finished'
+-    ? `Nº ${entry.bib} já concluiu — registrada como fim da ${race.legs[suggestion.leg_index].label} (${suggestion.leg_index + 1}/${race.legs.length})`
++    ? `Nº ${entry.bib} já concluiu — registrada como fim da perna ${suggestion.leg_index + 1}/${race.legs.length} (${race.legs[suggestion.leg_index].label})`
+     : null;
+   return { entry, race, suggestion, warning: resolved.warning ?? finishedWarning };
+ }
