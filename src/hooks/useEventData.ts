@@ -63,6 +63,9 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
   );
 
   const cursor = useRef<DeltaCursor | null>(null);
+  // Single-flight across effect runs too: switching between a live and an idle tab restarts the
+  // effect, and a slow request from the previous run must not overlap with the next one.
+  const inFlight = useRef(false);
   const loaded = query.data !== undefined;
   const intervalMs = opts.live ? LIVE_POLL_MS : IDLE_POLL_MS;
 
@@ -70,7 +73,6 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
     if (!loaded) return;
     const key = ['event', eventId];
     let cancelled = false;
-    let inFlight = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const schedule = () => {
@@ -80,14 +82,19 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
 
     const poll = async () => {
       // While hidden nothing is scheduled; the visibilitychange listener resumes polling.
-      if (cancelled || inFlight || document.hidden) return;
+      if (cancelled || document.hidden) return;
+      // A request is still out (possibly from the previous run): try again one interval later.
+      if (inFlight.current) {
+        schedule();
+        return;
+      }
       const before = queryClient.getQueryData<EventAggregate>(key);
       if (before) {
         const c = cursor.current;
         const base = c && c.eventId === eventId && c.aggServerNow === before.server_now ? c.serverNow : before.server_now;
         const since = new Date(Date.parse(base) - OVERLAP_MS).toISOString();
         const patchesBefore = patches.current;
-        inFlight = true;
+        inFlight.current = true;
         try {
           const delta = await api.admin.live(eventId, since);
           const current = queryClient.getQueryData<EventAggregate>(key);
@@ -105,7 +112,7 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
         } catch {
           // Offline or a transient failure: keep what we have and try again on the next tick.
         } finally {
-          inFlight = false;
+          inFlight.current = false;
         }
       }
       schedule();

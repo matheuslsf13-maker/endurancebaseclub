@@ -33,11 +33,19 @@ const RESTORE_RETRY_MS = 3_000;
 /** Supabase Auth errors (returned or thrown) as pt-BR ApiErrors. */
 function authError(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
-  const err = (typeof e === 'object' && e !== null ? e : {}) as { name?: string; message?: string; code?: string };
+  const err = (typeof e === 'object' && e !== null ? e : {}) as { name?: string; message?: string; code?: string; status?: number };
   if (e instanceof TypeError || err.name === 'AuthRetryableFetchError') return new ApiError('Sem conexão com o servidor', 'network');
   if (err.code === 'invalid_credentials' || err.message === 'Invalid login credentials') return new ApiError('E-mail ou senha incorretos');
   if (err.code === 'same_password') return new ApiError('A nova senha precisa ser diferente da atual', err.code);
   if (err.code === 'weak_password') return new ApiError('Senha muito fraca. Escolha outra senha.', err.code);
+  if (err.code === 'email_not_confirmed') return new ApiError('Este e-mail ainda não foi confirmado', err.code);
+  if (err.code === 'user_banned') return new ApiError('Esta conta está bloqueada', err.code);
+  if (err.status === 429 || err.code?.startsWith('over_')) {
+    return new ApiError('Muitas tentativas seguidas. Aguarde um pouco e tente de novo.', err.code ?? null);
+  }
+  if (err.name === 'AuthSessionMissingError' || err.code === 'session_not_found' || err.code === 'session_expired') {
+    return new ApiError('Sua sessão expirou. Entre novamente.', err.code ?? null);
+  }
   return new ApiError(err.message || 'Erro inesperado', err.code ?? null);
 }
 

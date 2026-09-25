@@ -12,7 +12,9 @@ const INITIAL_SPACING_MS = 300;
 const RESYNC_MS = 20_000;
 
 let clock: ClockSync | null = null;
-let sampling = false;
+let started = false;
+/** The sample being taken right now: callers join it instead of firing a second request. */
+let pending: Promise<void> | null = null;
 
 function isClockState(v: unknown): v is ClockState {
   const s = v as Partial<ClockState> | null;
@@ -31,7 +33,7 @@ function getClock(): ClockSync {
   return clock;
 }
 
-async function sample(c: ClockSync): Promise<void> {
+async function takeAndStore(c: ClockSync): Promise<void> {
   try {
     c.addSample(await takeSample(() => api.serverTime()));
     const state = c.state();
@@ -41,22 +43,34 @@ async function sample(c: ClockSync): Promise<void> {
   }
 }
 
+/** Single-flight: overlapping requests would only inflate each other's round-trip time. */
+function sample(c: ClockSync): Promise<void> {
+  pending ??= takeAndStore(c).finally(() => {
+    pending = null;
+  });
+  return pending;
+}
+
 function startSampling(c: ClockSync): void {
-  if (sampling) return;
-  sampling = true;
+  if (started) return;
+  started = true;
   void (async () => {
     for (let i = 0; i < INITIAL_SAMPLES; i++) {
       if (i > 0) await new Promise((resolve) => setTimeout(resolve, INITIAL_SPACING_MS));
       await sample(c);
     }
+    setInterval(() => void sample(c), RESYNC_MS);
   })();
-  setInterval(() => void sample(c), RESYNC_MS);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') void sample(c);
   });
 }
 
-/** The app-wide server-synchronized clock; the first caller starts the sampling loop. */
+/**
+ * The app-wide server-synchronized clock. The first caller restores the offset saved under
+ * `ebc.clock` and starts sampling: 5 samples 300 ms apart, then one every 20 s and whenever the
+ * page becomes visible again; the state is saved after each sample.
+ */
 export function useClock(): ClockSync {
   const c = getClock();
   useEffect(() => startSampling(c), [c]);

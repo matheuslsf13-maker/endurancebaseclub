@@ -287,6 +287,21 @@ describe('SessionProvider', () => {
     expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
   });
 
+  it.each([
+    ['email_not_confirmed', 400, 'Email not confirmed', 'Este e-mail ainda não foi confirmado'],
+    ['over_request_rate_limit', 429, 'Request rate limit reached', 'Muitas tentativas seguidas. Aguarde um pouco e tente de novo.'],
+    ['user_banned', 400, 'User is banned', 'Esta conta está bloqueada'],
+  ])('shows the Supabase Auth error %s in Portuguese', async (code, httpStatus, original, message) => {
+    const error = { name: 'AuthApiError', message: original, status: httpStatus, code };
+    sb.auth.signInWithPassword.mockResolvedValue({ data: { user: null, session: null }, error });
+    renderProvider();
+    await waitFor(() => expect(status()).toHaveTextContent('anon'));
+
+    const err = await current.signIn('ana@ebc.test', 'senha-segura').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ message });
+  });
+
   it('marks accounts that are not organizers as forbidden and signs them out', async () => {
     sb.rpc.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
     renderProvider();
@@ -318,6 +333,20 @@ describe('SessionProvider', () => {
     expect(sb.auth.updateUser).toHaveBeenCalledWith({ password: 'senha-nova-123' });
     expect(sb.rpc.mock.calls.map((c) => c[0])).toEqual(['admin_me', 'admin_password_changed', 'admin_me']);
     expect(current.me?.must_change_password).toBe(false);
+  });
+
+  it('does not flag the password as changed when Supabase refuses the new one', async () => {
+    sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
+    sb.auth.updateUser.mockResolvedValue({
+      data: { user: null }, error: { name: 'AuthSessionMissingError', message: 'Auth session missing!', status: 400 },
+    });
+    renderProvider();
+    await waitFor(() => expect(status()).toHaveTextContent('organizer'));
+
+    const err = await current.changePassword('senha-nova-123').catch((e: unknown) => e);
+
+    expect(err).toMatchObject({ message: 'Sua sessão expirou. Entre novamente.' });
+    expect(sb.rpc.mock.calls.map((c) => c[0])).toEqual(['admin_me']);
   });
 
   it('keeps loading while the server is unreachable and retries the restore', async () => {
