@@ -5,6 +5,7 @@ import { Badge, Button, Card, Input, Spinner, useConfirm, useToast } from '../..
 import { api } from '../../lib/api';
 import { useSession } from '../auth/session';
 import type { OrganizerRow } from '../../lib/types';
+import { copyToClipboard, errorMessage } from '../events/eventHelpers';
 
 const MIN_LENGTH = 8;
 // No 0/O, 1/l/I: every character the generator can produce reads unambiguously out loud or on paper.
@@ -17,20 +18,6 @@ function generateTempPassword(): string {
   let out = '';
   for (let i = 0; i < PASSWORD_LENGTH; i++) out += PASSWORD_ALPHABET[bytes[i] % PASSWORD_ALPHABET.length];
   return out;
-}
-
-function errorMessage(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
-
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    if (!navigator.clipboard?.writeText) return false;
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export default function SettingsPage() {

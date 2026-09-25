@@ -1,40 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { Button, Card, Checkbox, Input, Select, Textarea, useConfirm, useToast } from '../../components/ui';
 import { api } from '../../lib/api';
-import type { EventStatus } from '../../lib/types';
+import type { EventRow, EventStatus } from '../../lib/types';
 import { useEventContext } from './EventContext';
+import { copyToClipboard, errorMessage, parseLevels } from './eventHelpers';
 
 const STATUS_OPTIONS: { value: EventStatus; label: string }[] = [
   { value: 'planejado', label: 'Planejado' },
   { value: 'ao_vivo', label: 'Ao vivo' },
   { value: 'encerrado', label: 'Encerrado' },
 ];
-
-/** Comma-separated free text ("Elite, Base, Elite") into a trimmed, order-preserving unique list. */
-function parseLevels(text: string): string[] {
-  const out: string[] = [];
-  for (const raw of text.split(',')) {
-    const v = raw.trim();
-    if (v && !out.includes(v)) out.push(v);
-  }
-  return out;
-}
-
-function errorMessage(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
-
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    if (!navigator.clipboard?.writeText) return false;
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export default function EventGeneralTab() {
   const { agg, refresh } = useEventContext();
@@ -54,17 +31,55 @@ export default function EventGeneralTab() {
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  // A save (or a poll bringing a newer version) replaces `event`: pick up its fields again.
+  // Whether the organizer has typed anything since the form was last seeded from the server.
+  const [dirty, setDirty] = useState(false);
+  // The server's copy changed (another tab, another organizer, a live poll) while this one had
+  // unsaved edits: the form keeps the organizer's values instead of silently discarding them.
+  const [serverChanged, setServerChanged] = useState(false);
+  const eventIdRef = useRef(event.id);
+
+  function seedFromEvent(ev: EventRow) {
+    setName(ev.name);
+    setDate(ev.date);
+    setLocation(ev.location);
+    setDescription(ev.description);
+    setLevels(ev.levels.join(', '));
+    setStatus(ev.status);
+    setIsPublic(ev.is_public);
+    setSlug(ev.public_slug ?? '');
+  }
+
+  // Re-seed the form from a fresh `event` — but only when there's nothing to lose: either this
+  // is a different event altogether (navigated here from another one), or the organizer hasn't
+  // touched the form yet. A dirty form on the *same* event keeps its values and flags
+  // `serverChanged` instead, so a background refetch never silently overwrites in-progress edits
+  // (Ruling 40).
   useEffect(() => {
-    setName(event.name);
-    setDate(event.date);
-    setLocation(event.location);
-    setDescription(event.description);
-    setLevels(event.levels.join(', '));
-    setStatus(event.status);
-    setIsPublic(event.is_public);
-    setSlug(event.public_slug ?? '');
+    const isDifferentEvent = event.id !== eventIdRef.current;
+    eventIdRef.current = event.id;
+    if (isDifferentEvent || !dirty) {
+      seedFromEvent(event);
+      setDirty(false);
+      setServerChanged(false);
+      return;
+    }
+    setServerChanged(true);
+    // `dirty` is read intentionally without being a dependency: this must only re-run when the
+    // event itself changes, never merely because the organizer started typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [event]);
+
+  function reloadFromServer() {
+    seedFromEvent(event);
+    setDirty(false);
+    setServerChanged(false);
+  }
+
+  /** Wraps a field setter so any edit marks the form dirty. */
+  function edited<T>(setter: (v: T) => void, value: T) {
+    setter(value);
+    setDirty(true);
+  }
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -81,6 +96,10 @@ export default function EventGeneralTab() {
         is_public: isPublic,
         public_slug: isPublic ? slug.trim() || null : event.public_slug,
       });
+      // Clear before `refresh()` resolves, so the resulting `event` update is treated as "our own
+      // save landing", not as someone else's concurrent change.
+      setDirty(false);
+      setServerChanged(false);
       await refresh();
       toast.show({ message: 'Evento salvo', tone: 'success' });
     } catch (err) {
@@ -118,37 +137,52 @@ export default function EventGeneralTab() {
 
   return (
     <form onSubmit={(e) => void onSubmit(e)} noValidate className="flex flex-col gap-6">
+      {serverChanged && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+          <p>Os dados do evento mudaram em outro lugar — salve para sobrescrever ou recarregue.</p>
+          <Button type="button" size="sm" variant="secondary" onClick={reloadFromServer}>
+            Recarregar
+          </Button>
+        </div>
+      )}
+
       <Card className="flex flex-col gap-4">
         <h2 className="font-semibold">Dados do evento</h2>
-        <Input label="Nome do evento" required value={name} onChange={(e) => setName(e.target.value)} data-testid="event-name" />
+        <Input
+          label="Nome do evento"
+          required
+          value={name}
+          onChange={(e) => edited(setName, e.target.value)}
+          data-testid="event-name"
+        />
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Input
             label="Data"
             type="date"
             required
             value={date}
-            onChange={(e) => setDate(e.target.value)}
+            onChange={(e) => edited(setDate, e.target.value)}
             data-testid="event-date"
           />
           <Input
             label="Local"
             value={location}
-            onChange={(e) => setLocation(e.target.value)}
+            onChange={(e) => edited(setLocation, e.target.value)}
             data-testid="event-location"
           />
         </div>
-        <Textarea label="Descrição" value={description} onChange={(e) => setDescription(e.target.value)} />
+        <Textarea label="Descrição" value={description} onChange={(e) => edited(setDescription, e.target.value)} />
         <Input
           label="Níveis"
           hint="Ex.: Elite, Base"
           value={levels}
-          onChange={(e) => setLevels(e.target.value)}
+          onChange={(e) => edited(setLevels, e.target.value)}
           data-testid="event-levels"
         />
         <Select
           label="Status"
           value={status}
-          onChange={(e) => setStatus(e.target.value as EventStatus)}
+          onChange={(e) => edited(setStatus, e.target.value as EventStatus)}
           options={STATUS_OPTIONS}
         />
       </Card>
@@ -158,12 +192,12 @@ export default function EventGeneralTab() {
         <Checkbox
           label="Resultados públicos"
           checked={isPublic}
-          onChange={(e) => setIsPublic(e.target.checked)}
+          onChange={(e) => edited(setIsPublic, e.target.checked)}
           data-testid="event-public"
         />
         {isPublic && (
           <div className="flex flex-col gap-2">
-            <Input label="Endereço público (slug)" value={slug} onChange={(e) => setSlug(e.target.value)} />
+            <Input label="Endereço público (slug)" value={slug} onChange={(e) => edited(setSlug, e.target.value)} />
             <div className="flex flex-wrap items-center gap-3">
               <p className="break-all text-sm text-muted tabular">…/#/p/{slug || '—'}</p>
               <Button type="button" size="sm" variant="secondary" onClick={() => void onCopyLink()}>

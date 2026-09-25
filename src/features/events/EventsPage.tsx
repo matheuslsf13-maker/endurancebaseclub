@@ -7,26 +7,13 @@ import type { BadgeTone } from '../../components/ui';
 import { api } from '../../lib/api';
 import { formatDateBR } from '../../lib/format';
 import type { EventStatus, EventSummary } from '../../lib/types';
+import { errorMessage, parseLevels } from './eventHelpers';
 
 const STATUS: Record<EventStatus, { label: string; tone: BadgeTone }> = {
   planejado: { label: 'Planejado', tone: 'neutral' },
   ao_vivo: { label: 'Ao vivo', tone: 'success' },
   encerrado: { label: 'Encerrado', tone: 'info' },
 };
-
-/** Comma-separated free text ("Elite, Base, Elite") into a trimmed, order-preserving unique list. */
-export function parseLevels(text: string): string[] {
-  const out: string[] = [];
-  for (const raw of text.split(',')) {
-    const v = raw.trim();
-    if (v && !out.includes(v)) out.push(v);
-  }
-  return out;
-}
-
-function errorMessage(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
 
 export default function EventsPage() {
   const navigate = useNavigate();

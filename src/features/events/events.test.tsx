@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createMemoryRouter, RouterProvider } from 'react-router';
+import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router';
 import type { RouteObject } from 'react-router';
 
 import { ConfirmProvider, ToastProvider } from '../../components/ui';
@@ -208,6 +208,30 @@ describe('EventGeneralTab', () => {
     return renderRoutes(`/eventos/${ctx.eventId}/geral`, routes);
   }
 
+  // A stable `MemoryRouter` (unlike swapping `createMemoryRouter` instances) lets `rerender` feed
+  // a new context value while keeping `EventGeneralTab`'s own component instance — and therefore
+  // its `useState` — exactly as a real `agg` update from EventProvider would.
+  function renderTabDirect(ctx: EventContextValue) {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const tree = (c: EventContextValue) => (
+      <SessionContext.Provider value={fakeSession(OWNER)}>
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <ConfirmProvider>
+              <MemoryRouter initialEntries={[`/eventos/${c.eventId}/geral`]}>
+                <EventContext.Provider value={c}>
+                  <EventGeneralTab />
+                </EventContext.Provider>
+              </MemoryRouter>
+            </ConfirmProvider>
+          </ToastProvider>
+        </QueryClientProvider>
+      </SessionContext.Provider>
+    );
+    const result = render(tree(ctx));
+    return { ...result, rerenderWithContext: (next: EventContextValue) => result.rerender(tree(next)) };
+  }
+
   it("shows the event's current data, including the public link preview", () => {
     const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC', date: '2026-10-11', location: 'Vila Velha', levels: ['Elite', 'Base'], is_public: true, public_slug: 'copa-ebc' }) });
     renderTab(fakeContext(agg));
@@ -265,6 +289,59 @@ describe('EventGeneralTab', () => {
     await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
     expect(await screen.findByText('Lista de eventos')).toBeInTheDocument();
     expect(router.state.location.pathname).toBe('/eventos');
+  });
+
+  it('keeps unsaved edits when the event changes elsewhere, and offers to reload (Ruling 40)', async () => {
+    const user = userEvent.setup();
+    const agg1 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+    const { rerenderWithContext } = renderTabDirect(fakeContext(agg1));
+
+    await user.clear(screen.getByTestId('event-name'));
+    await user.type(screen.getByTestId('event-name'), 'Nome em edição');
+    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
+
+    // Someone else (another tab, another organizer, a live poll) saved over the same event.
+    const agg2 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC (renomeada em outro lugar)' }) });
+    rerenderWithContext(fakeContext(agg2));
+
+    expect(screen.getByTestId('event-name')).toHaveValue('Nome em edição');
+    expect(screen.getByText(/Os dados do evento mudaram em outro lugar/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Recarregar' }));
+
+    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC (renomeada em outro lugar)');
+    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
+  });
+
+  it('re-seeds freely from a fresh event while the form is untouched', () => {
+    const agg1 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+    const { rerenderWithContext } = renderTabDirect(fakeContext(agg1));
+
+    const agg2 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC (atualizada)' }) });
+    rerenderWithContext(fakeContext(agg2));
+
+    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC (atualizada)');
+    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
+  });
+
+  it('does not warn about its own save landing', async () => {
+    const user = userEvent.setup();
+    mocks.saveEvent.mockResolvedValue(makeEvent());
+    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+    const { rerenderWithContext } = renderTabDirect(fakeContext(agg));
+
+    await user.clear(screen.getByTestId('event-name'));
+    await user.type(screen.getByTestId('event-name'), 'Copa EBC 2027');
+    await user.click(screen.getByTestId('event-save'));
+    await waitFor(() => expect(mocks.saveEvent).toHaveBeenCalled());
+
+    // `refresh()` on this fixture is a no-op mock, so simulate the aggregate it would normally
+    // bring back: the same event, saved, as a fresh object.
+    const savedAgg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC 2027' }) });
+    rerenderWithContext(fakeContext(savedAgg));
+
+    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC 2027');
+    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
   });
 });
 
