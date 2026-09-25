@@ -1,0 +1,18 @@
+begin;
+select tests.set('owner', public.bootstrap_owner('owner@ebc.test','senha-forte-1','Owner')::text);
+select tests.set('stranger', public.internal_create_auth_user('x@ebc.test','senha-forte-1')::text);
+select tests.as_anon();
+select tests.assert_raises($$select * from public.events$$, '42501');
+select tests.assert_raises($$select * from public.marks$$, '42501');
+select tests.assert_raises($$select public.admin_list_events()$$, '42501');
+select tests.assert_raises($$select public.internal_create_auth_user('a@b.co','12345678')$$, '42501');
+select tests.assert_raises($$select public.bootstrap_owner('a@b.co','12345678','x')$$, '42501');
+select tests.assert_raises($$select public.tk_event('x')$$, '42501');
+select tests.assert_raises($$select public.entry_json(gen_random_uuid(), true)$$, '42501');
+do $$ begin assert public.server_time() > 0; assert jsonb_typeof(public.pub_events()) = 'array'; end $$;
+reset role;
+select tests.as_user(tests.get('stranger')::uuid);
+select tests.assert_raises($$select public.admin_list_events()$$, '42501');
+select tests.assert_raises($$select * from public.athletes$$, '42501');
+reset role;
+rollback;
