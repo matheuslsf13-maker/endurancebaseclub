@@ -201,3 +201,6 @@ Task 18: review — spec ✅, 1 Important (parseLevels/errorMessage/copyToClipbo
 - Ruling 39: "Duplicar" lands on the copy's Geral tab (/eventos/:id) — the organizer reviews name/date first; "Novo evento" keeps /provas — cost if wrong: one extra tab click.
 - Ruling 40 (promotes T18 Minor 2 — silent loss of unsaved input under multi-organizer refetch): EventGeneralTab re-seeds from agg.event only when not dirty or when the event id changes; otherwise keeps the user's values and shows "Os dados do evento mudaram em outro lugar…" + Recarregar. Final review to check other agg-bound forms (RaceEditor, EntryForm) for the same hazard — cost if wrong: none.
 Task 18: minor (deferred): per-card/per-row action buttons (Duplicar/Excluir/Remover) lack item-specific accessible names
+Task 25: implemented 884253b (task/25, base bae2379; 14 focused tests; 1 full-suite failure = T17 stub-text test → Ruling 36) — review dispatched
+- Ruling 41: ClassificationTable and PodiumView take an extra required prop `athletesById: Map<string, AthleteRow>` (admin entries carry only athlete ids; names come from the aggregate's athletes) — accepted as the contract; T26 passes the map built from pub_event's athletes — cost if wrong: none.
+Task 23: implemented c03ef19 (task/23, base bae2379; 22 focused tests; 1 full-suite failure = T17 stub-text → Ruling 36) — review dispatched
