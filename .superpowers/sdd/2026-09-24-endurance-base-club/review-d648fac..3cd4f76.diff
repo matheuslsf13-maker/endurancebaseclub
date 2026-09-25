@@ -1,0 +1,2658 @@
+# Review package: d648fac..3cd4f76 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+3cd4f76 feat(app): API client, session, router and event data context
+8066ba6 Merge branch 'feat/ebc-app' into task/17
+3311334 wip(app): API client, session, router and event data context (partial)
+7e293bd chore: base task 17 on task/16 (re-review in progress)
+6b33a30 chore: base task 17 on task/11 (review in progress)
+
+## Files changed
+ src/App.tsx                                  |  86 +++++-
+ src/features/NotFound.tsx                    |  18 ++
+ src/features/athletes/AthleteProfilePage.tsx |   1 +
+ src/features/athletes/AthletesPage.tsx       |   1 +
+ src/features/auth/ChangePasswordPage.tsx     |  96 +++++++
+ src/features/auth/LoginPage.tsx              |  87 ++++++
+ src/features/auth/RequireOrganizer.tsx       |  40 +++
+ src/features/auth/auth.test.tsx              | 396 +++++++++++++++++++++++++++
+ src/features/auth/session.tsx                | 170 ++++++++++++
+ src/features/entries/EntriesTab.tsx          |   1 +
+ src/features/events/EventContext.tsx         |  70 +++++
+ src/features/events/EventGeneralTab.tsx      |   1 +
+ src/features/events/EventLayout.tsx          | 120 ++++++++
+ src/features/events/EventsPage.tsx           |   1 +
+ src/features/events/eventShell.test.tsx      | 298 ++++++++++++++++++++
+ src/features/help/HelpPage.tsx               |   1 +
+ src/features/public/PublicAthletePage.tsx    |   1 +
+ src/features/public/PublicEventPage.tsx      |   1 +
+ src/features/public/PublicHome.tsx           |   1 +
+ src/features/races/RacesTab.tsx              |   1 +
+ src/features/results/ResultsTab.tsx          |   1 +
+ src/features/review/ReviewTab.tsx            |   1 +
+ src/features/settings/SettingsPage.tsx       |   1 +
+ src/features/timekeeper/TimekeeperPage.tsx   |   1 +
+ src/features/timing/TimingTab.tsx            |   1 +
+ src/hooks/useClock.test.ts                   | 143 ++++++++++
+ src/hooks/useClock.ts                        |  78 ++++++
+ src/hooks/useEventData.test.tsx              | 272 ++++++++++++++++++
+ src/hooks/useEventData.ts                    | 135 +++++++++
+ src/lib/api.test.ts                          | 141 ++++++++++
+ src/lib/api.ts                               | 162 +++++++++++
+ src/lib/supabase.ts                          |  16 ++
+ src/main.tsx                                 |  24 +-
+ src/test/setup.test.tsx                      |  16 ++
+ src/test/setup.ts                            |   8 +
+ 35 files changed, 2389 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/App.tsx b/src/App.tsx
+index 4e79fa9..f52c694 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,3 +1,87 @@
++import { createHashRouter, Navigate, RouterProvider } from 'react-router';
++import type { RouteObject } from 'react-router';
++import { Layout } from './components/Layout';
++import { Spinner } from './components/ui';
++import { useSession } from './features/auth/session';
++import LoginPage from './features/auth/LoginPage';
++import ChangePasswordPage from './features/auth/ChangePasswordPage';
++import RequireOrganizer from './features/auth/RequireOrganizer';
++import EventsPage from './features/events/EventsPage';
++import EventLayout from './features/events/EventLayout';
++import EventGeneralTab from './features/events/EventGeneralTab';
++import RacesTab from './features/races/RacesTab';
++import EntriesTab from './features/entries/EntriesTab';
++import TimingTab from './features/timing/TimingTab';
++import ReviewTab from './features/review/ReviewTab';
++import ResultsTab from './features/results/ResultsTab';
++import AthletesPage from './features/athletes/AthletesPage';
++import AthleteProfilePage from './features/athletes/AthleteProfilePage';
++import HelpPage from './features/help/HelpPage';
++import SettingsPage from './features/settings/SettingsPage';
++import TimekeeperPage from './features/timekeeper/TimekeeperPage';
++import PublicHome from './features/public/PublicHome';
++import PublicEventPage from './features/public/PublicEventPage';
++import PublicAthletePage from './features/public/PublicAthletePage';
++import NotFound from './features/NotFound';
++
++/** `#/`: the organizer's dashboard when signed in, the public event list otherwise. */
++function Home() {
++  const { status } = useSession();
++  if (status === 'loading') {
++    return (
++      <div className="flex min-h-full items-center justify-center p-6">
++        <Spinner size={32} />
++      </div>
++    );
++  }
++  if (status === 'organizer') return <Navigate to="/eventos" replace />;
++  return <PublicHome />;
++}
++
++function OrganizerArea() {
++  const { signOut } = useSession();
++  return (
++    <RequireOrganizer>
++      <Layout onLogout={() => void signOut()} />
++    </RequireOrganizer>
++  );
++}
++
++export const routes: RouteObject[] = [
++  { path: '/', element: <Home /> },
++  { path: '/entrar', element: <LoginPage /> },
++  { path: '/trocar-senha', element: <ChangePasswordPage /> },
++  {
++    element: <OrganizerArea />,
++    children: [
++      { path: '/eventos', element: <EventsPage /> },
++      {
++        path: '/eventos/:eventId',
++        element: <EventLayout />,
++        children: [
++          { index: true, element: <Navigate to="geral" replace /> },
++          { path: 'geral', element: <EventGeneralTab /> },
++          { path: 'provas', element: <RacesTab /> },
++          { path: 'inscricoes', element: <EntriesTab /> },
++          { path: 'cronometragem', element: <TimingTab /> },
++          { path: 'revisao', element: <ReviewTab /> },
++          { path: 'resultados', element: <ResultsTab /> },
++        ],
++      },
++      { path: '/atletas', element: <AthletesPage /> },
++      { path: '/atletas/:athleteId', element: <AthleteProfilePage /> },
++      { path: '/ajuda', element: <HelpPage /> },
++      { path: '/config', element: <SettingsPage /> },
++    ],
++  },
++  { path: '/c/:token', element: <TimekeeperPage /> },
++  { path: '/p/:slug', element: <PublicEventPage /> },
++  { path: '/atleta/:athleteId', element: <PublicAthletePage /> },
++  { path: '*', element: <NotFound /> },
++];
++
++const router = createHashRouter(routes);
++
+ export default function App() {
+-  return <main className="p-6 brand-title">EnduranceBaseClub</main>;
++  return <RouterProvider router={router} />;
+ }
+diff --git a/src/features/NotFound.tsx b/src/features/NotFound.tsx
+new file mode 100644
+index 0000000..56dbd9a
+--- /dev/null
++++ b/src/features/NotFound.tsx
+@@ -0,0 +1,18 @@
++import { Link } from 'react-router';
++import { Logo } from '../components/Logo';
++
++export default function NotFound() {
++  return (
++    <div className="flex min-h-full flex-col items-center justify-center gap-4 bg-bg px-4 py-10 text-center text-fg">
++      <Logo size={64} />
++      <h1 className="brand-title text-lg font-semibold">Página não encontrada</h1>
++      <p className="max-w-sm text-sm text-muted">O endereço pode estar incompleto ou a página não existe mais.</p>
++      <Link
++        to="/"
++        className="inline-flex min-h-11 items-center rounded-xl border border-border px-4 text-sm font-medium hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++      >
++        Voltar ao início
++      </Link>
++    </div>
++  );
++}
+diff --git a/src/features/athletes/AthleteProfilePage.tsx b/src/features/athletes/AthleteProfilePage.tsx
+new file mode 100644
+index 0000000..6197076
+--- /dev/null
++++ b/src/features/athletes/AthleteProfilePage.tsx
+@@ -0,0 +1 @@
++export default function AthleteProfilePage() { return <h1 className="p-6 brand-title">AthleteProfilePage</h1>; }
+diff --git a/src/features/athletes/AthletesPage.tsx b/src/features/athletes/AthletesPage.tsx
+new file mode 100644
+index 0000000..6d3f99a
+--- /dev/null
++++ b/src/features/athletes/AthletesPage.tsx
+@@ -0,0 +1 @@
++export default function AthletesPage() { return <h1 className="p-6 brand-title">AthletesPage</h1>; }
+diff --git a/src/features/auth/ChangePasswordPage.tsx b/src/features/auth/ChangePasswordPage.tsx
+new file mode 100644
+index 0000000..3c8faf2
+--- /dev/null
++++ b/src/features/auth/ChangePasswordPage.tsx
+@@ -0,0 +1,96 @@
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import { Navigate, useNavigate } from 'react-router';
++import { Logo } from '../../components/Logo';
++import { Button, Card, Input, Spinner, useToast } from '../../components/ui';
++import { useSession } from './session';
++
++const MIN_LENGTH = 8;
++
++export default function ChangePasswordPage() {
++  const { status, me, changePassword, signOut } = useSession();
++  const navigate = useNavigate();
++  const toast = useToast();
++  const [pw1, setPw1] = useState('');
++  const [pw2, setPw2] = useState('');
++  const [errors, setErrors] = useState<{ pw1?: string; pw2?: string; form?: string }>({});
++  const [busy, setBusy] = useState(false);
++
++  if (status === 'loading') {
++    return (
++      <div className="flex min-h-full items-center justify-center p-6">
++        <Spinner size={32} />
++      </div>
++    );
++  }
++  if (status !== 'organizer') return <Navigate to="/entrar" replace />;
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const next = {
++      pw1: pw1.length < MIN_LENGTH ? `A senha precisa ter pelo menos ${MIN_LENGTH} caracteres` : undefined,
++      pw2: pw1 !== pw2 ? 'As senhas não conferem' : undefined,
++    };
++    setErrors(next);
++    if (next.pw1 || next.pw2) return;
++
++    setBusy(true);
++    try {
++      await changePassword(pw1);
++      toast.show({ message: 'Senha alterada', tone: 'success' });
++      navigate('/eventos', { replace: true });
++    } catch (err) {
++      setErrors({ form: err instanceof Error && err.message ? err.message : 'Não foi possível alterar a senha' });
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className="flex min-h-full items-center justify-center bg-bg px-4 py-10 text-fg">
++      <Card className="w-full max-w-sm">
++        <div className="flex flex-col items-center gap-3 text-center">
++          <Logo size={64} />
++          <h1 className="brand-title text-lg font-semibold">Nova senha</h1>
++          <p className="text-sm text-muted">
++            {me?.must_change_password
++              ? 'Por segurança, troque a senha provisória antes de continuar.'
++              : 'Escolha uma nova senha para a sua conta.'}
++          </p>
++        </div>
++
++        <form className="mt-6 flex flex-col gap-4" onSubmit={onSubmit} noValidate>
++          <Input
++            label="Nova senha"
++            type="password"
++            autoComplete="new-password"
++            hint={`Pelo menos ${MIN_LENGTH} caracteres`}
++            error={errors.pw1}
++            value={pw1}
++            onChange={(e) => setPw1(e.target.value)}
++            data-testid="newpass-1"
++          />
++          <Input
++            label="Repita a nova senha"
++            type="password"
++            autoComplete="new-password"
++            error={errors.pw2}
++            value={pw2}
++            onChange={(e) => setPw2(e.target.value)}
++            data-testid="newpass-2"
++          />
++          {errors.form && (
++            <p role="alert" className="text-sm text-danger">
++              {errors.form}
++            </p>
++          )}
++          <Button type="submit" size="lg" loading={busy} data-testid="newpass-submit">
++            Salvar nova senha
++          </Button>
++          <Button variant="ghost" onClick={() => void signOut()} disabled={busy} data-testid="logout">
++            Sair
++          </Button>
++        </form>
++      </Card>
++    </div>
++  );
++}
+diff --git a/src/features/auth/LoginPage.tsx b/src/features/auth/LoginPage.tsx
+new file mode 100644
+index 0000000..d851dee
+--- /dev/null
++++ b/src/features/auth/LoginPage.tsx
+@@ -0,0 +1,87 @@
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import { Link, Navigate, useLocation, useNavigate } from 'react-router';
++import { Logo } from '../../components/Logo';
++import { Button, Card, Input } from '../../components/ui';
++import { useSession } from './session';
++
++/** Where to go after signing in: the page RequireOrganizer bounced from, if it is an in-app path. */
++function redirectTarget(state: unknown): string {
++  const from = (state as { from?: unknown } | null)?.from;
++  return typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') ? from : '/eventos';
++}
++
++export default function LoginPage() {
++  const { status, signIn } = useSession();
++  const navigate = useNavigate();
++  const target = redirectTarget(useLocation().state);
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  // Already signed in (e.g. opened #/entrar from a bookmark): skip the form.
++  if (status === 'organizer' && !busy) return <Navigate to={target} replace />;
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    setError(null);
++    setBusy(true);
++    try {
++      await signIn(email, password);
++      navigate(target, { replace: true });
++    } catch (err) {
++      setError(err instanceof Error && err.message ? err.message : 'Não foi possível entrar');
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className="flex min-h-full items-center justify-center bg-bg px-4 py-10 text-fg">
++      <Card className="w-full max-w-sm">
++        <div className="flex flex-col items-center gap-3 text-center">
++          <Logo size={88} />
++          <h1 className="brand-title text-lg font-semibold">Endurance Base Club</h1>
++          <p className="text-sm text-muted">Acesso da organização</p>
++        </div>
++
++        <form className="mt-6 flex flex-col gap-4" onSubmit={onSubmit} noValidate>
++          <Input
++            label="E-mail"
++            type="email"
++            inputMode="email"
++            autoComplete="username"
++            autoCapitalize="none"
++            required
++            value={email}
++            onChange={(e) => setEmail(e.target.value)}
++            data-testid="login-email"
++          />
++          <Input
++            label="Senha"
++            type="password"
++            autoComplete="current-password"
++            required
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            data-testid="login-password"
++          />
++          {error && (
++            <p role="alert" className="text-sm text-danger">
++              {error}
++            </p>
++          )}
++          <Button type="submit" size="lg" loading={busy} disabled={!email.trim() || !password} data-testid="login-submit">
++            Entrar
++          </Button>
++        </form>
++
++        <p className="mt-6 text-center text-sm">
++          <Link to="/" className="text-muted underline underline-offset-2 hover:text-fg">
++            Ver resultados públicos
++          </Link>
++        </p>
++      </Card>
++    </div>
++  );
++}
+diff --git a/src/features/auth/RequireOrganizer.tsx b/src/features/auth/RequireOrganizer.tsx
+new file mode 100644
+index 0000000..f7d98ac
+--- /dev/null
++++ b/src/features/auth/RequireOrganizer.tsx
+@@ -0,0 +1,40 @@
++import { useMemo } from 'react';
++import type { ReactNode } from 'react';
++import { Navigate, Outlet, useLocation } from 'react-router';
++import { Logo } from '../../components/Logo';
++import { Button, Card, Spinner } from '../../components/ui';
++import { useSession } from './session';
++
++/** Guards the organizer area: renders `children` (or the nested route) only for organizers. */
++export default function RequireOrganizer({ children }: { children?: ReactNode }) {
++  const { status, me, signOut } = useSession();
++  const location = useLocation();
++  const from = location.pathname + location.search;
++  // Stable object: <Navigate> re-navigates whenever its `state` prop changes identity.
++  const redirectState = useMemo(() => ({ from }), [from]);
++
++  if (status === 'loading') {
++    return (
++      <div className="flex min-h-full items-center justify-center p-6">
++        <Spinner size={32} />
++      </div>
++    );
++  }
++  if (status === 'anon') return <Navigate to="/entrar" replace state={redirectState} />;
++  if (status === 'forbidden') {
++    return (
++      <div className="flex min-h-full items-center justify-center bg-bg px-4 py-10 text-fg">
++        <Card className="flex w-full max-w-sm flex-col items-center gap-3 text-center">
++          <Logo size={64} />
++          <p className="text-base font-medium">Esta conta não tem acesso de organização</p>
++          <p className="text-sm text-muted">Entre com uma conta de organizador ou peça acesso à organizadora master.</p>
++          <Button className="mt-3" onClick={() => void signOut()} data-testid="logout">
++            Sair
++          </Button>
++        </Card>
++      </div>
++    );
++  }
++  if (me?.must_change_password) return <Navigate to="/trocar-senha" replace />;
++  return <>{children ?? <Outlet />}</>;
++}
+diff --git a/src/features/auth/auth.test.tsx b/src/features/auth/auth.test.tsx
+new file mode 100644
+index 0000000..28e9b11
+--- /dev/null
++++ b/src/features/auth/auth.test.tsx
+@@ -0,0 +1,396 @@
++import { useState } from 'react';
++import type { ReactNode } from 'react';
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { act, render, screen, waitFor } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { Route, Routes } from 'react-router';
++
++import { renderWithProviders } from '../../test/renderWithProviders';
++import { ApiError } from '../../lib/api';
++import type { AdminMe } from '../../lib/types';
++import { SessionContext, SessionProvider, useSession } from './session';
++import type { SessionStatus, SessionValue } from './session';
++import LoginPage from './LoginPage';
++import ChangePasswordPage from './ChangePasswordPage';
++import RequireOrganizer from './RequireOrganizer';
++
++const sb = vi.hoisted(() => ({
++  rpc: vi.fn(),
++  auth: {
++    getSession: vi.fn(),
++    onAuthStateChange: vi.fn(),
++    signInWithPassword: vi.fn(),
++    signOut: vi.fn(),
++    updateUser: vi.fn(),
++  },
++}));
++vi.mock('../../lib/supabase', () => ({ supabase: sb }));
++
++const ME: AdminMe = { user_id: 'u1', email: 'ana@ebc.test', name: 'Ana', role: 'owner', must_change_password: false };
++
++function fakeSession(overrides: Partial<SessionValue> = {}): SessionValue {
++  return {
++    status: 'anon',
++    me: null,
++    signIn: vi.fn().mockResolvedValue(undefined),
++    signOut: vi.fn().mockResolvedValue(undefined),
++    changePassword: vi.fn().mockResolvedValue(undefined),
++    refreshMe: vi.fn().mockResolvedValue(undefined),
++    ...overrides,
++  };
++}
++
++function renderRoutes(route: string, session: SessionValue, routes: ReactNode) {
++  return renderWithProviders(
++    <SessionContext.Provider value={session}>
++      <Routes>{routes}</Routes>
++    </SessionContext.Provider>,
++    { route },
++  );
++}
++
++describe('LoginPage', () => {
++  it('submits the credentials and navigates to /eventos', async () => {
++    const user = userEvent.setup();
++    const session = fakeSession();
++    const { router } = renderRoutes('/entrar', session, (
++      <>
++        <Route path="/entrar" element={<LoginPage />} />
++        <Route path="/eventos" element={<p>Painel de eventos</p>} />
++      </>
++    ));
++
++    await user.type(screen.getByTestId('login-email'), 'ana@ebc.test');
++    await user.type(screen.getByTestId('login-password'), 'senha-segura');
++    await user.click(screen.getByTestId('login-submit'));
++
++    expect(await screen.findByText('Painel de eventos')).toBeInTheDocument();
++    expect(session.signIn).toHaveBeenCalledWith('ana@ebc.test', 'senha-segura');
++    expect(router.state.location.pathname).toBe('/eventos');
++  });
++
++  it('shows "E-mail ou senha incorretos" when the sign-in fails', async () => {
++    const user = userEvent.setup();
++    const session = fakeSession({ signIn: vi.fn().mockRejectedValue(new ApiError('E-mail ou senha incorretos')) });
++    const { router } = renderRoutes('/entrar', session, <Route path="/entrar" element={<LoginPage />} />);
++
++    await user.type(screen.getByTestId('login-email'), 'ana@ebc.test');
++    await user.type(screen.getByTestId('login-password'), 'errada');
++    await user.click(screen.getByTestId('login-submit'));
++
++    expect(await screen.findByText('E-mail ou senha incorretos')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/entrar');
++    expect(screen.getByTestId('login-submit')).toBeEnabled();
++  });
++
++  it('returns to the page the organizer was trying to open', async () => {
++    const user = userEvent.setup();
++    function StatefulSession({ children }: { children: ReactNode }) {
++      const [status, setStatus] = useState<SessionStatus>('anon');
++      const value = fakeSession({
++        status,
++        me: status === 'organizer' ? ME : null,
++        signIn: vi.fn(async () => setStatus('organizer')),
++      });
++      return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
++    }
++    const { router } = renderWithProviders(
++      <StatefulSession>
++        <Routes>
++          <Route path="/entrar" element={<LoginPage />} />
++          <Route path="/eventos/*" element={<RequireOrganizer><p>Revisão do evento</p></RequireOrganizer>} />
++        </Routes>
++      </StatefulSession>,
++      { route: '/eventos/ev1/revisao' },
++    );
++
++    await user.type(await screen.findByTestId('login-email'), 'ana@ebc.test');
++    await user.type(screen.getByTestId('login-password'), 'senha-segura');
++    await user.click(screen.getByTestId('login-submit'));
++
++    expect(await screen.findByText('Revisão do evento')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/eventos/ev1/revisao');
++  });
++});
++
++describe('RequireOrganizer', () => {
++  const guarded = (
++    <>
++      <Route path="/entrar" element={<p>Tela de login</p>} />
++      <Route path="/trocar-senha" element={<p>Troque sua senha</p>} />
++      <Route path="/eventos/*" element={<RequireOrganizer><p>Área da organização</p></RequireOrganizer>} />
++    </>
++  );
++
++  it('redirects anonymous visitors to /entrar, remembering where they were going', async () => {
++    const { router } = renderRoutes('/eventos/ev1/revisao', fakeSession(), guarded);
++
++    expect(await screen.findByText('Tela de login')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/entrar');
++    expect(router.state.location.state).toEqual({ from: '/eventos/ev1/revisao' });
++    expect(screen.queryByText('Área da organização')).not.toBeInTheDocument();
++  });
++
++  it('redirects organizers with a provisional password to /trocar-senha', async () => {
++    const session = fakeSession({ status: 'organizer', me: { ...ME, must_change_password: true } });
++    const { router } = renderRoutes('/eventos', session, guarded);
++
++    expect(await screen.findByText('Troque sua senha')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/trocar-senha');
++  });
++
++  it('renders the protected page for organizers', () => {
++    renderRoutes('/eventos', fakeSession({ status: 'organizer', me: ME }), guarded);
++    expect(screen.getByText('Área da organização')).toBeInTheDocument();
++  });
++
++  it('shows a spinner while the session is being checked', () => {
++    renderRoutes('/eventos', fakeSession({ status: 'loading' }), guarded);
++    expect(screen.getByRole('status', { name: 'Carregando' })).toBeInTheDocument();
++    expect(screen.queryByText('Área da organização')).not.toBeInTheDocument();
++  });
++
++  it('explains that the account has no organizer access and offers to log out', async () => {
++    const user = userEvent.setup();
++    const session = fakeSession({ status: 'forbidden' });
++    renderRoutes('/eventos', session, guarded);
++
++    expect(screen.getByText('Esta conta não tem acesso de organização')).toBeInTheDocument();
++    await user.click(screen.getByTestId('logout'));
++    expect(session.signOut).toHaveBeenCalledTimes(1);
++  });
++});
++
++describe('ChangePasswordPage', () => {
++  it('requires 8+ characters and a matching confirmation, then saves and opens /eventos', async () => {
++    const user = userEvent.setup();
++    const session = fakeSession({ status: 'organizer', me: { ...ME, must_change_password: true } });
++    const { router } = renderRoutes('/trocar-senha', session, (
++      <>
++        <Route path="/trocar-senha" element={<ChangePasswordPage />} />
++        <Route path="/eventos" element={<p>Painel de eventos</p>} />
++      </>
++    ));
++
++    await user.type(screen.getByTestId('newpass-1'), 'curta');
++    await user.type(screen.getByTestId('newpass-2'), 'curta');
++    await user.click(screen.getByTestId('newpass-submit'));
++    expect(screen.getByText('A senha precisa ter pelo menos 8 caracteres')).toBeInTheDocument();
++
++    await user.clear(screen.getByTestId('newpass-1'));
++    await user.type(screen.getByTestId('newpass-1'), 'senha-nova-1');
++    await user.clear(screen.getByTestId('newpass-2'));
++    await user.type(screen.getByTestId('newpass-2'), 'senha-nova-2');
++    await user.click(screen.getByTestId('newpass-submit'));
++    expect(screen.getByText('As senhas não conferem')).toBeInTheDocument();
++    expect(session.changePassword).not.toHaveBeenCalled();
++
++    await user.clear(screen.getByTestId('newpass-2'));
++    await user.type(screen.getByTestId('newpass-2'), 'senha-nova-1');
++    await user.click(screen.getByTestId('newpass-submit'));
++
++    expect(await screen.findByText('Painel de eventos')).toBeInTheDocument();
++    expect(session.changePassword).toHaveBeenCalledWith('senha-nova-1');
++    expect(router.state.location.pathname).toBe('/eventos');
++  });
++
++  it('sends visitors without a session to /entrar', async () => {
++    const { router } = renderRoutes('/trocar-senha', fakeSession(), (
++      <>
++        <Route path="/trocar-senha" element={<ChangePasswordPage />} />
++        <Route path="/entrar" element={<p>Tela de login</p>} />
++      </>
++    ));
++    expect(await screen.findByText('Tela de login')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/entrar');
++  });
++});
++
++describe('SessionProvider', () => {
++  let current: SessionValue;
++  function Probe() {
++    current = useSession();
++    return <p data-testid="status">{current.status}</p>;
++  }
++  function renderProvider() {
++    return render(
++      <QueryClientProvider client={new QueryClient()}>
++        <SessionProvider>
++          <Probe />
++        </SessionProvider>
++      </QueryClientProvider>,
++    );
++  }
++  const status = () => screen.getByTestId('status');
++  const rpcOk = (data: unknown) => ({ data, error: null, status: 200 });
++
++  beforeEach(() => {
++    vi.clearAllMocks();
++    sb.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
++    sb.auth.onAuthStateChange.mockReturnValue({ data: { subscription: { unsubscribe: vi.fn() } } });
++    sb.auth.signInWithPassword.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
++    sb.auth.signOut.mockResolvedValue({ error: null });
++    sb.auth.updateUser.mockResolvedValue({ data: { user: { id: 'u1' } }, error: null });
++    sb.rpc.mockResolvedValue(rpcOk(ME));
++  });
++
++  it('is anonymous when no session is stored', async () => {
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('anon'));
++    expect(sb.rpc).not.toHaveBeenCalled();
++  });
++
++  it('restores a stored session by asking admin_me', async () => {
++    sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('organizer'));
++    expect(sb.rpc).toHaveBeenCalledWith('admin_me');
++    expect(current.me).toEqual(ME);
++  });
++
++  it('signs in with the trimmed e-mail and loads the organizer profile', async () => {
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('anon'));
++
++    await act(() => current.signIn(' ana@ebc.test ', 'senha-segura'));
++
++    expect(sb.auth.signInWithPassword).toHaveBeenCalledWith({ email: 'ana@ebc.test', password: 'senha-segura' });
++    expect(status()).toHaveTextContent('organizer');
++    expect(current.me).toEqual(ME);
++  });
++
++  it('maps Supabase "Invalid login credentials" to "E-mail ou senha incorretos"', async () => {
++    sb.auth.signInWithPassword.mockResolvedValue({
++      data: { user: null, session: null },
++      error: { name: 'AuthApiError', message: 'Invalid login credentials', status: 400, code: 'invalid_credentials' },
++    });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('anon'));
++
++    const err = await current.signIn('ana@ebc.test', 'errada').catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ApiError);
++    expect(err).toMatchObject({ message: 'E-mail ou senha incorretos' });
++    expect(sb.rpc).not.toHaveBeenCalled();
++    expect(status()).toHaveTextContent('anon');
++  });
++
++  it('maps an unreachable auth server to "Sem conexão com o servidor"', async () => {
++    sb.auth.signInWithPassword.mockResolvedValue({
++      data: { user: null, session: null },
++      error: { name: 'AuthRetryableFetchError', message: 'Failed to fetch', status: 0 },
++    });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('anon'));
++
++    const err = await current.signIn('ana@ebc.test', 'senha-segura').catch((e: unknown) => e);
++    expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
++  });
++
++  it.each([
++    ['email_not_confirmed', 400, 'Email not confirmed', 'Este e-mail ainda não foi confirmado'],
++    ['over_request_rate_limit', 429, 'Request rate limit reached', 'Muitas tentativas seguidas. Aguarde um pouco e tente de novo.'],
++    ['user_banned', 400, 'User is banned', 'Esta conta está bloqueada'],
++  ])('shows the Supabase Auth error %s in Portuguese', async (code, httpStatus, original, message) => {
++    const error = { name: 'AuthApiError', message: original, status: httpStatus, code };
++    sb.auth.signInWithPassword.mockResolvedValue({ data: { user: null, session: null }, error });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('anon'));
++
++    const err = await current.signIn('ana@ebc.test', 'senha-segura').catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ApiError);
++    expect(err).toMatchObject({ message });
++  });
++
++  it('marks accounts that are not organizers as forbidden and signs them out', async () => {
++    sb.rpc.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('anon'));
++
++    await act(() => current.signIn('atleta@ebc.test', 'senha-segura'));
++
++    expect(status()).toHaveTextContent('forbidden');
++    expect(current.me).toBeNull();
++    expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
++  });
++
++  it('changes the password, clears the provisional flag and reloads the profile', async () => {
++    let mustChange = true;
++    sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
++    sb.rpc.mockImplementation(async (fn: string) => {
++      if (fn === 'admin_me') return rpcOk({ ...ME, must_change_password: mustChange });
++      if (fn === 'admin_password_changed') {
++        mustChange = false;
++        return rpcOk(null);
++      }
++      throw new Error(`unexpected rpc ${fn}`);
++    });
++    renderProvider();
++    await waitFor(() => expect(current.me?.must_change_password).toBe(true));
++
++    await act(() => current.changePassword('senha-nova-123'));
++
++    expect(sb.auth.updateUser).toHaveBeenCalledWith({ password: 'senha-nova-123' });
++    expect(sb.rpc.mock.calls.map((c) => c[0])).toEqual(['admin_me', 'admin_password_changed', 'admin_me']);
++    expect(current.me?.must_change_password).toBe(false);
++  });
++
++  it('does not flag the password as changed when Supabase refuses the new one', async () => {
++    sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
++    sb.auth.updateUser.mockResolvedValue({
++      data: { user: null }, error: { name: 'AuthSessionMissingError', message: 'Auth session missing!', status: 400 },
++    });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('organizer'));
++
++    const err = await current.changePassword('senha-nova-123').catch((e: unknown) => e);
++
++    expect(err).toMatchObject({ message: 'Sua sessão expirou. Entre novamente.' });
++    expect(sb.rpc.mock.calls.map((c) => c[0])).toEqual(['admin_me']);
++  });
++
++  it('keeps loading while the server is unreachable and retries the restore', async () => {
++    vi.useFakeTimers();
++    try {
++      sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
++      sb.rpc.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(rpcOk(ME));
++      renderProvider();
++      await act(() => vi.advanceTimersByTimeAsync(100));
++      expect(status()).toHaveTextContent('loading');
++      expect(sb.auth.signOut).not.toHaveBeenCalled();
++
++      await act(() => vi.advanceTimersByTimeAsync(3_000));
++      expect(status()).toHaveTextContent('organizer');
++      expect(sb.rpc).toHaveBeenCalledTimes(2);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it('returns to anonymous when the session ends elsewhere', async () => {
++    let onAuthEvent: (event: string) => void = () => {};
++    sb.auth.onAuthStateChange.mockImplementation((cb: (event: string) => void) => {
++      onAuthEvent = cb;
++      return { data: { subscription: { unsubscribe: vi.fn() } } };
++    });
++    sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('organizer'));
++
++    act(() => onAuthEvent('SIGNED_OUT'));
++
++    expect(status()).toHaveTextContent('anon');
++  });
++
++  it('signs out back to anonymous', async () => {
++    sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
++    renderProvider();
++    await waitFor(() => expect(status()).toHaveTextContent('organizer'));
++
++    await act(() => current.signOut());
++
++    expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
++    expect(status()).toHaveTextContent('anon');
++    expect(current.me).toBeNull();
++  });
++});
+diff --git a/src/features/auth/session.tsx b/src/features/auth/session.tsx
+new file mode 100644
+index 0000000..8636ef2
+--- /dev/null
++++ b/src/features/auth/session.tsx
+@@ -0,0 +1,170 @@
++import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
++import type { ReactNode } from 'react';
++import { useQueryClient } from '@tanstack/react-query';
++import { supabase } from '../../lib/supabase';
++import { api, ApiError } from '../../lib/api';
++import type { AdminMe } from '../../lib/types';
++
++export type SessionStatus = 'loading' | 'anon' | 'organizer' | 'forbidden';
++
++export interface SessionValue {
++  status: SessionStatus;
++  me: AdminMe | null;
++  signIn(email: string, password: string): Promise<void>;
++  signOut(): Promise<void>;
++  changePassword(pw: string): Promise<void>;
++  refreshMe(): Promise<void>;
++}
++
++/** Exported so tests can provide a fake session without Supabase. */
++export const SessionContext = createContext<SessionValue | null>(null);
++
++interface SessionState {
++  status: SessionStatus;
++  me: AdminMe | null;
++}
++
++const ANON: SessionState = { status: 'anon', me: null };
++const FORBIDDEN: SessionState = { status: 'forbidden', me: null };
++
++/** Delay before re-checking a restored session while the server is unreachable. */
++const RESTORE_RETRY_MS = 3_000;
++
++/** Supabase Auth errors (returned or thrown) as pt-BR ApiErrors. */
++function authError(e: unknown): ApiError {
++  if (e instanceof ApiError) return e;
++  const err = (typeof e === 'object' && e !== null ? e : {}) as { name?: string; message?: string; code?: string; status?: number };
++  if (e instanceof TypeError || err.name === 'AuthRetryableFetchError') return new ApiError('Sem conexão com o servidor', 'network');
++  if (err.code === 'invalid_credentials' || err.message === 'Invalid login credentials') return new ApiError('E-mail ou senha incorretos');
++  if (err.code === 'same_password') return new ApiError('A nova senha precisa ser diferente da atual', err.code);
++  if (err.code === 'weak_password') return new ApiError('Senha muito fraca. Escolha outra senha.', err.code);
++  if (err.code === 'email_not_confirmed') return new ApiError('Este e-mail ainda não foi confirmado', err.code);
++  if (err.code === 'user_banned') return new ApiError('Esta conta está bloqueada', err.code);
++  if (err.status === 429 || err.code?.startsWith('over_')) {
++    return new ApiError('Muitas tentativas seguidas. Aguarde um pouco e tente de novo.', err.code ?? null);
++  }
++  if (err.name === 'AuthSessionMissingError' || err.code === 'session_not_found' || err.code === 'session_expired') {
++    return new ApiError('Sua sessão expirou. Entre novamente.', err.code ?? null);
++  }
++  return new ApiError(err.message || 'Erro inesperado', err.code ?? null);
++}
++
++/** Ends the Supabase session; supabase-js removes the local copy even when the server is unreachable. */
++async function dropSession(): Promise<void> {
++  try {
++    await supabase.auth.signOut();
++  } catch {
++    // Nothing left to do: the session is gone locally either way.
++  }
++}
++
++export function SessionProvider({ children }: { children: ReactNode }) {
++  const queryClient = useQueryClient();
++  const [state, setState] = useState<SessionState>({ status: 'loading', me: null });
++
++  // Being signed in is not enough: only accounts with an `organizers` row get in. For any other
++  // account admin_me answers 42501 — sign it out and let the UI explain why.
++  const loadMe = useCallback(async () => {
++    try {
++      const me = await api.admin.me();
++      setState({ status: 'organizer', me });
++    } catch (e) {
++      if (e instanceof ApiError && e.code === '42501') {
++        setState(FORBIDDEN);
++        await dropSession();
++        return;
++      }
++      throw e;
++    }
++  }, []);
++
++  useEffect(() => {
++    let cancelled = false;
++    let retry: ReturnType<typeof setTimeout> | undefined;
++
++    const restore = async () => {
++      try {
++        const { data } = await supabase.auth.getSession();
++        if (cancelled) return;
++        if (!data.session) {
++          setState(ANON);
++          return;
++        }
++        await loadMe();
++      } catch (e) {
++        if (cancelled) return;
++        if (e instanceof ApiError && e.code === 'network') {
++          // Offline right now: keep "loading" rather than pretend the organizer is logged out.
++          retry = setTimeout(() => void restore(), RESTORE_RETRY_MS);
++          return;
++        }
++        // The stored session is unusable (revoked, invalid JWT…): start over from the login page.
++        await dropSession();
++        setState(ANON);
++      }
++    };
++    void restore();
++
++    // Sessions can also end outside this provider (refresh token revoked, sign-out in another tab).
++    const { data } = supabase.auth.onAuthStateChange((event) => {
++      if (event !== 'SIGNED_OUT') return;
++      setState((s) => (s.status === 'forbidden' ? s : ANON));
++      queryClient.clear();
++    });
++
++    return () => {
++      cancelled = true;
++      clearTimeout(retry);
++      data.subscription.unsubscribe();
++    };
++  }, [loadMe, queryClient]);
++
++  const signIn = useCallback(
++    async (email: string, password: string) => {
++      let error: unknown;
++      try {
++        ({ error } = await supabase.auth.signInWithPassword({ email: email.trim(), password }));
++      } catch (e) {
++        error = e;
++      }
++      if (error) throw authError(error);
++      await loadMe();
++    },
++    [loadMe],
++  );
++
++  // Cached admin data (athletes' contacts included) must not outlive the session on this device.
++  const signOut = useCallback(async () => {
++    await dropSession();
++    setState(ANON);
++    queryClient.clear();
++  }, [queryClient]);
++
++  const changePassword = useCallback(
++    async (pw: string) => {
++      let error: unknown;
++      try {
++        ({ error } = await supabase.auth.updateUser({ password: pw }));
++      } catch (e) {
++        error = e;
++      }
++      if (error) throw authError(error);
++      await api.admin.passwordChanged();
++      await loadMe();
++    },
++    [loadMe],
++  );
++
++  const value = useMemo<SessionValue>(
++    () => ({ status: state.status, me: state.me, signIn, signOut, changePassword, refreshMe: loadMe }),
++    [state, signIn, signOut, changePassword, loadMe],
++  );
++
++  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
++}
++
++export function useSession(): SessionValue {
++  const ctx = useContext(SessionContext);
++  if (!ctx) throw new Error('useSession must be used within a SessionProvider');
++  return ctx;
++}
+diff --git a/src/features/entries/EntriesTab.tsx b/src/features/entries/EntriesTab.tsx
+new file mode 100644
+index 0000000..d87fcb6
+--- /dev/null
++++ b/src/features/entries/EntriesTab.tsx
+@@ -0,0 +1 @@
++export default function EntriesTab() { return <h1 className="p-6 brand-title">EntriesTab</h1>; }
+diff --git a/src/features/events/EventContext.tsx b/src/features/events/EventContext.tsx
+new file mode 100644
+index 0000000..79a1924
+--- /dev/null
++++ b/src/features/events/EventContext.tsx
+@@ -0,0 +1,70 @@
++import { createContext, useContext, useMemo } from 'react';
++import type { ReactNode } from 'react';
++import { indexEvent } from '../../domain/eventModel';
++import type { EventIndex } from '../../domain/eventModel';
++import { computeEventTiming } from '../../domain/consolidation';
++import type { EventTiming } from '../../domain/consolidation';
++import { classifyRace } from '../../domain/ranking';
++import type { RaceClassification } from '../../domain/ranking';
++import type { ClockSync } from '../../lib/clock';
++import type { EventAggregate } from '../../lib/types';
++import { useClock } from '../../hooks/useClock';
++import { useNow } from '../../hooks/useNow';
++
++export interface EventContextValue {
++  eventId: string;
++  agg: EventAggregate;
++  index: EventIndex;
++  timing: EventTiming;
++  /** Classification of each race, by race id. */
++  classifications: Map<string, RaceClassification>;
++  /** Synced time the timing was computed at (advances every TIMING_TICK_MS). */
++  nowMs: number;
++  refresh(): Promise<void>;
++  patchAgg(fn: (a: EventAggregate) => EventAggregate): void;
++  clock: ClockSync;
++}
++
++/** Exported so screen tests can provide a fixture value directly. */
++export const EventContext = createContext<EventContextValue | null>(null);
++
++/** Some issues depend on the time alone (a mark left without athlete for > 60 s). */
++const TIMING_TICK_MS = 10_000;
++
++export interface EventProviderProps {
++  eventId: string;
++  agg: EventAggregate;
++  refresh(): Promise<void>;
++  patchAgg(fn: (a: EventAggregate) => EventAggregate): void;
++  children: ReactNode;
++}
++
++/** Computes the event's derived data once for every tab: index, timing and classifications. */
++export function EventProvider({ eventId, agg, refresh, patchAgg, children }: EventProviderProps) {
++  const clock = useClock();
++  const tickMs = useNow(TIMING_TICK_MS);
++  // Sampled once per tick, so a clock re-sync alone does not recompute everything.
++  const nowMs = useMemo(() => tickMs + (clock.offsetMs ?? 0), [tickMs, clock]);
++
++  const index = useMemo(() => indexEvent(agg), [agg]);
++  const timing = useMemo(() => computeEventTiming(agg, nowMs), [agg, nowMs]);
++  const classifications = useMemo(() => {
++    const byRace = new Map<string, RaceClassification>();
++    for (const race of agg.races) {
++      byRace.set(race.id, classifyRace(race, index.entriesByRace.get(race.id) ?? [], timing.byEntry, index.athletesById, agg.event));
++    }
++    return byRace;
++  }, [agg, index, timing]);
++
++  const value = useMemo<EventContextValue>(
++    () => ({ eventId, agg, index, timing, classifications, nowMs, refresh, patchAgg, clock }),
++    [eventId, agg, index, timing, classifications, nowMs, refresh, patchAgg, clock],
++  );
++  return <EventContext.Provider value={value}>{children}</EventContext.Provider>;
++}
++
++export function useEventContext(): EventContextValue {
++  const ctx = useContext(EventContext);
++  if (!ctx) throw new Error('useEventContext must be used within an EventProvider');
++  return ctx;
++}
+diff --git a/src/features/events/EventGeneralTab.tsx b/src/features/events/EventGeneralTab.tsx
+new file mode 100644
+index 0000000..d3d6d26
+--- /dev/null
++++ b/src/features/events/EventGeneralTab.tsx
+@@ -0,0 +1 @@
++export default function EventGeneralTab() { return <h1 className="p-6 brand-title">EventGeneralTab</h1>; }
+diff --git a/src/features/events/EventLayout.tsx b/src/features/events/EventLayout.tsx
+new file mode 100644
+index 0000000..c087631
+--- /dev/null
++++ b/src/features/events/EventLayout.tsx
+@@ -0,0 +1,120 @@
++import { useState } from 'react';
++import { Link, Outlet, useMatch, useParams } from 'react-router';
++import { Badge, Button, Card, Spinner, Tabs } from '../../components/ui';
++import type { BadgeTone, TabItem } from '../../components/ui';
++import { formatDateBR } from '../../lib/format';
++import type { EventStatus } from '../../lib/types';
++import { useEventData } from '../../hooks/useEventData';
++import { EventProvider, useEventContext } from './EventContext';
++
++const TABS: { id: string; label: string }[] = [
++  { id: 'geral', label: 'Geral' },
++  { id: 'provas', label: 'Provas' },
++  { id: 'inscricoes', label: 'Inscrições' },
++  { id: 'cronometragem', label: 'Cronometragem' },
++  { id: 'revisao', label: 'Revisão' },
++  { id: 'resultados', label: 'Resultados' },
++];
++/** Tabs that follow the race as it happens and therefore poll every 2 s. */
++const LIVE_TABS = new Set(['cronometragem', 'revisao', 'resultados']);
++
++const STATUS: Record<EventStatus, { label: string; tone: BadgeTone }> = {
++  planejado: { label: 'Planejado', tone: 'neutral' },
++  ao_vivo: { label: 'Ao vivo', tone: 'success' },
++  encerrado: { label: 'Encerrado', tone: 'info' },
++};
++
++export default function EventLayout() {
++  const eventId = useParams().eventId ?? '';
++  const tab = useMatch('/eventos/:eventId/:tab/*')?.params.tab;
++  const { agg, isLoading, error, refresh, patchAgg } = useEventData(eventId, { live: tab !== undefined && LIVE_TABS.has(tab) });
++
++  if (!agg) {
++    if (isLoading || !error) {
++      return (
++        <div className="flex justify-center px-4 py-16">
++          <Spinner size={32} />
++        </div>
++      );
++    }
++    return <LoadError message={error.message} onRetry={refresh} />;
++  }
++
++  return (
++    <EventProvider eventId={eventId} agg={agg} refresh={refresh} patchAgg={patchAgg}>
++      <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
++        <EventHeader />
++        <div className="mt-6">
++          <Outlet />
++        </div>
++      </div>
++    </EventProvider>
++  );
++}
++
++function EventHeader() {
++  const { agg, timing } = useEventContext();
++  const { event } = agg;
++  const pending = timing.issues.filter((i) => i.severity !== 'info');
++  const hasErrors = pending.some((i) => i.severity === 'error');
++  const status = STATUS[event.status];
++
++  const items: TabItem[] = TABS.map((t) => ({
++    id: t.id,
++    label: t.label,
++    to: `/eventos/${event.id}/${t.id}`,
++    badge: t.id === 'revisao' && pending.length > 0
++      ? <Badge tone={hasErrors ? 'danger' : 'warning'}>{pending.length}</Badge>
++      : undefined,
++  }));
++
++  return (
++    <header className="flex flex-col gap-4">
++      <div className="flex flex-wrap items-start justify-between gap-3">
++        <div className="min-w-0">
++          <h1 className="brand-title text-xl font-semibold break-words">{event.name}</h1>
++          <p className="mt-1 text-sm text-muted tabular">
++            {formatDateBR(event.date)}
++            {event.location ? ` · ${event.location}` : ''}
++          </p>
++        </div>
++        <Badge tone={status.tone}>{status.label}</Badge>
++      </div>
++      <Tabs items={items} />
++    </header>
++  );
++}
++
++function LoadError({ message, onRetry }: { message: string; onRetry(): Promise<void> }) {
++  const [retrying, setRetrying] = useState(false);
++
++  async function retry() {
++    setRetrying(true);
++    try {
++      await onRetry();
++    } finally {
++      setRetrying(false);
++    }
++  }
++
++  return (
++    <div className="mx-auto w-full max-w-md px-4 py-12">
++      <Card className="flex flex-col gap-4">
++        <div>
++          <p className="font-medium">Não foi possível carregar o evento</p>
++          <p role="alert" className="mt-1 text-sm text-danger">
++            {message}
++          </p>
++        </div>
++        <div className="flex flex-wrap items-center gap-3">
++          <Button onClick={() => void retry()} loading={retrying}>
++            Tentar novamente
++          </Button>
++          <Link to="/eventos" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
++            Voltar para eventos
++          </Link>
++        </div>
++      </Card>
++    </div>
++  );
++}
+diff --git a/src/features/events/EventsPage.tsx b/src/features/events/EventsPage.tsx
+new file mode 100644
+index 0000000..0659745
+--- /dev/null
++++ b/src/features/events/EventsPage.tsx
+@@ -0,0 +1 @@
++export default function EventsPage() { return <h1 className="p-6 brand-title">EventsPage</h1>; }
+diff --git a/src/features/events/eventShell.test.tsx b/src/features/events/eventShell.test.tsx
+new file mode 100644
+index 0000000..4d60e90
+--- /dev/null
++++ b/src/features/events/eventShell.test.tsx
+@@ -0,0 +1,298 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { act, render, renderHook, screen } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { createMemoryRouter, RouterProvider } from 'react-router';
++
++import { routes } from '../../App';
++import { ConfirmProvider, ToastProvider } from '../../components/ui';
++import { ClockSync } from '../../lib/clock';
++import { useClock } from '../../hooks/useClock';
++import type { EventAggregate, LiveDelta } from '../../lib/types';
++import {
++  iso, makeAthlete, makeEntry, makeEvent, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
++} from '../../domain/testing/fixtures';
++import { SessionContext } from '../auth/session';
++import type { SessionValue } from '../auth/session';
++import { EventProvider, useEventContext } from './EventContext';
++import type { EventContextValue } from './EventContext';
++
++const mocks = vi.hoisted(() => ({
++  serverTime: vi.fn<() => Promise<number>>(),
++  getEvent: vi.fn<(id: string) => Promise<EventAggregate>>(),
++  live: vi.fn<(id: string, since: string | null) => Promise<LiveDelta>>(),
++}));
++vi.mock('../../lib/supabase', () => ({ supabase: {} }));
++vi.mock('../../lib/api', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('../../lib/api')>()),
++  api: { serverTime: mocks.serverTime, admin: { getEvent: mocks.getEvent, live: mocks.live } },
++}));
++const { getEvent, live } = mocks;
++
++function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
++  return {
++    event: makeEvent({ id: 'ev1', name: 'Copa EBC' }), races: [makeRace()], waves: [makeWave()], entries: [makeEntry()],
++    athletes: [makeAthlete()], timekeepers: [makeTimekeeper()], marks: [], resolutions: [], results: [],
++    version: 1, server_now: iso(T0 + 60 * SEC), ...p,
++  };
++}
++function delta(): LiveDelta {
++  return { server_now: iso(T0 + 62 * SEC), version: 1, marks: [], resolutions: [], waves: [makeWave()] };
++}
++
++function fakeSession(p: Partial<SessionValue> = {}): SessionValue {
++  return {
++    status: 'anon', me: null, signIn: vi.fn(), signOut: vi.fn().mockResolvedValue(undefined),
++    changePassword: vi.fn(), refreshMe: vi.fn(), ...p,
++  };
++}
++const ME = { user_id: 'u1', email: 'ana@ebc.test', name: 'Ana', role: 'owner' as const, must_change_password: false };
++const organizer = (p: Partial<SessionValue> = {}) => fakeSession({ status: 'organizer', me: ME, ...p });
++
++function renderApp(path: string, session: SessionValue) {
++  const router = createMemoryRouter(routes, { initialEntries: [path] });
++  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  render(
++    <QueryClientProvider client={client}>
++      <SessionContext.Provider value={session}>
++        <ToastProvider>
++          <ConfirmProvider>
++            <RouterProvider router={router} />
++          </ConfirmProvider>
++        </ToastProvider>
++      </SessionContext.Provider>
++    </QueryClientProvider>,
++  );
++  return router;
++}
++
++const TABS: [string, string][] = [
++  ['geral', 'Geral'], ['provas', 'Provas'], ['inscricoes', 'Inscrições'],
++  ['cronometragem', 'Cronometragem'], ['revisao', 'Revisão'], ['resultados', 'Resultados'],
++];
++
++let hidden = false;
++beforeEach(() => {
++  vi.clearAllMocks();
++  hidden = false;
++  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
++  mocks.serverTime.mockImplementation(async () => Date.now());
++  live.mockResolvedValue(delta());
++});
++afterEach(() => {
++  vi.useRealTimers();
++});
++
++describe('routes', () => {
++  it('/ shows the public home to visitors', () => {
++    renderApp('/', fakeSession());
++    expect(screen.getByText('PublicHome')).toBeInTheDocument();
++  });
++
++  it('/ waits for the session before choosing', () => {
++    renderApp('/', fakeSession({ status: 'loading' }));
++    expect(screen.getByRole('status', { name: 'Carregando' })).toBeInTheDocument();
++    expect(screen.queryByText('PublicHome')).not.toBeInTheDocument();
++  });
++
++  it('/ sends organizers to /eventos inside the organizer layout', async () => {
++    const session = organizer();
++    const router = renderApp('/', session);
++
++    expect(await screen.findByText('EventsPage')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/eventos');
++    await userEvent.click(screen.getByTestId('logout'));
++    expect(session.signOut).toHaveBeenCalledTimes(1);
++  });
++
++  it('/entrar renders the login page', () => {
++    renderApp('/entrar', fakeSession());
++    expect(screen.getByTestId('login-email')).toBeInTheDocument();
++  });
++
++  it('/trocar-senha renders the change-password page', () => {
++    renderApp('/trocar-senha', organizer({ me: { ...ME, must_change_password: true } }));
++    expect(screen.getByTestId('newpass-1')).toBeInTheDocument();
++  });
++
++  it('admin routes send visitors to /entrar, remembering where they were going', async () => {
++    const router = renderApp('/atletas/a1', fakeSession());
++    expect(await screen.findByTestId('login-email')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/entrar');
++    expect(router.state.location.state).toEqual({ from: '/atletas/a1' });
++  });
++
++  it('admin routes explain when the account is not an organizer', () => {
++    renderApp('/eventos', fakeSession({ status: 'forbidden' }));
++    expect(screen.getByText('Esta conta não tem acesso de organização')).toBeInTheDocument();
++    expect(screen.queryByText('EventsPage')).not.toBeInTheDocument();
++  });
++
++  it.each([
++    ['/eventos', 'EventsPage'], ['/atletas', 'AthletesPage'], ['/atletas/a1', 'AthleteProfilePage'],
++    ['/ajuda', 'HelpPage'], ['/config', 'SettingsPage'],
++  ])('%s renders %s for organizers, inside the layout', (path, text) => {
++    renderApp(path, organizer());
++    expect(screen.getByText(text)).toBeInTheDocument();
++    expect(screen.getByRole('navigation', { name: 'Principal' })).toBeInTheDocument();
++  });
++
++  it.each([
++    ['/c/tok123', 'TimekeeperPage'], ['/p/copa-ebc', 'PublicEventPage'], ['/atleta/a1', 'PublicAthletePage'],
++  ])('%s renders %s without a session', (path, text) => {
++    renderApp(path, fakeSession());
++    expect(screen.getByText(text)).toBeInTheDocument();
++  });
++
++  it('unknown paths render NotFound', () => {
++    renderApp('/nada/aqui', fakeSession());
++    expect(screen.getByText('Página não encontrada')).toBeInTheDocument();
++  });
++});
++
++describe('EventLayout', () => {
++  it('opens the Geral tab and shows the event header, the tabs and the review badge', async () => {
++    const at = T0 + 30 * SEC;
++    getEvent.mockResolvedValue(makeAgg({
++      marks: [
++        // Two timekeepers 10 s apart on leg 0: divergence (warning); the entry is still
++        // on course: not_finished (info, not counted); a mark left without athlete: unassigned (warning).
++        makeMark({ id: 'x1', at, timekeeper_id: 'tk1' }),
++        makeMark({ id: 'x2', at: at + 10 * SEC, timekeeper_id: 'tk2' }),
++        makeMark({ id: 'x3', at: Date.now() - 5 * MIN, entry_id: null, leg_index: null }),
++      ],
++    }));
++    const router = renderApp('/eventos/ev1', organizer());
++
++    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/eventos/ev1/geral');
++    expect(getEvent).toHaveBeenCalledWith('ev1');
++    expect(screen.getByRole('heading', { name: 'Copa EBC' })).toBeInTheDocument();
++    expect(screen.getByText('11/10/2026 · Vila Velha')).toBeInTheDocument();
++    expect(screen.getByText('Ao vivo')).toBeInTheDocument();
++    for (const [id, label] of TABS) {
++      expect(screen.getByTestId(`tab-${id}`)).toHaveAttribute('href', `/eventos/ev1/${id}`);
++      expect(screen.getByTestId(`tab-${id}`)).toHaveTextContent(id === 'revisao' ? 'Revisão2' : label);
++    }
++    expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-warning');
++  });
++
++  it('colors the review badge as an error when a crossing is missing', async () => {
++    // Leg 1 marked but leg 0 never was: missing_crossing (error).
++    getEvent.mockResolvedValue(makeAgg({ marks: [makeMark({ id: 'y1', at: T0 + 20 * MIN, leg_index: 1 })] }));
++    renderApp('/eventos/ev1/geral', organizer());
++
++    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++    expect(screen.getByTestId('tab-revisao')).toHaveTextContent('Revisão1');
++    expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-danger');
++  });
++
++  it('shows no review badge when nothing is pending', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    renderApp('/eventos/ev1/geral', organizer());
++
++    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++    expect(screen.getByTestId('tab-revisao')).toHaveTextContent(/^Revisão$/);
++  });
++
++  it.each([
++    ['provas', 'RacesTab'], ['inscricoes', 'EntriesTab'], ['cronometragem', 'TimingTab'],
++    ['revisao', 'ReviewTab'], ['resultados', 'ResultsTab'],
++  ])('renders the %s tab', async (tab, text) => {
++    getEvent.mockResolvedValue(makeAgg());
++    renderApp(`/eventos/ev1/${tab}`, organizer());
++    expect(await screen.findByText(text)).toBeInTheDocument();
++  });
++
++  it('polls every 2 s only on the timing, review and results tabs', async () => {
++    vi.useFakeTimers();
++    getEvent.mockResolvedValue(makeAgg());
++    const router = renderApp('/eventos/ev1/geral', organizer());
++    await act(() => vi.advanceTimersByTimeAsync(5));
++    expect(screen.getByText('EventGeneralTab')).toBeInTheDocument();
++
++    await act(() => vi.advanceTimersByTimeAsync(14_000));
++    expect(live).not.toHaveBeenCalled();
++    await act(() => vi.advanceTimersByTimeAsync(1_000));
++    expect(live).toHaveBeenCalledTimes(1);
++
++    let calls = 1;
++    for (const tab of ['cronometragem', 'revisao', 'resultados']) {
++      await act(() => router.navigate(`/eventos/ev1/${tab}`));
++      await act(() => vi.advanceTimersByTimeAsync(2_000));
++      expect(live).toHaveBeenCalledTimes(++calls);
++    }
++
++    await act(() => router.navigate('/eventos/ev1/provas'));
++    await act(() => vi.advanceTimersByTimeAsync(14_000));
++    expect(live).toHaveBeenCalledTimes(calls);
++    expect(getEvent).toHaveBeenCalledTimes(1);
++  });
++
++  it('shows the load error and retries', async () => {
++    getEvent.mockRejectedValueOnce(new Error('Evento não encontrado')).mockResolvedValue(makeAgg());
++    renderApp('/eventos/ev1/geral', organizer());
++
++    expect(await screen.findByText('Evento não encontrado')).toBeInTheDocument();
++    expect(screen.getByRole('link', { name: 'Voltar para eventos' })).toHaveAttribute('href', '/eventos');
++    await userEvent.click(screen.getByRole('button', { name: 'Tentar novamente' }));
++    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++  });
++});
++
++describe('EventProvider', () => {
++  let ctx: EventContextValue;
++  function Probe() {
++    ctx = useEventContext();
++    return <p>{ctx.timing.issues.map((i) => i.type).join(',') || 'sem pendências'}</p>;
++  }
++  const refresh = vi.fn(async () => {});
++  const patchAgg = vi.fn();
++  const renderProvider = (agg: EventAggregate) =>
++    render(<EventProvider eventId="ev1" agg={agg} refresh={refresh} patchAgg={patchAgg}><Probe /></EventProvider>);
++
++  it('derives the index, timing and classifications from the aggregate', () => {
++    const agg = makeAgg({ marks: [makeMark({ id: 'z1', at: T0 + 10 * MIN }), makeMark({ id: 'z2', at: T0 + 30 * MIN, leg_index: 1 })] });
++    renderProvider(agg);
++
++    expect(ctx.eventId).toBe('ev1');
++    expect(ctx.agg).toBe(agg);
++    expect(ctx.index.entriesById.get('en1')).toBe(agg.entries[0]);
++    expect(ctx.timing.byEntry.get('en1')).toMatchObject({ status: 'finished', total_ms: 30 * MIN });
++    expect(ctx.classifications.get('r1')).toMatchObject({ race: agg.races[0], finishers: 1 });
++    expect(ctx.clock).toBeInstanceOf(ClockSync);
++    expect(ctx.clock).toBe(renderHook(() => useClock()).result.current);
++    expect(Math.abs(ctx.nowMs - ctx.clock.now())).toBeLessThan(1_000);
++    expect(ctx.refresh).toBe(refresh);
++    expect(ctx.patchAgg).toBe(patchAgg);
++  });
++
++  it('recomputes only when the aggregate changes or every 10 s', async () => {
++    vi.useFakeTimers({ now: T0 + 10 * MIN });
++    // A mark without athlete becomes an issue once it is 60 s old: 55 s now, 65 s after the tick.
++    const agg = makeAgg({ marks: [makeMark({ id: 'u1', at: Date.now() - 55 * SEC, entry_id: null, leg_index: null })] });
++    const { rerender } = renderProvider(agg);
++    const first = ctx;
++    expect(screen.queryByText(/unassigned/)).not.toBeInTheDocument();
++
++    rerender(<EventProvider eventId="ev1" agg={agg} refresh={refresh} patchAgg={patchAgg}><Probe /></EventProvider>);
++    expect(ctx).toBe(first);
++
++    await act(() => vi.advanceTimersByTimeAsync(10_000));
++    // One tick later (a clock re-sync in between may move the offset by a millisecond).
++    expect(Math.abs(ctx.nowMs - first.nowMs - 10_000)).toBeLessThanOrEqual(5);
++    expect(ctx.timing).not.toBe(first.timing);
++    expect(screen.getByText(/unassigned/)).toBeInTheDocument();
++
++    const next = { ...agg, entries: [] };
++    rerender(<EventProvider eventId="ev1" agg={next} refresh={refresh} patchAgg={patchAgg}><Probe /></EventProvider>);
++    expect(ctx.agg).toBe(next);
++    expect(ctx.index.entriesById.size).toBe(0);
++  });
++
++  it('refuses to be used outside an event', () => {
++    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
++    expect(() => render(<Probe />)).toThrow('useEventContext must be used within an EventProvider');
++    spy.mockRestore();
++  });
++});
+diff --git a/src/features/help/HelpPage.tsx b/src/features/help/HelpPage.tsx
+new file mode 100644
+index 0000000..6cda76b
+--- /dev/null
++++ b/src/features/help/HelpPage.tsx
+@@ -0,0 +1 @@
++export default function HelpPage() { return <h1 className="p-6 brand-title">HelpPage</h1>; }
+diff --git a/src/features/public/PublicAthletePage.tsx b/src/features/public/PublicAthletePage.tsx
+new file mode 100644
+index 0000000..6937a88
+--- /dev/null
++++ b/src/features/public/PublicAthletePage.tsx
+@@ -0,0 +1 @@
++export default function PublicAthletePage() { return <h1 className="p-6 brand-title">PublicAthletePage</h1>; }
+diff --git a/src/features/public/PublicEventPage.tsx b/src/features/public/PublicEventPage.tsx
+new file mode 100644
+index 0000000..e280b91
+--- /dev/null
++++ b/src/features/public/PublicEventPage.tsx
+@@ -0,0 +1 @@
++export default function PublicEventPage() { return <h1 className="p-6 brand-title">PublicEventPage</h1>; }
+diff --git a/src/features/public/PublicHome.tsx b/src/features/public/PublicHome.tsx
+new file mode 100644
+index 0000000..040e6c0
+--- /dev/null
++++ b/src/features/public/PublicHome.tsx
+@@ -0,0 +1 @@
++export default function PublicHome() { return <h1 className="p-6 brand-title">PublicHome</h1>; }
+diff --git a/src/features/races/RacesTab.tsx b/src/features/races/RacesTab.tsx
+new file mode 100644
+index 0000000..69088e3
+--- /dev/null
++++ b/src/features/races/RacesTab.tsx
+@@ -0,0 +1 @@
++export default function RacesTab() { return <h1 className="p-6 brand-title">RacesTab</h1>; }
+diff --git a/src/features/results/ResultsTab.tsx b/src/features/results/ResultsTab.tsx
+new file mode 100644
+index 0000000..5004252
+--- /dev/null
++++ b/src/features/results/ResultsTab.tsx
+@@ -0,0 +1 @@
++export default function ResultsTab() { return <h1 className="p-6 brand-title">ResultsTab</h1>; }
+diff --git a/src/features/review/ReviewTab.tsx b/src/features/review/ReviewTab.tsx
+new file mode 100644
+index 0000000..822bccc
+--- /dev/null
++++ b/src/features/review/ReviewTab.tsx
+@@ -0,0 +1 @@
++export default function ReviewTab() { return <h1 className="p-6 brand-title">ReviewTab</h1>; }
+diff --git a/src/features/settings/SettingsPage.tsx b/src/features/settings/SettingsPage.tsx
+new file mode 100644
+index 0000000..e87e967
+--- /dev/null
++++ b/src/features/settings/SettingsPage.tsx
+@@ -0,0 +1 @@
++export default function SettingsPage() { return <h1 className="p-6 brand-title">SettingsPage</h1>; }
+diff --git a/src/features/timekeeper/TimekeeperPage.tsx b/src/features/timekeeper/TimekeeperPage.tsx
+new file mode 100644
+index 0000000..c5eabaf
+--- /dev/null
++++ b/src/features/timekeeper/TimekeeperPage.tsx
+@@ -0,0 +1 @@
++export default function TimekeeperPage() { return <h1 className="p-6 brand-title">TimekeeperPage</h1>; }
+diff --git a/src/features/timing/TimingTab.tsx b/src/features/timing/TimingTab.tsx
+new file mode 100644
+index 0000000..cb2ed5a
+--- /dev/null
++++ b/src/features/timing/TimingTab.tsx
+@@ -0,0 +1 @@
++export default function TimingTab() { return <h1 className="p-6 brand-title">TimingTab</h1>; }
+diff --git a/src/hooks/useClock.test.ts b/src/hooks/useClock.test.ts
+new file mode 100644
+index 0000000..0b3b014
+--- /dev/null
++++ b/src/hooks/useClock.test.ts
+@@ -0,0 +1,143 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import type { MockInstance } from 'vitest';
++import { act, renderHook } from '@testing-library/react';
++
++const serverTime = vi.hoisted(() => vi.fn<() => Promise<number>>());
++vi.mock('../lib/api', () => ({ api: { serverTime } }));
++
++// The clock is a module-level singleton: each test loads a fresh copy of the module.
++async function loadUseClock() {
++  vi.resetModules();
++  return (await import('./useClock')).useClock;
++}
++
++const SAVED = { offset_ms: 5_000, rtt_ms: 100, synced_at: 123 };
++const saved = () => JSON.parse(window.localStorage.getItem('ebc.clock') ?? 'null') as unknown;
++
++let visibility: DocumentVisibilityState;
++let addListener: MockInstance<typeof document.addEventListener>;
++let setItem: MockInstance<Storage['setItem']>;
++let start: number;
++let sampledAt: number[];
++
++beforeEach(() => {
++  vi.useFakeTimers();
++  window.localStorage.clear();
++  visibility = 'visible';
++  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
++  // Listeners of earlier tests' module copies must not answer this test's visibility events.
++  addListener = vi.spyOn(document, 'addEventListener');
++  setItem = vi.spyOn(Storage.prototype, 'setItem');
++  start = Date.now();
++  sampledAt = [];
++  serverTime.mockReset();
++  // Instant answers from a server clock 2 s ahead of the device.
++  serverTime.mockImplementation(async () => {
++    sampledAt.push(Date.now() - start);
++    return Date.now() + 2_000;
++  });
++});
++
++afterEach(() => {
++  for (const [type, listener, options] of addListener.mock.calls) document.removeEventListener(type, listener, options);
++  vi.restoreAllMocks();
++  vi.clearAllTimers();
++  vi.useRealTimers();
++});
++
++const clockWrites = () => setItem.mock.calls.filter(([key]) => key === 'ebc.clock').length;
++
++describe('useClock', () => {
++  it('restores the offset saved under ebc.clock before the first sample answers', async () => {
++    window.localStorage.setItem('ebc.clock', JSON.stringify(SAVED));
++    serverTime.mockReturnValue(new Promise<number>(() => {}));
++    const useClock = await loadUseClock();
++
++    const { result } = renderHook(() => useClock());
++
++    expect(result.current.synced).toBe(true);
++    expect(result.current.offsetMs).toBe(5_000);
++    expect(result.current.now()).toBe(Date.now() + 5_000);
++  });
++
++  it('ignores a corrupted saved state and runs on the device clock until it syncs', async () => {
++    window.localStorage.setItem('ebc.clock', JSON.stringify({ offset_ms: 'x', rtt_ms: 10 }));
++    serverTime.mockReturnValue(new Promise<number>(() => {}));
++    const useClock = await loadUseClock();
++
++    const { result } = renderHook(() => useClock());
++
++    expect(result.current.synced).toBe(false);
++    expect(result.current.offsetMs).toBeNull();
++    expect(result.current.now()).toBe(Date.now());
++  });
++
++  it('takes 5 samples 300 ms apart, then one every 20 s, saving the state after each', async () => {
++    const useClock = await loadUseClock();
++    const { result } = renderHook(() => useClock());
++
++    await act(() => vi.advanceTimersByTimeAsync(1_200));
++    expect(sampledAt).toEqual([0, 300, 600, 900, 1_200]);
++    expect(result.current.offsetMs).toBe(2_000);
++    expect(clockWrites()).toBe(5);
++    // Every sample has the same (zero) round trip, so the first one stays the reference.
++    expect(saved()).toEqual({ offset_ms: 2_000, rtt_ms: 0, synced_at: start });
++
++    await act(() => vi.advanceTimersByTimeAsync(19_999));
++    expect(sampledAt).toHaveLength(5);
++    await act(() => vi.advanceTimersByTimeAsync(1));
++    expect(sampledAt).toEqual([0, 300, 600, 900, 1_200, 21_200]);
++    await act(() => vi.advanceTimersByTimeAsync(20_000));
++    expect(sampledAt.slice(5)).toEqual([21_200, 41_200]);
++    expect(clockWrites()).toBe(7);
++  });
++
++  it('is one clock for the whole app: later callers share it and do not sample again', async () => {
++    const useClock = await loadUseClock();
++    const first = renderHook(() => useClock());
++    const second = renderHook(() => useClock());
++
++    expect(second.result.current).toBe(first.result.current);
++    await act(() => vi.advanceTimersByTimeAsync(1_200));
++    expect(serverTime).toHaveBeenCalledTimes(5);
++  });
++
++  it('samples again when the page becomes visible, one request at a time', async () => {
++    const useClock = await loadUseClock();
++    renderHook(() => useClock());
++    await act(() => vi.advanceTimersByTimeAsync(1_200));
++    expect(serverTime).toHaveBeenCalledTimes(5);
++
++    let answer!: (ms: number) => void;
++    serverTime.mockImplementation(() => new Promise<number>((resolve) => { answer = resolve; }));
++    visibility = 'hidden';
++    document.dispatchEvent(new Event('visibilitychange'));
++    expect(serverTime).toHaveBeenCalledTimes(5);
++
++    visibility = 'visible';
++    document.dispatchEvent(new Event('visibilitychange'));
++    document.dispatchEvent(new Event('visibilitychange'));
++    expect(serverTime).toHaveBeenCalledTimes(6);
++
++    answer(Date.now() + 2_000);
++    await act(() => vi.advanceTimersByTimeAsync(0));
++    expect(clockWrites()).toBe(6);
++    document.dispatchEvent(new Event('visibilitychange'));
++    expect(serverTime).toHaveBeenCalledTimes(7);
++  });
++
++  it('keeps the saved offset while the server is unreachable', async () => {
++    window.localStorage.setItem('ebc.clock', JSON.stringify(SAVED));
++    setItem.mockClear();
++    serverTime.mockRejectedValue(new Error('Sem conexão com o servidor'));
++    const useClock = await loadUseClock();
++    const { result } = renderHook(() => useClock());
++
++    await act(() => vi.advanceTimersByTimeAsync(21_200));
++
++    expect(serverTime).toHaveBeenCalledTimes(6);
++    expect(result.current.offsetMs).toBe(5_000);
++    expect(clockWrites()).toBe(0);
++    expect(saved()).toEqual(SAVED);
++  });
++});
+diff --git a/src/hooks/useClock.ts b/src/hooks/useClock.ts
+new file mode 100644
+index 0000000..e36b4d7
+--- /dev/null
++++ b/src/hooks/useClock.ts
+@@ -0,0 +1,78 @@
++import { useEffect } from 'react';
++import { api } from '../lib/api';
++import { ClockSync, takeSample } from '../lib/clock';
++import type { ClockState } from '../lib/clock';
++import { readJSON, safeLocalStorage, writeJSON } from '../lib/storage';
++
++// Clock synchronized with the server (spec §7.2): one instance for the whole app, so every
++// screen stamps and displays times with the same offset.
++const STORAGE_KEY = 'ebc.clock';
++const INITIAL_SAMPLES = 5;
++const INITIAL_SPACING_MS = 300;
++const RESYNC_MS = 20_000;
++
++let clock: ClockSync | null = null;
++let started = false;
++/** The sample being taken right now: callers join it instead of firing a second request. */
++let pending: Promise<void> | null = null;
++
++function isClockState(v: unknown): v is ClockState {
++  const s = v as Partial<ClockState> | null;
++  return (
++    typeof s === 'object' && s !== null &&
++    Number.isFinite(s.offset_ms) && Number.isFinite(s.rtt_ms) && Number.isFinite(s.synced_at)
++  );
++}
++
++function getClock(): ClockSync {
++  if (!clock) {
++    // The offset saved by the last sync keeps times right after a reload without internet.
++    const saved = readJSON<unknown>(safeLocalStorage(), STORAGE_KEY, null);
++    clock = new ClockSync({ initial: isClockState(saved) ? saved : null });
++  }
++  return clock;
++}
++
++async function takeAndStore(c: ClockSync): Promise<void> {
++  try {
++    c.addSample(await takeSample(() => api.serverTime()));
++    const state = c.state();
++    if (state) writeJSON(safeLocalStorage(), STORAGE_KEY, state);
++  } catch {
++    // Offline: keep the current offset until the next sample succeeds.
++  }
++}
++
++/** Single-flight: overlapping requests would only inflate each other's round-trip time. */
++function sample(c: ClockSync): Promise<void> {
++  pending ??= takeAndStore(c).finally(() => {
++    pending = null;
++  });
++  return pending;
++}
++
++function startSampling(c: ClockSync): void {
++  if (started) return;
++  started = true;
++  void (async () => {
++    for (let i = 0; i < INITIAL_SAMPLES; i++) {
++      if (i > 0) await new Promise((resolve) => setTimeout(resolve, INITIAL_SPACING_MS));
++      await sample(c);
++    }
++    setInterval(() => void sample(c), RESYNC_MS);
++  })();
++  document.addEventListener('visibilitychange', () => {
++    if (document.visibilityState === 'visible') void sample(c);
++  });
++}
++
++/**
++ * The app-wide server-synchronized clock. The first caller restores the offset saved under
++ * `ebc.clock` and starts sampling: 5 samples 300 ms apart, then one every 20 s and whenever the
++ * page becomes visible again; the state is saved after each sample.
++ */
++export function useClock(): ClockSync {
++  const c = getClock();
++  useEffect(() => startSampling(c), [c]);
++  return c;
++}
+diff --git a/src/hooks/useEventData.test.tsx b/src/hooks/useEventData.test.tsx
+new file mode 100644
+index 0000000..0415cba
+--- /dev/null
++++ b/src/hooks/useEventData.test.tsx
+@@ -0,0 +1,272 @@
++import type { ReactNode } from 'react';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { act, renderHook } from '@testing-library/react';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++
++import type { EventAggregate, LiveDelta } from '../lib/types';
++import {
++  iso, makeAthlete, makeEntry, makeEvent, makeMark, makeRace, makeResolution, makeTimekeeper, makeWave, SEC, T0,
++} from '../domain/testing/fixtures';
++import { useEventData } from './useEventData';
++
++const getEvent = vi.hoisted(() => vi.fn<(id: string) => Promise<EventAggregate>>());
++const live = vi.hoisted(() => vi.fn<(id: string, since: string | null) => Promise<LiveDelta>>());
++vi.mock('../lib/api', () => ({ api: { admin: { getEvent, live } } }));
++
++function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
++  return {
++    event: makeEvent({ id: 'ev1', name: 'Copa EBC' }), races: [makeRace()], waves: [makeWave()], entries: [makeEntry()],
++    athletes: [makeAthlete()], timekeepers: [makeTimekeeper()], marks: [], resolutions: [], results: [],
++    version: 1, server_now: iso(T0 + 60 * SEC), ...p,
++  };
++}
++function delta(p: Partial<LiveDelta> = {}): LiveDelta {
++  return { server_now: iso(T0 + 62 * SEC), version: 1, marks: [], resolutions: [], waves: [makeWave()], ...p };
++}
++function deferred<T>() {
++  let resolve!: (v: T) => void;
++  const promise = new Promise<T>((r) => { resolve = r; });
++  return { promise, resolve };
++}
++
++let client: QueryClient;
++function renderEventData(initialLive: boolean) {
++  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
++  return renderHook(({ isLive }: { isLive: boolean }) => useEventData('ev1', { live: isLive }), {
++    wrapper, initialProps: { isLive: initialLive },
++  });
++}
++const cached = () => client.getQueryData<EventAggregate>(['event', 'ev1']);
++/** Lets the initial getEvent settle (TanStack notifies through a 0 ms timer). */
++const settle = () => act(() => vi.advanceTimersByTimeAsync(5));
++const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
++
++let hidden = false;
++beforeEach(() => {
++  vi.useFakeTimers();
++  getEvent.mockReset();
++  live.mockReset();
++  hidden = false;
++  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
++  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++});
++afterEach(() => {
++  client.clear();
++  vi.clearAllTimers();
++  vi.useRealTimers();
++});
++
++describe('useEventData', () => {
++  it('loads the aggregate under the query key [event, id]', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    const { result } = renderEventData(false);
++    expect(result.current.isLoading).toBe(true);
++
++    await settle();
++
++    expect(getEvent).toHaveBeenCalledWith('ev1');
++    expect(result.current.agg?.event.name).toBe('Copa EBC');
++    expect(cached()).toBe(result.current.agg);
++    expect(result.current.isLoading).toBe(false);
++  });
++
++  it('polls every 15 s when idle and every 2 s when live, from the last server time − 10 s', async () => {
++    const m1 = makeMark({ id: 'm1', at: T0 + 10 * SEC });
++    getEvent.mockResolvedValue(makeAgg({ marks: [m1] }));
++    const res1 = makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'system' });
++    const m1b = { ...m1, entry_id: null, leg_index: null, updated_at: iso(T0 + 61 * SEC) };
++    const m2 = makeMark({ id: 'm2', at: T0 + 61 * SEC });
++    live.mockResolvedValue(delta({ marks: [m1b, m2], resolutions: [res1] }));
++    const { result, rerender } = renderEventData(false);
++    await settle();
++
++    await advance(14_990);
++    expect(live).not.toHaveBeenCalled();
++    await advance(10);
++    // First poll: the aggregate's server_now (60 s) − 10 s.
++    expect(live).toHaveBeenCalledTimes(1);
++    expect(live).toHaveBeenLastCalledWith('ev1', iso(T0 + 50 * SEC));
++    // Marks merged by id (m1 updated, m2 added); resolutions replaced.
++    expect(cached()?.marks.map((m) => [m.id, m.entry_id])).toEqual([['m1', null], ['m2', 'en1']]);
++    expect(cached()?.resolutions).toEqual([res1]);
++    await settle();
++    expect(result.current.agg?.marks).toHaveLength(2);
++
++    live.mockResolvedValue(delta({ server_now: iso(T0 + 64 * SEC) }));
++    rerender({ isLive: true });
++    await advance(2_000);
++    // Next polls continue from the previous delta's server_now (62 s) − 10 s.
++    expect(live).toHaveBeenCalledTimes(2);
++    expect(live).toHaveBeenLastCalledWith('ev1', iso(T0 + 52 * SEC));
++    expect(cached()?.resolutions).toEqual([]);
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(3);
++    expect(live).toHaveBeenLastCalledWith('ev1', iso(T0 + 54 * SEC));
++    expect(getEvent).toHaveBeenCalledTimes(1);
++  });
++
++  it('replaces the waves with the server list on every poll', async () => {
++    getEvent.mockResolvedValue(makeAgg({ waves: [makeWave({ start_at: null })] }));
++    live.mockResolvedValue(delta({ waves: [makeWave({ start_at: iso(T0) })] }));
++    renderEventData(true);
++    await settle();
++
++    await advance(2_000);
++
++    expect(cached()?.waves).toEqual([makeWave({ start_at: iso(T0) })]);
++  });
++
++  it('refetches the aggregate when the version changes, then reads marks from its server_now', async () => {
++    getEvent
++      .mockResolvedValueOnce(makeAgg())
++      .mockResolvedValueOnce(makeAgg({ version: 2, server_now: iso(T0 + 63 * SEC), entries: [] }));
++    live.mockResolvedValue(delta({ version: 2 }));
++    const { result } = renderEventData(true);
++    await settle();
++
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(1);
++    expect(getEvent).toHaveBeenCalledTimes(2);
++    await settle();
++    expect(result.current.agg?.version).toBe(2);
++    expect(result.current.agg?.entries).toEqual([]);
++
++    await advance(2_000);
++    expect(live).toHaveBeenLastCalledWith('ev1', iso(T0 + 53 * SEC));
++    expect(getEvent).toHaveBeenCalledTimes(2);
++  });
++
++  it('pauses while the page is hidden and polls as soon as it is visible again', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    live.mockResolvedValue(delta());
++    renderEventData(true);
++    await settle();
++
++    hidden = true;
++    await advance(20_000);
++    expect(live).not.toHaveBeenCalled();
++
++    hidden = false;
++    await act(async () => {
++      document.dispatchEvent(new Event('visibilitychange'));
++    });
++    expect(live).toHaveBeenCalledTimes(1);
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(2);
++  });
++
++  it('keeps polling after a failed request', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    live.mockRejectedValueOnce(new Error('Sem conexão com o servidor')).mockResolvedValue(delta());
++    renderEventData(true);
++    await settle();
++
++    await advance(2_000);
++    await advance(2_000);
++
++    expect(live).toHaveBeenCalledTimes(2);
++    expect(cached()?.marks).toEqual([]);
++  });
++
++  it('never overlaps requests: a slow poll delays the next one', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    const slow = deferred<LiveDelta>();
++    live.mockReturnValueOnce(slow.promise).mockResolvedValue(delta());
++    renderEventData(true);
++    await settle();
++
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(1);
++    await act(async () => {
++      document.dispatchEvent(new Event('visibilitychange'));
++    });
++    await advance(10_000);
++    expect(live).toHaveBeenCalledTimes(1);
++
++    await act(async () => slow.resolve(delta({ marks: [makeMark({ id: 'late', at: T0 })] })));
++    expect(cached()?.marks.map((m) => m.id)).toEqual(['late']);
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(2);
++  });
++
++  it('stays single-flight when switching between an idle and a live tab mid-request', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    const slow = deferred<LiveDelta>();
++    live.mockReturnValueOnce(slow.promise).mockResolvedValue(delta());
++    const { rerender } = renderEventData(false);
++    await settle();
++    await advance(15_000);
++    expect(live).toHaveBeenCalledTimes(1);
++
++    rerender({ isLive: true });
++    await advance(4_000);
++    expect(live).toHaveBeenCalledTimes(1);
++
++    await act(async () => slow.resolve(delta()));
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(2);
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(3);
++  });
++
++  it('does not let a poll that was in flight overwrite a local patch of the lists', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    const slow = deferred<LiveDelta>();
++    live.mockReturnValueOnce(slow.promise);
++    const { result } = renderEventData(true);
++    await settle();
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(1);
++
++    const res = makeResolution({ entry_id: 'en1', leg_index: 1, mode: 'manual', manual_ts: iso(T0) });
++    act(() => result.current.patchAgg((a) => ({ ...a, resolutions: [res] })));
++    await act(async () => slow.resolve(delta({ resolutions: [], marks: [makeMark({ id: 'mz', at: T0 })] })));
++
++    expect(cached()?.resolutions).toEqual([res]);
++    expect(cached()?.marks.map((m) => m.id)).toEqual(['mz']);
++    // The next poll brings the server's view of the lists again.
++    live.mockResolvedValue(delta({ resolutions: [] }));
++    await advance(2_000);
++    expect(cached()?.resolutions).toEqual([]);
++  });
++
++  it('refresh() refetches the aggregate', async () => {
++    getEvent.mockResolvedValueOnce(makeAgg()).mockResolvedValueOnce(makeAgg({ version: 3 }));
++    const { result } = renderEventData(false);
++    await settle();
++
++    await act(() => result.current.refresh());
++
++    expect(getEvent).toHaveBeenCalledTimes(2);
++    expect(cached()?.version).toBe(3);
++    await settle();
++    expect(result.current.agg?.version).toBe(3);
++  });
++
++  it('stops polling when unmounted', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    live.mockResolvedValue(delta());
++    const { unmount } = renderEventData(true);
++    await settle();
++    await advance(2_000);
++    expect(live).toHaveBeenCalledTimes(1);
++
++    unmount();
++    await advance(10_000);
++    document.dispatchEvent(new Event('visibilitychange'));
++
++    expect(live).toHaveBeenCalledTimes(1);
++  });
++
++  it('exposes load errors and does not poll without an aggregate', async () => {
++    getEvent.mockRejectedValue(new Error('Evento não encontrado'));
++    const { result } = renderEventData(true);
++
++    await settle();
++    expect(result.current.error?.message).toBe('Evento não encontrado');
++    expect(result.current.agg).toBeUndefined();
++    expect(result.current.isLoading).toBe(false);
++    await advance(10_000);
++    expect(live).not.toHaveBeenCalled();
++  });
++});
+diff --git a/src/hooks/useEventData.ts b/src/hooks/useEventData.ts
+new file mode 100644
+index 0000000..392415e
+--- /dev/null
++++ b/src/hooks/useEventData.ts
+@@ -0,0 +1,135 @@
++import { useCallback, useEffect, useRef } from 'react';
++import { useQuery, useQueryClient } from '@tanstack/react-query';
++import { api } from '../lib/api';
++import { mergeById } from '../domain/eventModel';
++import type { EventAggregate, LiveDelta } from '../lib/types';
++
++/** Poll cadence on the live tabs (timing, review, results) and elsewhere (spec §3). */
++const LIVE_POLL_MS = 2_000;
++const IDLE_POLL_MS = 15_000;
++/** Mark deltas are requested from the last server time minus this overlap (ids deduplicate). */
++const OVERLAP_MS = 10_000;
++
++export interface EventData {
++  agg: EventAggregate | undefined;
++  isLoading: boolean;
++  error: Error | null;
++  refresh(): Promise<void>;
++  patchAgg(fn: (a: EventAggregate) => EventAggregate): void;
++}
++
++/** Where the mark delta stream stands: `serverNow` of the last applied delta, valid only while
++ * the cached aggregate is still the one fetched with `aggServerNow`. */
++interface DeltaCursor {
++  eventId: string;
++  aggServerNow: string;
++  serverNow: string;
++}
++
++function applyDelta(agg: EventAggregate, delta: LiveDelta, replaceLists: boolean): EventAggregate {
++  const marks = mergeById(agg.marks, delta.marks);
++  // Live endpoints return every resolution and wave of the event, so these are replaced
++  // wholesale (which also drops deleted resolutions).
++  return replaceLists ? { ...agg, marks, resolutions: delta.resolutions, waves: delta.waves } : { ...agg, marks };
++}
++
++/**
++ * The full event aggregate (TanStack query `['event', eventId]`) kept fresh by polling
++ * `admin_live`: marks are merged by id, resolutions and waves replaced, and the aggregate is
++ * refetched when the server's event version moves (structural changes). Polling pauses while
++ * the page is hidden and catches up as soon as it is visible again.
++ */
++export function useEventData(eventId: string, opts: { live: boolean }): EventData {
++  const queryClient = useQueryClient();
++  const query = useQuery({
++    queryKey: ['event', eventId],
++    queryFn: () => api.admin.getEvent(eventId),
++  });
++
++  const refresh = useCallback(
++    () => queryClient.refetchQueries({ queryKey: ['event', eventId], exact: true }),
++    [queryClient, eventId],
++  );
++
++  // Counts local patches so a poll that was already in flight does not replace the lists with
++  // its older copy (the next poll brings the server's view anyway).
++  const patches = useRef(0);
++  const patchAgg = useCallback(
++    (fn: (a: EventAggregate) => EventAggregate) => {
++      patches.current += 1;
++      queryClient.setQueryData<EventAggregate>(['event', eventId], (a) => (a ? fn(a) : a));
++    },
++    [queryClient, eventId],
++  );
++
++  const cursor = useRef<DeltaCursor | null>(null);
++  // Single-flight across effect runs too: switching between a live and an idle tab restarts the
++  // effect, and a slow request from the previous run must not overlap with the next one.
++  const inFlight = useRef(false);
++  const loaded = query.data !== undefined;
++  const intervalMs = opts.live ? LIVE_POLL_MS : IDLE_POLL_MS;
++
++  useEffect(() => {
++    if (!loaded) return;
++    const key = ['event', eventId];
++    let cancelled = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++
++    const schedule = () => {
++      clearTimeout(timer);
++      if (!cancelled) timer = setTimeout(() => void poll(), intervalMs);
++    };
++
++    const poll = async () => {
++      // While hidden nothing is scheduled; the visibilitychange listener resumes polling.
++      if (cancelled || document.hidden) return;
++      // A request is still out (possibly from the previous run): try again one interval later.
++      if (inFlight.current) {
++        schedule();
++        return;
++      }
++      const before = queryClient.getQueryData<EventAggregate>(key);
++      if (before) {
++        const c = cursor.current;
++        const base = c && c.eventId === eventId && c.aggServerNow === before.server_now ? c.serverNow : before.server_now;
++        const since = new Date(Date.parse(base) - OVERLAP_MS).toISOString();
++        const patchesBefore = patches.current;
++        inFlight.current = true;
++        try {
++          const delta = await api.admin.live(eventId, since);
++          const current = queryClient.getQueryData<EventAggregate>(key);
++          if (!cancelled && current) {
++            // A full refetch that landed meanwhile may predate this delta: keep the lists it
++            // brought and re-read marks from its server time on the next poll.
++            const refetched = current.server_now !== before.server_now;
++            const replaceLists = !refetched && patches.current === patchesBefore;
++            queryClient.setQueryData<EventAggregate>(key, applyDelta(current, delta, replaceLists));
++            if (!refetched) cursor.current = { eventId, aggServerNow: current.server_now, serverNow: delta.server_now };
++            if (delta.version !== current.version && queryClient.isFetching({ queryKey: key, exact: true }) === 0) {
++              void refresh();
++            }
++          }
++        } catch {
++          // Offline or a transient failure: keep what we have and try again on the next tick.
++        } finally {
++          inFlight.current = false;
++        }
++      }
++      schedule();
++    };
++
++    const onVisibilityChange = () => {
++      if (!document.hidden) void poll();
++    };
++
++    schedule();
++    document.addEventListener('visibilitychange', onVisibilityChange);
++    return () => {
++      cancelled = true;
++      clearTimeout(timer);
++      document.removeEventListener('visibilitychange', onVisibilityChange);
++    };
++  }, [loaded, eventId, intervalMs, queryClient, refresh]);
++
++  return { agg: query.data, isLoading: query.isLoading, error: query.error, refresh, patchAgg };
++}
+diff --git a/src/lib/api.test.ts b/src/lib/api.test.ts
+new file mode 100644
+index 0000000..155da96
+--- /dev/null
++++ b/src/lib/api.test.ts
+@@ -0,0 +1,141 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import type { Mock } from 'vitest';
++import { supabase } from './supabase';
++import { api, ApiError } from './api';
++import type { EventRow, FinalizeRowInput, ImportRowInput, Leg, TkMarkInput } from './types';
++
++vi.mock('./supabase', () => ({ supabase: { rpc: vi.fn() } }));
++
++type RpcMock = Mock<(fn: string, args?: Record<string, unknown>) => Promise<unknown>>;
++const rpc = supabase.rpc as unknown as RpcMock;
++
++const ok = (data: unknown) => ({ data, error: null, status: 200 });
++
++beforeEach(() => {
++  rpc.mockReset();
++  rpc.mockResolvedValue(ok(null));
++});
++
++describe('api', () => {
++  it('saves an event through admin_save_event with the payload as p_event', async () => {
++    const e = { name: 'Copa EBC', date: '2026-10-11', location: 'Lago Paranoá', levels: ['Elite', 'Base'] };
++    const saved = { ...e, id: 'ev1' } as EventRow;
++    rpc.mockResolvedValue(ok(saved));
++
++    await expect(api.admin.saveEvent(e)).resolves.toEqual(saved);
++    expect(rpc.mock.calls).toEqual([['admin_save_event', { p_event: e }]]);
++  });
++
++  it('syncs timekeeper marks through tk_sync with every p_ parameter', async () => {
++    const m: TkMarkInput = {
++      id: 'm1', ts: '2026-10-11T11:00:05.300Z', device_ts: '2026-10-11T11:00:05.100Z', clock_offset_ms: 200,
++      clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null, discarded: false,
++    };
++    await api.tk.sync('t', 'k', 's', [m], null);
++    expect(rpc.mock.calls).toEqual([
++      ['tk_sync', { p_token: 't', p_timekeeper_id: 'k', p_secret: 's', p_marks: [m], p_since: null }],
++    ]);
++  });
++
++  it('polls public live data through pub_live', async () => {
++    await api.pub.live('slug', '2026-10-11T11:00:00.000Z');
++    expect(rpc.mock.calls).toEqual([['pub_live', { p_slug: 'slug', p_since: '2026-10-11T11:00:00.000Z' }]]);
++  });
++
++  it('sets a resolution with the six p_ parameters', async () => {
++    await api.admin.setResolution('e', 1, 'manual', null, '2026-10-11T11:30:00.000Z', 'x');
++    expect(rpc.mock.calls).toEqual([
++      ['admin_set_resolution', {
++        p_entry_id: 'e', p_leg_index: 1, p_mode: 'manual', p_mark_id: null,
++        p_manual_ts: '2026-10-11T11:30:00.000Z', p_note: 'x',
++      }],
++    ]);
++  });
++
++  it('throws an ApiError carrying the server message and code', async () => {
++    rpc.mockResolvedValue({ data: null, error: { message: 'Falhou', code: 'P0001' }, status: 400 });
++    const err = await api.admin.deleteEvent('ev1').catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ApiError);
++    expect(err).toMatchObject({ message: 'Falhou', code: 'P0001' });
++  });
++
++  it('turns a failed fetch into a "no connection" ApiError', async () => {
++    rpc.mockRejectedValue(new TypeError('Failed to fetch'));
++    const err = await api.admin.listEvents().catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ApiError);
++    expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
++  });
++
++  it('treats the status-0 result supabase-js resolves with on a network failure as "no connection"', async () => {
++    rpc.mockResolvedValue({ data: null, error: { message: 'TypeError: Failed to fetch', code: '' }, status: 0 });
++    const err = await api.tk.open('tok').catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ApiError);
++    expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
++  });
++
++  it('returns the server clock as epoch milliseconds', async () => {
++    rpc.mockResolvedValue(ok(1790000000000));
++    await expect(api.serverTime()).resolves.toBe(1790000000000);
++    expect(rpc.mock.calls).toEqual([['server_time']]);
++  });
++
++  it('rejects a server clock that is not a number instead of skewing the synced clock', async () => {
++    rpc.mockResolvedValue(ok(null));
++    await expect(api.serverTime()).rejects.toBeInstanceOf(ApiError);
++  });
++
++  const legs: Leg[] = [{ modality: 'run', label: 'Corrida', distance_m: 5000 }];
++  const race = { event_id: 'ev1', name: '5 km', legs, waves: [{ name: 'Largada geral' }] };
++  const athlete = { name: 'Ana Souza', sex: 'F' as const, birth_date: '1990-06-15' };
++  const entry = { race_id: 'r1', bib: null, members: [{ athlete_id: 'a1', legs: [0] }] };
++  const rows: ImportRowInput[] = [{
++    name: 'Ana Souza', sex: 'F', birth_date: null, email: null, phone: null, city: null, team_club: null, race_name: null,
++  }];
++  const finalizeRows: FinalizeRowInput[] = [];
++
++  // Every RPC name and p_ parameter must match the SQL functions exactly (contracts.md).
++  it.each<[string, () => Promise<unknown>, string, Record<string, unknown> | undefined]>([
++    ['admin.me', () => api.admin.me(), 'admin_me', undefined],
++    ['admin.passwordChanged', () => api.admin.passwordChanged(), 'admin_password_changed', undefined],
++    ['admin.listOrganizers', () => api.admin.listOrganizers(), 'admin_list_organizers', undefined],
++    ['admin.createOrganizer', () => api.admin.createOrganizer('bia@ebc.test', 'provisoria-1', 'Bia'), 'admin_create_organizer',
++      { p_email: 'bia@ebc.test', p_password: 'provisoria-1', p_name: 'Bia' }],
++    ['admin.deleteOrganizer', () => api.admin.deleteOrganizer('u2'), 'admin_delete_organizer', { p_user_id: 'u2' }],
++    ['admin.listEvents', () => api.admin.listEvents(), 'admin_list_events', undefined],
++    ['admin.getEvent', () => api.admin.getEvent('ev1'), 'admin_get_event', { p_event_id: 'ev1' }],
++    ['admin.deleteEvent', () => api.admin.deleteEvent('ev1'), 'admin_delete_event', { p_event_id: 'ev1' }],
++    ['admin.duplicateEvent', () => api.admin.duplicateEvent('ev1', 'Copa EBC 2027', '2027-10-10'), 'admin_duplicate_event',
++      { p_event_id: 'ev1', p_name: 'Copa EBC 2027', p_date: '2027-10-10' }],
++    ['admin.rotateTkToken', () => api.admin.rotateTkToken('ev1'), 'admin_rotate_tk_token', { p_event_id: 'ev1' }],
++    ['admin.saveRace', () => api.admin.saveRace(race), 'admin_save_race', { p_race: race }],
++    ['admin.deleteRace', () => api.admin.deleteRace('r1'), 'admin_delete_race', { p_race_id: 'r1' }],
++    ['admin.setWaveStart', () => api.admin.setWaveStart('w1', null), 'admin_set_wave_start', { p_wave_id: 'w1', p_start_at: null }],
++    ['admin.listAthletes', () => api.admin.listAthletes(), 'admin_list_athletes', undefined],
++    ['admin.saveAthlete', () => api.admin.saveAthlete(athlete), 'admin_save_athlete', { p_athlete: athlete }],
++    ['admin.deleteAthlete', () => api.admin.deleteAthlete('a1'), 'admin_delete_athlete', { p_athlete_id: 'a1' }],
++    ['admin.importAthletes', () => api.admin.importAthletes(null, rows), 'admin_import_athletes', { p_event_id: null, p_rows: rows }],
++    ['admin.athleteProfile', () => api.admin.athleteProfile('a1'), 'admin_athlete_profile', { p_athlete_id: 'a1' }],
++    ['admin.saveEntry', () => api.admin.saveEntry(entry), 'admin_save_entry', { p_entry: entry }],
++    ['admin.bulkCreateEntries', () => api.admin.bulkCreateEntries('r1', ['a1', 'a2']), 'admin_bulk_create_entries',
++      { p_race_id: 'r1', p_athlete_ids: ['a1', 'a2'] }],
++    ['admin.updateEntryStatus', () => api.admin.updateEntryStatus('en1', 'dsq', 30000, 'Cortou o percurso'), 'admin_update_entry_status',
++      { p_entry_id: 'en1', p_status: 'dsq', p_penalty_ms: 30000, p_notes: 'Cortou o percurso' }],
++    ['admin.deleteEntry', () => api.admin.deleteEntry('en1'), 'admin_delete_entry', { p_entry_id: 'en1' }],
++    ['admin.live', () => api.admin.live('ev1', null), 'admin_live', { p_event_id: 'ev1', p_since: null }],
++    ['admin.updateMark', () => api.admin.updateMark('m1', { entry_id: 'en1', leg_index: 0 }), 'admin_update_mark',
++      { p_mark_id: 'm1', p_patch: { entry_id: 'en1', leg_index: 0 } }],
++    ['admin.clearResolution', () => api.admin.clearResolution('en1', 2), 'admin_clear_resolution', { p_entry_id: 'en1', p_leg_index: 2 }],
++    ['admin.updateTimekeeper', () => api.admin.updateTimekeeper('k1', { active: false }), 'admin_update_timekeeper',
++      { p_timekeeper_id: 'k1', p_patch: { active: false } }],
++    ['admin.finalizeRace', () => api.admin.finalizeRace('r1', finalizeRows), 'admin_finalize_race', { p_race_id: 'r1', p_rows: finalizeRows }],
++    ['admin.unfinalizeRace', () => api.admin.unfinalizeRace('r1'), 'admin_unfinalize_race', { p_race_id: 'r1' }],
++    ['tk.open', () => api.tk.open('tok'), 'tk_open', { p_token: 'tok' }],
++    ['tk.register', () => api.tk.register('tok', 'Carla', 'iPhone'), 'tk_register', { p_token: 'tok', p_name: 'Carla', p_device_label: 'iPhone' }],
++    ['pub.events', () => api.pub.events(), 'pub_events', undefined],
++    ['pub.event', () => api.pub.event('copa-ebc-2026-10-11'), 'pub_event', { p_slug: 'copa-ebc-2026-10-11' }],
++    ['pub.athlete', () => api.pub.athlete('a1'), 'pub_athlete', { p_athlete_id: 'a1' }],
++  ])('%s calls the matching RPC with its p_ parameters', async (_name, invoke, fn, args) => {
++    await invoke();
++    expect(rpc.mock.calls).toEqual([args === undefined ? [fn] : [fn, args]]);
++  });
++});
+diff --git a/src/lib/api.ts b/src/lib/api.ts
+new file mode 100644
+index 0000000..93e1793
+--- /dev/null
++++ b/src/lib/api.ts
+@@ -0,0 +1,162 @@
++import { supabase } from './supabase';
++import type {
++  AdminMe, AthleteProfile, AthleteRow, EntryRow, EntryStatus, EventAggregate, EventRow, EventSummary,
++  FinalizeRowInput, ImportResult, ImportRowInput, Leg, LiveDelta, MarkRow, OrganizerRow, PubEventListItem,
++  PubEventPayload, RaceRow, ResolutionMode, ResolutionRow, Sex, TimekeeperRow, TkMarkInput, TkRegistration,
++  TkSession, TkSyncResult, WaveRow,
++} from './types';
++
++/** Every `api` failure: the pt-BR message to show plus the Postgres/PostgREST error code
++ * (`P0001` validation, `42501` permission, …) or `'network'` when the server was unreachable. */
++export class ApiError extends Error {
++  code: string | null;
++
++  constructor(message: string, code: string | null = null) {
++    super(message);
++    this.name = 'ApiError';
++    this.code = code;
++  }
++}
++
++const NETWORK_MESSAGE = 'Sem conexão com o servidor';
++
++interface RpcResult {
++  data: unknown;
++  error: { message?: string; code?: string | null } | null;
++  status?: number;
++}
++
++function thrownToApiError(e: unknown): ApiError {
++  if (e instanceof ApiError) return e;
++  // fetch() rejects with a TypeError when the network is down, DNS fails or CORS blocks the call.
++  if (e instanceof TypeError || (e instanceof Error && e.name === 'FetchError')) return new ApiError(NETWORK_MESSAGE, 'network');
++  return new ApiError(e instanceof Error && e.message ? e.message : 'Erro inesperado');
++}
++
++async function call<T>(fn: string, args?: Record<string, unknown>): Promise<T> {
++  let res: RpcResult;
++  try {
++    res = await (args === undefined ? supabase.rpc(fn) : supabase.rpc(fn, args));
++  } catch (e) {
++    throw thrownToApiError(e);
++  }
++  if (res.error) {
++    // postgrest-js does not reject on a failed fetch: it resolves with HTTP status 0 instead.
++    if (res.status === 0) throw new ApiError(NETWORK_MESSAGE, 'network');
++    throw new ApiError(res.error.message || 'Erro inesperado', res.error.code || null);
++  }
++  return res.data as T;
++}
++
++async function callVoid(fn: string, args?: Record<string, unknown>): Promise<void> {
++  await call<unknown>(fn, args);
++}
++
++interface Api {
++  serverTime(): Promise<number>;
++  admin: {
++    me(): Promise<AdminMe>;
++    passwordChanged(): Promise<void>;
++    listOrganizers(): Promise<OrganizerRow[]>;
++    createOrganizer(email: string, password: string, name: string): Promise<OrganizerRow>;
++    deleteOrganizer(userId: string): Promise<void>;
++    listEvents(): Promise<EventSummary[]>;
++    getEvent(id: string): Promise<EventAggregate>;
++    saveEvent(e: Partial<EventRow> & { name: string; date: string }): Promise<EventRow>;
++    deleteEvent(id: string): Promise<void>;
++    duplicateEvent(id: string, name: string, date: string): Promise<string>;
++    rotateTkToken(eventId: string): Promise<string>;
++    saveRace(r: Partial<RaceRow> & { event_id: string; name: string; legs: Leg[]; waves?: Partial<WaveRow>[] }): Promise<{ race: RaceRow; waves: WaveRow[] }>;
++    deleteRace(id: string): Promise<void>;
++    setWaveStart(waveId: string, startAt: string | null): Promise<WaveRow>;
++    listAthletes(): Promise<AthleteRow[]>;
++    saveAthlete(a: Partial<AthleteRow> & { name: string; sex: Sex }): Promise<AthleteRow>;
++    deleteAthlete(id: string): Promise<void>;
++    importAthletes(eventId: string | null, rows: ImportRowInput[]): Promise<ImportResult>;
++    athleteProfile(id: string): Promise<AthleteProfile>;
++    saveEntry(e: {
++      id?: string; race_id: string; wave_id?: string | null; bib?: string | null; team_name?: string | null;
++      level?: string | null; notes?: string; members: { athlete_id: string; legs: number[] }[];
++    }): Promise<EntryRow>;
++    bulkCreateEntries(raceId: string, athleteIds: string[]): Promise<EntryRow[]>;
++    updateEntryStatus(id: string, status: EntryStatus, penaltyMs: number, notes: string): Promise<EntryRow>;
++    deleteEntry(id: string): Promise<void>;
++    live(eventId: string, since: string | null): Promise<LiveDelta>;
++    updateMark(id: string, patch: { entry_id?: string | null; leg_index?: number | null; discarded?: boolean }): Promise<MarkRow>;
++    setResolution(entryId: string, legIndex: number, mode: ResolutionMode, markId: string | null, manualTs: string | null, note: string): Promise<ResolutionRow>;
++    clearResolution(entryId: string, legIndex: number): Promise<void>;
++    updateTimekeeper(id: string, patch: { name?: string; active?: boolean }): Promise<TimekeeperRow>;
++    finalizeRace(raceId: string, rows: FinalizeRowInput[]): Promise<{ finalized_at: string; count: number }>;
++    unfinalizeRace(raceId: string): Promise<void>;
++  };
++  tk: {
++    open(token: string): Promise<TkSession>;
++    register(token: string, name: string, deviceLabel: string): Promise<TkRegistration>;
++    sync(token: string, timekeeperId: string, secret: string, marks: TkMarkInput[], since: string | null): Promise<TkSyncResult>;
++  };
++  pub: {
++    events(): Promise<PubEventListItem[]>;
++    event(slug: string): Promise<PubEventPayload>;
++    live(slug: string, since: string | null): Promise<LiveDelta>;
++    athlete(id: string): Promise<AthleteProfile>;
++  };
++}
++
++/** Typed wrapper over the Postgres RPC functions — the app's only way to reach the database. */
++export const api: Api = {
++  serverTime: async () => {
++    // bigint arrives as a JSON number from PostgREST; Number() also accepts a numeric string.
++    const ms = Number(await call<number | string | null>('server_time'));
++    // Never hand a bogus value (null → 0) to the clock sync: every mark's time depends on it.
++    if (!Number.isFinite(ms) || ms <= 0) throw new ApiError('Resposta inválida do servidor');
++    return ms;
++  },
++  admin: {
++    me: () => call('admin_me'),
++    passwordChanged: () => callVoid('admin_password_changed'),
++    listOrganizers: () => call('admin_list_organizers'),
++    createOrganizer: (email, password, name) => call('admin_create_organizer', { p_email: email, p_password: password, p_name: name }),
++    deleteOrganizer: (userId) => callVoid('admin_delete_organizer', { p_user_id: userId }),
++    listEvents: () => call('admin_list_events'),
++    getEvent: (id) => call('admin_get_event', { p_event_id: id }),
++    saveEvent: (e) => call('admin_save_event', { p_event: e }),
++    deleteEvent: (id) => callVoid('admin_delete_event', { p_event_id: id }),
++    duplicateEvent: (id, name, date) => call('admin_duplicate_event', { p_event_id: id, p_name: name, p_date: date }),
++    rotateTkToken: (eventId) => call('admin_rotate_tk_token', { p_event_id: eventId }),
++    saveRace: (r) => call('admin_save_race', { p_race: r }),
++    deleteRace: (id) => callVoid('admin_delete_race', { p_race_id: id }),
++    setWaveStart: (waveId, startAt) => call('admin_set_wave_start', { p_wave_id: waveId, p_start_at: startAt }),
++    listAthletes: () => call('admin_list_athletes'),
++    saveAthlete: (a) => call('admin_save_athlete', { p_athlete: a }),
++    deleteAthlete: (id) => callVoid('admin_delete_athlete', { p_athlete_id: id }),
++    importAthletes: (eventId, rows) => call('admin_import_athletes', { p_event_id: eventId, p_rows: rows }),
++    athleteProfile: (id) => call('admin_athlete_profile', { p_athlete_id: id }),
++    saveEntry: (e) => call('admin_save_entry', { p_entry: e }),
++    bulkCreateEntries: (raceId, athleteIds) => call('admin_bulk_create_entries', { p_race_id: raceId, p_athlete_ids: athleteIds }),
++    updateEntryStatus: (id, status, penaltyMs, notes) =>
++      call('admin_update_entry_status', { p_entry_id: id, p_status: status, p_penalty_ms: penaltyMs, p_notes: notes }),
++    deleteEntry: (id) => callVoid('admin_delete_entry', { p_entry_id: id }),
++    live: (eventId, since) => call('admin_live', { p_event_id: eventId, p_since: since }),
++    updateMark: (id, patch) => call('admin_update_mark', { p_mark_id: id, p_patch: patch }),
++    setResolution: (entryId, legIndex, mode, markId, manualTs, note) =>
++      call('admin_set_resolution', {
++        p_entry_id: entryId, p_leg_index: legIndex, p_mode: mode, p_mark_id: markId, p_manual_ts: manualTs, p_note: note,
++      }),
++    clearResolution: (entryId, legIndex) => callVoid('admin_clear_resolution', { p_entry_id: entryId, p_leg_index: legIndex }),
++    updateTimekeeper: (id, patch) => call('admin_update_timekeeper', { p_timekeeper_id: id, p_patch: patch }),
++    finalizeRace: (raceId, rows) => call('admin_finalize_race', { p_race_id: raceId, p_rows: rows }),
++    unfinalizeRace: (raceId) => callVoid('admin_unfinalize_race', { p_race_id: raceId }),
++  },
++  tk: {
++    open: (token) => call('tk_open', { p_token: token }),
++    register: (token, name, deviceLabel) => call('tk_register', { p_token: token, p_name: name, p_device_label: deviceLabel }),
++    sync: (token, timekeeperId, secret, marks, since) =>
++      call('tk_sync', { p_token: token, p_timekeeper_id: timekeeperId, p_secret: secret, p_marks: marks, p_since: since }),
++  },
++  pub: {
++    events: () => call('pub_events'),
++    event: (slug) => call('pub_event', { p_slug: slug }),
++    live: (slug, since) => call('pub_live', { p_slug: slug, p_since: since }),
++    athlete: (id) => call('pub_athlete', { p_athlete_id: id }),
++  },
++};
+diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
+new file mode 100644
+index 0000000..d614c7e
+--- /dev/null
++++ b/src/lib/supabase.ts
+@@ -0,0 +1,16 @@
++import { createClient } from '@supabase/supabase-js';
++
++// The only Supabase client of the app. Data access goes exclusively through `api.ts`
++// (Postgres RPC functions); the client is also used directly for e-mail/password auth.
++export const supabase = createClient(
++  import.meta.env.VITE_SUPABASE_URL as string,
++  import.meta.env.VITE_SUPABASE_KEY as string,
++  {
++    auth: {
++      persistSession: true,
++      autoRefreshToken: true,
++      detectSessionInUrl: false,
++      storageKey: 'ebc.auth',
++    },
++  },
++);
+diff --git a/src/main.tsx b/src/main.tsx
+index dfacde0..89391a7 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -1,10 +1,32 @@
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+ import App from './App';
++import { SessionProvider } from './features/auth/session';
++import { ConfirmProvider, ToastProvider } from './components/ui';
++import { ApiError } from './lib/api';
+ import './index.css';
+ 
++const queryClient = new QueryClient({
++  defaultOptions: {
++    queries: {
++      staleTime: 5_000,
++      // Validation/permission errors do not go away on retry; only network failures are retried.
++      retry: (failureCount, error) => failureCount < 2 && error instanceof ApiError && error.code === 'network',
++    },
++  },
++});
++
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+-    <App />
++    <QueryClientProvider client={queryClient}>
++      <SessionProvider>
++        <ToastProvider>
++          <ConfirmProvider>
++            <App />
++          </ConfirmProvider>
++        </ToastProvider>
++      </SessionProvider>
++    </QueryClientProvider>
+   </StrictMode>,
+ );
+diff --git a/src/test/setup.test.tsx b/src/test/setup.test.tsx
+new file mode 100644
+index 0000000..8c01039
+--- /dev/null
++++ b/src/test/setup.test.tsx
+@@ -0,0 +1,16 @@
++import { describe, expect, it } from 'vitest';
++import { render, screen } from '@testing-library/react';
++
++// Ruling 7: Vitest runs without globals, so Testing Library cannot register its automatic
++// cleanup; src/test/setup.ts does it. These two tests run in order and prove it.
++describe('test setup', () => {
++  it('renders into the document with the jest-dom matchers available', () => {
++    render(<p>primeiro teste</p>);
++    expect(screen.getByText('primeiro teste')).toBeInTheDocument();
++  });
++
++  it('unmounts whatever the previous test rendered', () => {
++    expect(screen.queryByText('primeiro teste')).not.toBeInTheDocument();
++    expect(document.body).toBeEmptyDOMElement();
++  });
++});
+diff --git a/src/test/setup.ts b/src/test/setup.ts
+index bb02c60..cef2a87 100644
+--- a/src/test/setup.ts
++++ b/src/test/setup.ts
+@@ -1 +1,9 @@
+ import '@testing-library/jest-dom/vitest';
++import { afterEach } from 'vitest';
++import { cleanup } from '@testing-library/react';
++
++// Testing Library only registers its automatic cleanup when `afterEach` is a global, and Vitest
++// runs without `test.globals` — so unmount whatever each test rendered explicitly.
++afterEach(() => {
++  cleanup();
++});

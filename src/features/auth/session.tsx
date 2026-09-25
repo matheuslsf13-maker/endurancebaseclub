@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
@@ -27,8 +27,23 @@ interface SessionState {
 const ANON: SessionState = { status: 'anon', me: null };
 const FORBIDDEN: SessionState = { status: 'forbidden', me: null };
 
-/** Delay before re-checking a restored session while the server is unreachable. */
+/** First delay before re-checking a stored session the server could not confirm; it doubles up to the max. */
 const RESTORE_RETRY_MS = 3_000;
+const RESTORE_RETRY_MAX_MS = 30_000;
+
+/** PostgREST codes for a JWT it refused: expired or invalid (PGRST301), bad claims (PGRST303). */
+const REJECTED_JWT_CODES = new Set(['PGRST301', 'PGRST303']);
+
+/** The server refused the session itself (not a transient failure): it will never work again. */
+function isRejectedSession(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 401 || (e.code !== null && REJECTED_JWT_CODES.has(e.code)));
+}
+
+/** A Supabase Auth failure that says nothing about the session: offline, or the auth server is down. */
+function isTransientAuthError(e: unknown): boolean {
+  const err = (typeof e === 'object' && e !== null ? e : {}) as { name?: string; status?: number };
+  return e instanceof TypeError || err.name === 'AuthRetryableFetchError' || err.status === 0 || (err.status ?? 0) >= 500;
+}
 
 /** Supabase Auth errors (returned or thrown) as pt-BR ApiErrors. */
 function authError(e: unknown): ApiError {
@@ -49,10 +64,14 @@ function authError(e: unknown): ApiError {
   return new ApiError(err.message || 'Erro inesperado', err.code ?? null);
 }
 
-/** Ends the Supabase session; supabase-js removes the local copy even when the server is unreachable. */
+/**
+ * Ends the session on this device only. `scope: 'global'` (the supabase-js default) would revoke the
+ * organizer's refresh tokens everywhere: the master laptop must not log out because a phone did.
+ * supabase-js removes the local copy even when the logout request itself fails.
+ */
 async function dropSession(): Promise<void> {
   try {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: 'local' });
   } catch {
     // Nothing left to do: the session is gone locally either way.
   }
@@ -61,55 +80,90 @@ async function dropSession(): Promise<void> {
 export function SessionProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [state, setState] = useState<SessionState>({ status: 'loading', me: null });
+  // Read by the auth event listener, which outlives any single render.
+  const statusRef = useRef<SessionStatus>('loading');
+  const apply = useCallback((next: SessionState) => {
+    statusRef.current = next.status;
+    setState(next);
+  }, []);
+  // Set while signIn runs, so its own SIGNED_IN event does not load the profile a second time.
+  const signingIn = useRef(false);
 
   // Being signed in is not enough: only accounts with an `organizers` row get in. For any other
   // account admin_me answers 42501 — sign it out and let the UI explain why.
   const loadMe = useCallback(async () => {
     try {
       const me = await api.admin.me();
-      setState({ status: 'organizer', me });
+      apply({ status: 'organizer', me });
     } catch (e) {
       if (e instanceof ApiError && e.code === '42501') {
-        setState(FORBIDDEN);
+        apply(FORBIDDEN);
         await dropSession();
         return;
       }
       throw e;
     }
-  }, []);
+  }, [apply]);
 
   useEffect(() => {
     let cancelled = false;
+    let running = false;
+    let failures = 0;
     let retry: ReturnType<typeof setTimeout> | undefined;
 
+    // Settles the status from the stored session. Only a definite answer leaves "loading": no
+    // session → anon; the server refusing the JWT → drop it on this device → anon; 42501 →
+    // forbidden (in loadMe). Anything else — offline, an expired token that cannot be refreshed
+    // yet, a 5xx, a captive portal — keeps the session and tries again with backoff: a network
+    // hiccup on race day must never log the organizer out.
     const restore = async () => {
+      if (cancelled || running) return;
+      running = true;
+      clearTimeout(retry);
+      let again = false;
       try {
-        const { data } = await supabase.auth.getSession();
+        const { data, error } = await supabase.auth.getSession();
         if (cancelled) return;
-        if (!data.session) {
-          setState(ANON);
-          return;
-        }
-        await loadMe();
+        if (data.session) await loadMe();
+        // After a transient refresh failure supabase-js keeps the session in storage; after any
+        // other one (refresh token revoked) it has already removed it.
+        else if (error && isTransientAuthError(error)) again = true;
+        else apply(ANON);
       } catch (e) {
         if (cancelled) return;
-        if (e instanceof ApiError && e.code === 'network') {
-          // Offline right now: keep "loading" rather than pretend the organizer is logged out.
-          retry = setTimeout(() => void restore(), RESTORE_RETRY_MS);
-          return;
+        if (isRejectedSession(e)) {
+          await dropSession();
+          if (!cancelled) apply(ANON);
+        } else {
+          again = true;
         }
-        // The stored session is unusable (revoked, invalid JWT…): start over from the login page.
-        await dropSession();
-        setState(ANON);
+      } finally {
+        running = false;
+      }
+      if (again && !cancelled) {
+        retry = setTimeout(() => void restore(), Math.min(RESTORE_RETRY_MS * 2 ** failures, RESTORE_RETRY_MAX_MS));
+        failures += 1;
+      } else {
+        failures = 0;
       }
     };
     void restore();
 
-    // Sessions can also end outside this provider (refresh token revoked, sign-out in another tab).
     const { data } = supabase.auth.onAuthStateChange((event) => {
-      if (event !== 'SIGNED_OUT') return;
-      setState((s) => (s.status === 'forbidden' ? s : ANON));
-      queryClient.clear();
+      if (event === 'SIGNED_OUT') {
+        // Sessions also end outside this provider (refresh token revoked, sign-out in another tab).
+        clearTimeout(retry);
+        if (statusRef.current !== 'forbidden') apply(ANON);
+        queryClient.clear();
+      } else if (
+        (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') &&
+        !signingIn.current &&
+        (statusRef.current === 'loading' || statusRef.current === 'anon')
+      ) {
+        // The token was refreshed once the network came back, or another tab signed in.
+        // Deferred: supabase-js runs these callbacks while holding its auth lock.
+        setTimeout(() => void restore(), 0);
+      }
     });
 
     return () => {
@@ -117,18 +171,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clearTimeout(retry);
       data.subscription.unsubscribe();
     };
-  }, [loadMe, queryClient]);
+  }, [apply, loadMe, queryClient]);
 
   const signIn = useCallback(
     async (email: string, password: string) => {
-      let error: unknown;
+      signingIn.current = true;
       try {
-        ({ error } = await supabase.auth.signInWithPassword({ email: email.trim(), password }));
-      } catch (e) {
-        error = e;
+        let error: unknown;
+        try {
+          ({ error } = await supabase.auth.signInWithPassword({ email: email.trim(), password }));
+        } catch (e) {
+          error = e;
+        }
+        if (error) throw authError(error);
+        await loadMe();
+      } finally {
+        signingIn.current = false;
       }
-      if (error) throw authError(error);
-      await loadMe();
     },
     [loadMe],
   );
@@ -136,9 +195,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Cached admin data (athletes' contacts included) must not outlive the session on this device.
   const signOut = useCallback(async () => {
     await dropSession();
-    setState(ANON);
+    apply(ANON);
     queryClient.clear();
-  }, [queryClient]);
+  }, [apply, queryClient]);
 
   const changePassword = useCallback(
     async (pw: string) => {

@@ -1,0 +1,1447 @@
+# Review package: bae2379..12747ed (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+12747ed feat(races): race editor with legs, waves, categories and podium rules
+
+## Files changed
+ src/features/races/AgeGroupsEditor.tsx | 109 ++++++++++++
+ src/features/races/LegsEditor.tsx      | 132 ++++++++++++++
+ src/features/races/RaceEditor.tsx      | 306 +++++++++++++++++++++++++++++++++
+ src/features/races/RacesTab.tsx        | 135 ++++++++++++++-
+ src/features/races/RankingsEditor.tsx  | 107 ++++++++++++
+ src/features/races/raceForm.test.ts    | 204 ++++++++++++++++++++++
+ src/features/races/raceForm.ts         | 178 +++++++++++++++++++
+ src/features/races/races.test.tsx      | 212 +++++++++++++++++++++++
+ 8 files changed, 1382 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/features/races/AgeGroupsEditor.tsx b/src/features/races/AgeGroupsEditor.tsx
+new file mode 100644
+index 0000000..52b604c
+--- /dev/null
++++ b/src/features/races/AgeGroupsEditor.tsx
+@@ -0,0 +1,109 @@
++import { useState } from 'react';
++import { Button, Input } from '../../components/ui';
++import { validateAgeGroups } from '../../domain/categories';
++import { generateAgeGroups } from '../../domain/presets';
++import type { AgeGroup } from '../../lib/types';
++
++function blankGroup(): AgeGroup {
++  return { label: '', min: 0, max: null };
++}
++
++export interface AgeGroupsEditorProps {
++  groups: AgeGroup[];
++  onChange(groups: AgeGroup[]): void;
++}
++
++/** "Categorias" section's faixa-etária editor: manual rows (label/min/max) plus a generator that
++ * fills "de X em X anos a partir de Y até Z" via `generateAgeGroups`, and the domain's overlap
++ * validation shown live. */
++export function AgeGroupsEditor({ groups, onChange }: AgeGroupsEditorProps) {
++  const [genStart, setGenStart] = useState('20');
++  const [genStep, setGenStep] = useState('10');
++  const [genLast, setGenLast] = useState('60');
++  const errors = validateAgeGroups(groups);
++
++  function update(i: number, patch: Partial<AgeGroup>) {
++    onChange(groups.map((g, idx) => (idx === i ? { ...g, ...patch } : g)));
++  }
++
++  function remove(i: number) {
++    onChange(groups.filter((_, idx) => idx !== i));
++  }
++
++  function generate() {
++    const start = Number(genStart), step = Number(genStep), last = Number(genLast);
++    if (!Number.isFinite(start) || !Number.isFinite(step) || !Number.isFinite(last) || step <= 0 || last <= start) return;
++    onChange(generateAgeGroups(start, step, last));
++  }
++
++  return (
++    <div className="flex flex-col gap-3">
++      {groups.length === 0 && <p className="text-sm text-muted">Nenhuma faixa etária — a categoria "Idade" fica sem faixas.</p>}
++      {groups.map((g, i) => (
++        <div key={i} className="flex flex-col gap-2 rounded-xl border border-border p-3 sm:flex-row sm:items-end sm:gap-3">
++          <div className="flex-1">
++            <Input label="Rótulo" data-testid={`agegroup-label-${i}`} value={g.label} onChange={(e) => update(i, { label: e.target.value })} />
++          </div>
++          <div className="sm:w-24">
++            <Input
++              label="Idade mín."
++              type="number"
++              data-testid={`agegroup-min-${i}`}
++              value={g.min}
++              onChange={(e) => update(i, { min: Number(e.target.value) })}
++            />
++          </div>
++          <div className="sm:w-24">
++            <Input
++              label="Idade máx."
++              type="number"
++              data-testid={`agegroup-max-${i}`}
++              placeholder="sem limite"
++              value={g.max ?? ''}
++              onChange={(e) => update(i, { max: e.target.value === '' ? null : Number(e.target.value) })}
++            />
++          </div>
++          <Button
++            type="button"
++            variant="ghost"
++            size="sm"
++            aria-label={`Remover faixa ${g.label || i + 1}`}
++            data-testid={`agegroup-remove-${i}`}
++            onClick={() => remove(i)}
++          >
++            Remover
++          </Button>
++        </div>
++      ))}
++      <Button type="button" variant="secondary" size="sm" data-testid="agegroup-add" onClick={() => onChange([...groups, blankGroup()])}>
++        Adicionar faixa
++      </Button>
++
++      {errors.length > 0 && (
++        <ul className="flex flex-col gap-1">
++          {errors.map((e) => (
++            <li key={e} role="alert" className="text-sm text-danger">
++              {e}
++            </li>
++          ))}
++        </ul>
++      )}
++
++      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-dashed border-border p-3">
++        <p className="w-full text-sm text-muted">Gerar faixas de X em X anos a partir de Y até Z (substitui a lista acima)</p>
++        <div className="w-20">
++          <Input label="De X em X" type="number" data-testid="agegroup-gen-step" value={genStep} onChange={(e) => setGenStep(e.target.value)} />
++        </div>
++        <div className="w-24">
++          <Input label="A partir de" type="number" data-testid="agegroup-gen-start" value={genStart} onChange={(e) => setGenStart(e.target.value)} />
++        </div>
++        <div className="w-20">
++          <Input label="Até" type="number" data-testid="agegroup-gen-last" value={genLast} onChange={(e) => setGenLast(e.target.value)} />
++        </div>
++        <Button type="button" variant="secondary" size="sm" data-testid="agegroup-gen-apply" onClick={generate}>
++          Gerar
++        </Button>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/features/races/LegsEditor.tsx b/src/features/races/LegsEditor.tsx
+new file mode 100644
+index 0000000..bfdded8
+--- /dev/null
++++ b/src/features/races/LegsEditor.tsx
+@@ -0,0 +1,132 @@
++import { Button, Input, Select } from '../../components/ui';
++import { MODALITY_LABEL } from '../../domain/presets';
++import type { Modality } from '../../lib/types';
++import type { DistanceUnit, RaceFormLeg } from './raceForm';
++
++const MODALITY_OPTIONS = (Object.keys(MODALITY_LABEL) as Modality[]).map((m) => ({ value: m, label: MODALITY_LABEL[m] }));
++const UNIT_OPTIONS: { value: DistanceUnit; label: string }[] = [
++  { value: 'm', label: 'm' },
++  { value: 'km', label: 'km' },
++];
++
++function newLeg(): RaceFormLeg {
++  return { modality: 'run', label: MODALITY_LABEL.run, distance: '', unit: 'm' };
++}
++
++export interface LegsEditorProps {
++  legs: RaceFormLeg[];
++  onChange(legs: RaceFormLeg[]): void;
++}
++
++/** "Pernas" section: an ordered list of legs (modality, label, distance/unit), with add, remove
++ * (kept to at least one) and reorder — the prova's list of `Trecho`s (CLAUDE.md). */
++export function LegsEditor({ legs, onChange }: LegsEditorProps) {
++  function update(i: number, patch: Partial<RaceFormLeg>) {
++    onChange(legs.map((leg, idx) => (idx === i ? { ...leg, ...patch } : leg)));
++  }
++
++  function onModalityChange(i: number, modality: Modality) {
++    const leg = legs[i];
++    // Only replace the label when it still matched the old modality's default — a custom label
++    // the organizer typed in is left alone.
++    const label = leg.label === MODALITY_LABEL[leg.modality] ? MODALITY_LABEL[modality] : leg.label;
++    update(i, { modality, label });
++  }
++
++  function move(i: number, dir: -1 | 1) {
++    const j = i + dir;
++    if (j < 0 || j >= legs.length) return;
++    const next = legs.slice();
++    [next[i], next[j]] = [next[j], next[i]];
++    onChange(next);
++  }
++
++  function remove(i: number) {
++    if (legs.length <= 1) return;
++    onChange(legs.filter((_, idx) => idx !== i));
++  }
++
++  return (
++    <div className="flex flex-col gap-3">
++      {legs.map((leg, i) => (
++        <div key={i} className="flex flex-col gap-2 rounded-xl border border-border p-3 sm:flex-row sm:items-end sm:gap-3">
++          <div className="text-sm font-medium text-muted sm:pb-2.5">Perna {i + 1}</div>
++          <div className="sm:w-40">
++            <Select
++              label="Modalidade"
++              data-testid={`leg-modality-${i}`}
++              options={MODALITY_OPTIONS}
++              value={leg.modality}
++              onChange={(e) => onModalityChange(i, e.target.value as Modality)}
++            />
++          </div>
++          <div className="flex-1">
++            <Input
++              label="Rótulo"
++              data-testid={`leg-label-${i}`}
++              value={leg.label}
++              onChange={(e) => update(i, { label: e.target.value })}
++            />
++          </div>
++          <div className="sm:w-28">
++            <Input
++              label="Distância"
++              data-testid={`leg-distance-${i}`}
++              inputMode="decimal"
++              placeholder={leg.modality === 'other' ? 'opcional' : undefined}
++              value={leg.distance}
++              onChange={(e) => update(i, { distance: e.target.value })}
++            />
++          </div>
++          <div className="sm:w-24">
++            <Select
++              label="Unidade"
++              data-testid={`leg-unit-${i}`}
++              options={UNIT_OPTIONS}
++              value={leg.unit}
++              onChange={(e) => update(i, { unit: e.target.value as DistanceUnit })}
++            />
++          </div>
++          <div className="flex items-center gap-1">
++            <Button
++              type="button"
++              variant="secondary"
++              size="sm"
++              aria-label={`Mover perna ${i + 1} para cima`}
++              data-testid={`leg-move-up-${i}`}
++              disabled={i === 0}
++              onClick={() => move(i, -1)}
++            >
++              ↑
++            </Button>
++            <Button
++              type="button"
++              variant="secondary"
++              size="sm"
++              aria-label={`Mover perna ${i + 1} para baixo`}
++              data-testid={`leg-move-down-${i}`}
++              disabled={i === legs.length - 1}
++              onClick={() => move(i, 1)}
++            >
++              ↓
++            </Button>
++            <Button
++              type="button"
++              variant="ghost"
++              size="sm"
++              aria-label={`Remover perna ${i + 1}`}
++              data-testid={`leg-remove-${i}`}
++              disabled={legs.length <= 1}
++              onClick={() => remove(i)}
++            >
++              Remover
++            </Button>
++          </div>
++        </div>
++      ))}
++      <Button type="button" variant="secondary" size="sm" data-testid="leg-add" onClick={() => onChange([...legs, newLeg()])}>
++        Adicionar perna
++      </Button>
++    </div>
++  );
++}
+diff --git a/src/features/races/RaceEditor.tsx b/src/features/races/RaceEditor.tsx
+new file mode 100644
+index 0000000..66df231
+--- /dev/null
++++ b/src/features/races/RaceEditor.tsx
+@@ -0,0 +1,306 @@
++import { useId, useState } from 'react';
++import type { ChangeEvent, ReactNode } from 'react';
++import { Button, Card, Input, Select, useConfirm, useToast } from '../../components/ui';
++import { defaultRaceConfig } from '../../domain/presets';
++import { formatClock } from '../../lib/format';
++import { api, ApiError } from '../../lib/api';
++import type { AgeRule, TeamAgeRule, TimeSource } from '../../lib/types';
++import { useEventContext } from '../events/EventContext';
++import { AgeGroupsEditor } from './AgeGroupsEditor';
++import { LegsEditor } from './LegsEditor';
++import { RankingsEditor } from './RankingsEditor';
++import { formToPayload, teamSizeLabel, validateRaceForm } from './raceForm';
++import type { RaceForm } from './raceForm';
++
++const TEAM_SIZE_OPTIONS = [1, 2, 3, 4, 5, 6].map((n) => ({ value: String(n), label: teamSizeLabel(n) }));
++const isTeam = (n: number) => n > 1;
++
++interface RadioOptionProps {
++  name: string;
++  value: string;
++  label: string;
++  checked: boolean;
++  onChange(): void;
++  testId?: string;
++}
++
++function RadioOption({ name, value, label, checked, onChange, testId }: RadioOptionProps) {
++  const id = useId();
++  return (
++    <label htmlFor={id} className="inline-flex min-h-11 items-center gap-2">
++      <input
++        id={id}
++        type="radio"
++        name={name}
++        value={value}
++        checked={checked}
++        onChange={onChange}
++        data-testid={testId}
++        style={{ accentColor: 'var(--accent)' }}
++        className="h-5 w-5 border-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++      />
++      <span className="text-sm">{label}</span>
++    </label>
++  );
++}
++
++function Section({ title, children }: { title: string; children: ReactNode }) {
++  return (
++    <Card className="flex flex-col gap-4">
++      <h2 className="brand-title text-base font-semibold">{title}</h2>
++      {children}
++    </Card>
++  );
++}
++
++function waveStartLabel(startAt: string | null): string {
++  return startAt ? `Largou às ${formatClock(Date.parse(startAt), { tenths: true })}` : 'Sem largada';
++}
++
++export interface RaceEditorProps {
++  initial: RaceForm;
++  onDone(): void;
++}
++
++/** The full race editor (brief §Task 19): Dados, Pernas, Largadas, Categorias, Pódio,
++ * Cronometragem. Owns its own copy of the `RaceForm` (seeded from `initial`) and saves through
++ * `formToPayload` + `api.admin.saveRace`, refreshing the event and reporting back via `onDone`. */
++export function RaceEditor({ initial, onDone }: RaceEditorProps) {
++  const { agg, refresh } = useEventContext();
++  const toast = useToast();
++  const confirm = useConfirm();
++  const [form, setForm] = useState<RaceForm>(initial);
++  const [errors, setErrors] = useState<string[]>([]);
++  const [saving, setSaving] = useState(false);
++  const hasLevels = agg.event.levels.length > 0;
++
++  async function onTeamSizeChange(e: ChangeEvent<HTMLSelectElement>) {
++    const next = Number(e.target.value);
++    const wasTeam = isTeam(form.team_size);
++    const nowTeam = isTeam(next);
++    if (wasTeam === nowTeam) {
++      setForm((f) => ({ ...f, team_size: next }));
++      return;
++    }
++    const ok = await confirm({
++      title: 'Mudar tamanho da equipe',
++      message: `A prova vai virar ${nowTeam ? 'uma prova em equipe' : 'individual'}. Isso redefine o pódio e as faixas etárias para os padrões de ${nowTeam ? 'equipe' : 'individual'}. Continuar?`,
++      confirmLabel: 'Continuar',
++    });
++    if (!ok) return;
++    const def = defaultRaceConfig(next);
++    setForm((f) => ({ ...f, team_size: next, config: { ...f.config, rankings: def.rankings, age_groups: def.age_groups } }));
++  }
++
++  function addWave() {
++    setForm((f) => ({ ...f, waves: [...f.waves, { name: `Onda ${f.waves.length + 1}`, position: f.waves.length, start_at: null }] }));
++  }
++  function removeWave(i: number) {
++    setForm((f) => ({ ...f, waves: f.waves.filter((_, idx) => idx !== i) }));
++  }
++  function updateWaveName(i: number, name: string) {
++    setForm((f) => ({ ...f, waves: f.waves.map((w, idx) => (idx === i ? { ...w, name } : w)) }));
++  }
++
++  async function handleSave() {
++    const validation = validateRaceForm(form);
++    if (validation.length > 0) {
++      setErrors(validation);
++      return;
++    }
++    setErrors([]);
++    setSaving(true);
++    try {
++      await api.admin.saveRace(formToPayload(form));
++      await refresh();
++      toast.show({ message: 'Prova salva', tone: 'success' });
++      onDone();
++    } catch (e) {
++      setErrors([e instanceof ApiError ? e.message : 'Não foi possível salvar a prova']);
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  return (
++    <div className="flex flex-col gap-4">
++      {errors.length > 0 && (
++        <div className="rounded-xl border border-danger/30 bg-danger/10 p-3">
++          <ul className="flex flex-col gap-1">
++            {errors.map((e, i) => (
++              <li key={i} role="alert" className="text-sm text-danger">
++                {e}
++              </li>
++            ))}
++          </ul>
++        </div>
++      )}
++
++      <Section title="Dados">
++        <div className="flex flex-col gap-3 sm:flex-row">
++          <div className="flex-1">
++            <Input label="Nome da prova" data-testid="race-name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
++          </div>
++          <div className="sm:w-48">
++            <Select label="Tamanho da equipe" data-testid="race-team-size" options={TEAM_SIZE_OPTIONS} value={String(form.team_size)} onChange={(e) => void onTeamSizeChange(e)} />
++          </div>
++        </div>
++      </Section>
++
++      <Section title="Pernas">
++        <LegsEditor legs={form.legs} onChange={(legs) => setForm((f) => ({ ...f, legs }))} />
++      </Section>
++
++      <Section title="Largadas">
++        <div className="flex flex-col gap-3">
++          {form.waves.map((w, i) => (
++            <div key={w.id ?? `new-${i}`} className="flex flex-col gap-2 rounded-xl border border-border p-3 sm:flex-row sm:items-end sm:gap-3">
++              <div className="flex-1">
++                <Input label="Nome da largada" data-testid={`wave-name-${i}`} value={w.name} onChange={(e) => updateWaveName(i, e.target.value)} />
++              </div>
++              <p className="text-sm text-muted tabular sm:pb-2.5">{waveStartLabel(w.start_at)}</p>
++              <Button
++                type="button"
++                variant="ghost"
++                size="sm"
++                aria-label={`Remover largada ${w.name}`}
++                data-testid={`wave-remove-${i}`}
++                disabled={form.waves.length <= 1}
++                onClick={() => removeWave(i)}
++              >
++                Remover
++              </Button>
++            </div>
++          ))}
++          <Button type="button" variant="secondary" size="sm" data-testid="wave-add" onClick={addWave}>
++            Adicionar largada
++          </Button>
++          <p className="text-sm text-muted">O horário de largada é definido na aba Cronometragem.</p>
++        </div>
++      </Section>
++
++      <Section title="Categorias">
++        <div className="flex flex-col gap-4">
++          <div>
++            <p className="mb-1.5 text-sm font-medium text-fg">Idade considerada</p>
++            <div className="flex flex-wrap gap-4">
++              <RadioOption
++                name="age_rule"
++                value="year_end"
++                label="Idade em 31/12 do ano da prova"
++                checked={form.config.age_rule === 'year_end'}
++                onChange={() => setForm((f) => ({ ...f, config: { ...f.config, age_rule: 'year_end' as AgeRule } }))}
++              />
++              <RadioOption
++                name="age_rule"
++                value="event_date"
++                label="Idade na data da prova"
++                checked={form.config.age_rule === 'event_date'}
++                onChange={() => setForm((f) => ({ ...f, config: { ...f.config, age_rule: 'event_date' as AgeRule } }))}
++              />
++            </div>
++          </div>
++
++          {isTeam(form.team_size) && (
++            <div>
++              <p className="mb-1.5 text-sm font-medium text-fg">Idade da equipe</p>
++              <div className="flex flex-wrap gap-4">
++                {(['sum', 'oldest', 'youngest'] as TeamAgeRule[]).map((rule) => (
++                  <RadioOption
++                    key={rule}
++                    name="team_age_rule"
++                    value={rule}
++                    label={rule === 'sum' ? 'Soma' : rule === 'oldest' ? 'Mais velho' : 'Mais novo'}
++                    checked={form.config.team_age_rule === rule}
++                    onChange={() => setForm((f) => ({ ...f, config: { ...f.config, team_age_rule: rule } }))}
++                  />
++                ))}
++              </div>
++            </div>
++          )}
++
++          <AgeGroupsEditor groups={form.config.age_groups} onChange={(age_groups) => setForm((f) => ({ ...f, config: { ...f.config, age_groups } }))} />
++        </div>
++      </Section>
++
++      <Section title="Pódio">
++        <RankingsEditor
++          rankings={form.config.rankings}
++          cumulative={form.config.cumulative}
++          hasLevels={hasLevels}
++          onChange={(rankings) => setForm((f) => ({ ...f, config: { ...f.config, rankings } }))}
++          onCumulativeChange={(cumulative) => setForm((f) => ({ ...f, config: { ...f.config, cumulative } }))}
++        />
++      </Section>
++
++      <Section title="Cronometragem">
++        <div className="flex flex-col gap-4">
++          <div className="flex flex-col gap-3 sm:flex-row">
++            <div className="sm:w-56">
++              <Input
++                label="Janela de mesma passagem (s)"
++                type="number"
++                min={1}
++                data-testid="race-window"
++                value={form.config.same_crossing_window_s}
++                onChange={(e) => setForm((f) => ({ ...f, config: { ...f.config, same_crossing_window_s: Number(e.target.value) } }))}
++              />
++            </div>
++            <div className="sm:w-56">
++              <Input
++                label="Limite de divergência (s)"
++                type="number"
++                min={1}
++                data-testid="race-divergence"
++                value={form.config.divergence_threshold_s}
++                onChange={(e) => setForm((f) => ({ ...f, config: { ...f.config, divergence_threshold_s: Number(e.target.value) } }))}
++              />
++            </div>
++          </div>
++
++          <div>
++            <p className="mb-1.5 text-sm font-medium text-fg">Fonte do tempo</p>
++            <div className="flex flex-wrap gap-4">
++              <RadioOption
++                name="time_source"
++                value="median"
++                label="Mediana (recomendado)"
++                testId="race-time-source-median"
++                checked={form.config.time_source === 'median'}
++                onChange={() => setForm((f) => ({ ...f, config: { ...f.config, time_source: 'median' as TimeSource } }))}
++              />
++              <RadioOption
++                name="time_source"
++                value="reference"
++                label="Cronometrista de referência"
++                testId="race-time-source-reference"
++                checked={form.config.time_source === 'reference'}
++                onChange={() => setForm((f) => ({ ...f, config: { ...f.config, time_source: 'reference' as TimeSource } }))}
++              />
++            </div>
++          </div>
++
++          <div className="sm:w-64">
++            <Select
++              label="Cronometrista de referência"
++              data-testid="race-reference-timekeeper"
++              disabled={form.config.time_source !== 'reference'}
++              options={[{ value: '', label: 'Selecione' }, ...agg.timekeepers.map((t) => ({ value: t.id, label: t.name }))]}
++              value={form.config.reference_timekeeper_id ?? ''}
++              onChange={(e) => setForm((f) => ({ ...f, config: { ...f.config, reference_timekeeper_id: e.target.value || null } }))}
++            />
++          </div>
++        </div>
++      </Section>
++
++      <div className="flex flex-wrap items-center gap-3">
++        <Button data-testid="race-save" loading={saving} onClick={() => void handleSave()}>
++          Salvar prova
++        </Button>
++        <Button variant="secondary" data-testid="race-cancel" disabled={saving} onClick={onDone}>
++          Cancelar
++        </Button>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/features/races/RacesTab.tsx b/src/features/races/RacesTab.tsx
+index 69088e3..3b2756b 100644
+--- a/src/features/races/RacesTab.tsx
++++ b/src/features/races/RacesTab.tsx
+@@ -1 +1,134 @@
+-export default function RacesTab() { return <h1 className="p-6 brand-title">RacesTab</h1>; }
++import { useState } from 'react';
++import { Badge, Button, Card, EmptyState, Select, Table, useConfirm, useToast } from '../../components/ui';
++import { RACE_PRESETS } from '../../domain/presets';
++import { api, ApiError } from '../../lib/api';
++import type { RaceRow } from '../../lib/types';
++import { useEventContext } from '../events/EventContext';
++import { RaceEditor } from './RaceEditor';
++import { legsSummary, presetToForm, raceToForm, teamSizeLabel } from './raceForm';
++import type { RaceForm } from './raceForm';
++
++const PRESET_OPTIONS = [{ value: '', label: 'Selecione um modelo' }, ...RACE_PRESETS.map((p) => ({ value: p.id, label: p.name }))];
++
++type View = { mode: 'list' } | { mode: 'preset' } | { mode: 'edit'; form: RaceForm };
++
++/** Aba Provas: lista as provas do evento e abre o `RaceEditor` para criar (a partir de um modelo
++ * de `RACE_PRESETS`) ou editar uma existente. */
++export default function RacesTab() {
++  const { agg, refresh } = useEventContext();
++  const toast = useToast();
++  const confirm = useConfirm();
++  const [view, setView] = useState<View>({ mode: 'list' });
++
++  function startFromPreset(presetId: string) {
++    const preset = RACE_PRESETS.find((p) => p.id === presetId);
++    if (!preset) return;
++    const form = { ...presetToForm(preset, agg.event.id), position: agg.races.length };
++    setView({ mode: 'edit', form });
++  }
++
++  function startEdit(race: RaceRow) {
++    setView({ mode: 'edit', form: raceToForm(race, agg.waves) });
++  }
++
++  async function handleDelete(race: RaceRow) {
++    const ok = await confirm({
++      title: 'Excluir prova',
++      message: `Excluir a prova "${race.name}"? As inscrições e marcações associadas também são removidas.`,
++      confirmLabel: 'Excluir',
++      danger: true,
++    });
++    if (!ok) return;
++    try {
++      await api.admin.deleteRace(race.id);
++      await refresh();
++      toast.show({ message: 'Prova excluída', tone: 'success' });
++    } catch (e) {
++      toast.show({ message: e instanceof ApiError ? e.message : 'Não foi possível excluir a prova', tone: 'danger' });
++    }
++  }
++
++  if (view.mode === 'edit') {
++    return <RaceEditor initial={view.form} onDone={() => setView({ mode: 'list' })} />;
++  }
++
++  const races = agg.races.slice().sort((a, b) => a.position - b.position);
++
++  return (
++    <div className="flex flex-col gap-4">
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <h1 className="brand-title text-lg font-semibold">Provas</h1>
++        {view.mode === 'list' && (
++          <Button data-testid="new-race" onClick={() => setView({ mode: 'preset' })}>
++            Nova prova
++          </Button>
++        )}
++      </div>
++
++      {view.mode === 'preset' && (
++        <Card>
++          <div className="flex flex-wrap items-end gap-3">
++            <div className="sm:w-80">
++              <Select
++                label="Modelo da prova"
++                data-testid="race-preset"
++                options={PRESET_OPTIONS}
++                defaultValue=""
++                onChange={(e) => {
++                  if (e.target.value) startFromPreset(e.target.value);
++                }}
++              />
++            </div>
++            <Button variant="ghost" size="sm" onClick={() => setView({ mode: 'list' })}>
++              Cancelar
++            </Button>
++          </div>
++        </Card>
++      )}
++
++      {races.length === 0 ? (
++        <EmptyState title="Nenhuma prova cadastrada">Crie a primeira prova a partir de um modelo.</EmptyState>
++      ) : (
++        <Table>
++          <thead>
++            <tr>
++              <th className="px-3 py-2">Prova</th>
++              <th className="px-3 py-2">Equipe</th>
++              <th className="px-3 py-2">Pernas</th>
++              <th className="px-3 py-2">Inscrições</th>
++              <th className="px-3 py-2" />
++            </tr>
++          </thead>
++          <tbody>
++            {races.map((race) => {
++              const count = agg.entries.filter((e) => e.race_id === race.id).length;
++              return (
++                <tr key={race.id} className="border-t border-border align-top">
++                  <td className="px-3 py-2">
++                    <div className="flex flex-wrap items-center gap-2">
++                      <span className="font-medium">{race.name}</span>
++                      {race.finalized_at && <Badge tone="success">Finalizada</Badge>}
++                    </div>
++                  </td>
++                  <td className="px-3 py-2">{teamSizeLabel(race.team_size)}</td>
++                  <td className="px-3 py-2">{legsSummary(race.legs)}</td>
++                  <td className="px-3 py-2 tabular">{count} inscrição{count === 1 ? '' : 's'}</td>
++                  <td className="px-3 py-2">
++                    <div className="flex justify-end gap-2">
++                      <Button variant="secondary" size="sm" data-testid={`race-edit-${race.id}`} onClick={() => startEdit(race)}>
++                        Editar
++                      </Button>
++                      <Button variant="danger" size="sm" data-testid={`race-delete-${race.id}`} onClick={() => void handleDelete(race)}>
++                        Excluir
++                      </Button>
++                    </div>
++                  </td>
++                </tr>
++              );
++            })}
++          </tbody>
++        </Table>
++      )}
++    </div>
++  );
++}
+diff --git a/src/features/races/RankingsEditor.tsx b/src/features/races/RankingsEditor.tsx
+new file mode 100644
+index 0000000..fc78edd
+--- /dev/null
++++ b/src/features/races/RankingsEditor.tsx
+@@ -0,0 +1,107 @@
++import { Button, Checkbox, Input } from '../../components/ui';
++import type { RankingDef, RankingDim } from '../../lib/types';
++
++const DIM_ORDER: RankingDim[] = ['sex', 'age', 'level'];
++const DIM_LABEL: Record<RankingDim, string> = { sex: 'Sexo', age: 'Faixa etária', level: 'Nível' };
++
++let rankingSeq = 0;
++function newRanking(): RankingDef {
++  rankingSeq += 1;
++  return { id: `ranking-${Date.now()}-${rankingSeq}`, name: 'Novo pódio', dims: ['sex'], size: 3 };
++}
++
++export interface RankingsEditorProps {
++  rankings: RankingDef[];
++  cumulative: boolean;
++  hasLevels: boolean;
++  onChange(rankings: RankingDef[]): void;
++  onCumulativeChange(cumulative: boolean): void;
++}
++
++/** "Pódio" section: one or more `RankingDef`s (name, dimensions grouped, size 1..10), reorderable
++ * (order decides who is already awarded when `cumulative` is off) plus the cumulative toggle. */
++export function RankingsEditor({ rankings, cumulative, hasLevels, onChange, onCumulativeChange }: RankingsEditorProps) {
++  function update(i: number, patch: Partial<RankingDef>) {
++    onChange(rankings.map((rd, idx) => (idx === i ? { ...rd, ...patch } : rd)));
++  }
++
++  function toggleDim(i: number, dim: RankingDim, checked: boolean) {
++    const rd = rankings[i];
++    const set = new Set(rd.dims);
++    if (checked) set.add(dim);
++    else set.delete(dim);
++    update(i, { dims: DIM_ORDER.filter((d) => set.has(d)) });
++  }
++
++  function move(i: number, dir: -1 | 1) {
++    const j = i + dir;
++    if (j < 0 || j >= rankings.length) return;
++    const next = rankings.slice();
++    [next[i], next[j]] = [next[j], next[i]];
++    onChange(next);
++  }
++
++  function remove(i: number) {
++    onChange(rankings.filter((_, idx) => idx !== i));
++  }
++
++  return (
++    <div className="flex flex-col gap-3">
++      {rankings.map((rd, i) => (
++        <div key={rd.id} className="flex flex-col gap-2 rounded-xl border border-border p-3">
++          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:gap-3">
++            <div className="flex-1">
++              <Input label="Nome" data-testid={`ranking-name-${i}`} value={rd.name} onChange={(e) => update(i, { name: e.target.value })} />
++            </div>
++            <div className="sm:w-24">
++              <Input
++                label="Lugares"
++                type="number"
++                min={1}
++                max={10}
++                data-testid={`ranking-size-${i}`}
++                value={rd.size}
++                onChange={(e) => update(i, { size: Number(e.target.value) })}
++              />
++            </div>
++            <div className="flex items-center gap-1">
++              <Button type="button" variant="secondary" size="sm" aria-label={`Mover pódio ${rd.name} para cima`} data-testid={`ranking-move-up-${i}`} disabled={i === 0} onClick={() => move(i, -1)}>
++                ↑
++              </Button>
++              <Button type="button" variant="secondary" size="sm" aria-label={`Mover pódio ${rd.name} para baixo`} data-testid={`ranking-move-down-${i}`} disabled={i === rankings.length - 1} onClick={() => move(i, 1)}>
++                ↓
++              </Button>
++              <Button type="button" variant="ghost" size="sm" aria-label={`Remover pódio ${rd.name}`} data-testid={`ranking-remove-${i}`} onClick={() => remove(i)}>
++                Remover
++              </Button>
++            </div>
++          </div>
++          <div className="flex flex-wrap gap-4">
++            {DIM_ORDER.map((dim) => (
++              <Checkbox
++                key={dim}
++                label={DIM_LABEL[dim]}
++                data-testid={`ranking-dim-${dim}-${i}`}
++                checked={rd.dims.includes(dim)}
++                disabled={dim === 'level' && !hasLevels}
++                onChange={(e) => toggleDim(i, dim, e.target.checked)}
++              />
++            ))}
++          </div>
++        </div>
++      ))}
++
++      <Button type="button" variant="secondary" size="sm" data-testid="ranking-add" onClick={() => onChange([...rankings, newRanking()])}>
++        Adicionar pódio
++      </Button>
++
++      <Checkbox
++        label="Premiação cumulativa"
++        data-testid="ranking-cumulative"
++        hint='Desligada (padrão): quem já subiu ao pódio de um ranking anterior não concorre nos seguintes — o próximo da fila sobe no lugar. Ligada: o mesmo atleta pode ser premiado em vários rankings.'
++        checked={cumulative}
++        onChange={(e) => onCumulativeChange(e.target.checked)}
++      />
++    </div>
++  );
++}
+diff --git a/src/features/races/raceForm.test.ts b/src/features/races/raceForm.test.ts
+new file mode 100644
+index 0000000..412ebf4
+--- /dev/null
++++ b/src/features/races/raceForm.test.ts
+@@ -0,0 +1,204 @@
++import { describe, expect, it } from 'vitest';
++import { defaultRaceConfig, RACE_PRESETS } from '../../domain/presets';
++import { makeRace, makeWave } from '../../domain/testing/fixtures';
++import {
++  distanceToForm, formToPayload, legsSummary, parseDistance, presetToForm, raceToForm, teamSizeLabel,
++  validateRaceForm,
++} from './raceForm';
++import type { RaceForm } from './raceForm';
++
++function preset(id: string) {
++  const p = RACE_PRESETS.find((x) => x.id === id);
++  if (!p) throw new Error(`preset not found: ${id}`);
++  return p;
++}
++
++function baseForm(p: Partial<RaceForm> = {}): RaceForm {
++  return {
++    event_id: 'e1',
++    name: 'Prova Teste',
++    position: 0,
++    team_size: 1,
++    legs: [{ modality: 'run', label: 'Corrida', distance: '5', unit: 'km' }],
++    waves: [{ name: 'Largada geral', position: 0, start_at: null }],
++    config: defaultRaceConfig(1),
++    ...p,
++  };
++}
++
++describe('distanceToForm', () => {
++  it('shows meters when not a whole multiple of 1000', () => {
++    expect(distanceToForm(750)).toEqual({ distance: '750', unit: 'm' });
++  });
++  it('shows kilometers when a whole multiple of 1000 (>= 1000)', () => {
++    expect(distanceToForm(20000)).toEqual({ distance: '20', unit: 'km' });
++    expect(distanceToForm(5000)).toEqual({ distance: '5', unit: 'km' });
++  });
++  it('shows an empty meters field for a null distance', () => {
++    expect(distanceToForm(null)).toEqual({ distance: '', unit: 'm' });
++  });
++});
++
++describe('presetToForm', () => {
++  it('converts the Triathlon Sprint preset legs with the display unit rule', () => {
++    const form = presetToForm(preset('triathlon-sprint'), 'ev1');
++    expect(form.event_id).toBe('ev1');
++    expect(form.team_size).toBe(1);
++    expect(form.legs).toEqual([
++      { modality: 'swim', label: 'Natação', distance: '750', unit: 'm' },
++      { modality: 'bike', label: 'Ciclismo', distance: '20', unit: 'km' },
++      { modality: 'run', label: 'Corrida', distance: '5', unit: 'km' },
++    ]);
++  });
++
++  it('starts with one wave and the team defaults for the preset size', () => {
++    const form = presetToForm(preset('revezamento-dupla-aquathlon'), 'ev1');
++    expect(form.team_size).toBe(2);
++    expect(form.waves).toEqual([{ name: 'Largada geral', position: 0, start_at: null }]);
++    expect(form.config).toEqual(defaultRaceConfig(2));
++  });
++});
++
++describe('raceToForm', () => {
++  it('keeps existing wave ids and start times, sorted by position', () => {
++    const race = makeRace({ id: 'r1', event_id: 'e1' });
++    const waves = [
++      makeWave({ id: 'w2', race_id: 'r1', name: 'Onda 2', position: 1, start_at: null }),
++      makeWave({ id: 'w1', race_id: 'r1', name: 'Onda 1', position: 0, start_at: '2026-10-11T11:00:00.000Z' }),
++      makeWave({ id: 'w9', race_id: 'other-race', position: 0 }),
++    ];
++    const form = raceToForm(race, waves);
++    expect(form.id).toBe('r1');
++    expect(form.waves).toEqual([
++      { id: 'w1', name: 'Onda 1', position: 0, start_at: '2026-10-11T11:00:00.000Z' },
++      { id: 'w2', name: 'Onda 2', position: 1, start_at: null },
++    ]);
++  });
++
++  it('falls back to one "Largada geral" when the race has no wave', () => {
++    const race = makeRace({ id: 'r1' });
++    const form = raceToForm(race, []);
++    expect(form.waves).toEqual([{ name: 'Largada geral', position: 0, start_at: null }]);
++  });
++});
++
++describe('formToPayload', () => {
++  it('converts a comma-decimal km distance to whole meters', () => {
++    const form = baseForm({ legs: [{ modality: 'bike', label: 'Ciclismo', distance: '2,5', unit: 'km' }] });
++    const payload = formToPayload(form);
++    expect(payload.legs).toEqual([{ modality: 'bike', label: 'Ciclismo', distance_m: 2500 }]);
++  });
++
++  it('turns an empty "other" leg distance into null', () => {
++    const form = baseForm({ legs: [{ modality: 'other', label: 'Corrida de saco', distance: '', unit: 'm' }] });
++    const payload = formToPayload(form);
++    expect(payload.legs).toEqual([{ modality: 'other', label: 'Corrida de saco', distance_m: null }]);
++  });
++
++  it('always includes the full waves list, numbering positions by order, with ids preserved and none for new waves', () => {
++    const form = baseForm({
++      id: 'r1',
++      waves: [
++        { id: 'w1', name: 'Onda 1', position: 0, start_at: '2026-10-11T11:00:00.000Z' },
++        { name: 'Onda nova', position: 1, start_at: null },
++      ],
++    });
++    const payload = formToPayload(form);
++    expect(payload.waves).toEqual([
++      { id: 'w1', name: 'Onda 1', position: 0 },
++      { name: 'Onda nova', position: 1 },
++    ]);
++  });
++
++  it('sends the full config object', () => {
++    const form = baseForm();
++    expect(formToPayload(form).config).toBe(form.config);
++  });
++});
++
++describe('validateRaceForm', () => {
++  it('requires a name', () => {
++    expect(validateRaceForm(baseForm({ name: '  ' }))).toContain('Informe o nome da prova');
++  });
++
++  it('requires at least one leg', () => {
++    expect(validateRaceForm(baseForm({ legs: [] }))).toContain('Adicione pelo menos uma perna');
++  });
++
++  it('flags an invalid distance by 1-based leg position', () => {
++    const errors = validateRaceForm(
++      baseForm({
++        legs: [
++          { modality: 'swim', label: 'Natação', distance: '750', unit: 'm' },
++          { modality: 'run', label: 'Corrida', distance: 'abc', unit: 'km' },
++        ],
++      }),
++    );
++    expect(errors).toContain('Distância inválida na perna 2');
++  });
++
++  it('requires a distance for real modalities but allows a blank one for "other"', () => {
++    const errors = validateRaceForm(baseForm({ legs: [{ modality: 'other', label: 'Extra', distance: '', unit: 'm' }] }));
++    expect(errors).not.toContain('Distância inválida na perna 1');
++
++    const errorsRun = validateRaceForm(baseForm({ legs: [{ modality: 'run', label: 'Corrida', distance: '', unit: 'km' }] }));
++    expect(errorsRun).toContain('Distância inválida na perna 1');
++  });
++
++  it('surfaces age-group overlap messages from the domain validator', () => {
++    const form = baseForm({
++      config: {
++        ...defaultRaceConfig(1),
++        age_groups: [
++          { label: '20-29', min: 20, max: 29 },
++          { label: '25-34', min: 25, max: 34 },
++        ],
++      },
++    });
++    expect(validateRaceForm(form)).toContain('Faixas "20-29" e "25-34" se sobrepõem');
++  });
++
++  it('flags a podium ranking with an out-of-range size', () => {
++    const form = baseForm({
++      config: { ...defaultRaceConfig(1), rankings: [{ id: 'geral', name: 'Geral', dims: ['sex'], size: 11 }] },
++    });
++    expect(validateRaceForm(form)).toContain('O pódio "Geral" precisa de tamanho entre 1 e 10');
++  });
++
++  it('is empty for a well-formed form', () => {
++    expect(validateRaceForm(baseForm())).toEqual([]);
++  });
++});
++
++describe('parseDistance', () => {
++  it('accepts dot and comma decimals', () => {
++    expect(parseDistance('2.5', 'km')).toBe(2500);
++    expect(parseDistance('2,5', 'km')).toBe(2500);
++  });
++  it('rejects blank, non-numeric and non-positive input', () => {
++    expect(parseDistance('', 'm')).toBeNull();
++    expect(parseDistance('abc', 'm')).toBeNull();
++    expect(parseDistance('0', 'm')).toBeNull();
++    expect(parseDistance('-5', 'm')).toBeNull();
++  });
++});
++
++describe('teamSizeLabel', () => {
++  it('names 1..3 and generalizes from 4', () => {
++    expect(teamSizeLabel(1)).toBe('Individual');
++    expect(teamSizeLabel(2)).toBe('Dupla');
++    expect(teamSizeLabel(3)).toBe('Trio');
++    expect(teamSizeLabel(4)).toBe('Equipe de 4');
++    expect(teamSizeLabel(6)).toBe('Equipe de 6');
++  });
++});
++
++describe('legsSummary', () => {
++  it('joins label + distance per leg with an arrow', () => {
++    const legs = preset('triathlon-sprint').legs;
++    expect(legsSummary(legs)).toBe('Natação 750 m → Ciclismo 20 km → Corrida 5 km');
++  });
++  it('omits the distance for a leg without one', () => {
++    expect(legsSummary([{ modality: 'other', label: 'Extra', distance_m: null }])).toBe('Extra');
++  });
++});
+diff --git a/src/features/races/raceForm.ts b/src/features/races/raceForm.ts
+new file mode 100644
+index 0000000..23c7ad6
+--- /dev/null
++++ b/src/features/races/raceForm.ts
+@@ -0,0 +1,178 @@
++import { validateAgeGroups } from '../../domain/categories';
++import { defaultRaceConfig, MODALITY_LABEL } from '../../domain/presets';
++import type { RacePreset } from '../../domain/presets';
++import type { Leg, Modality, RaceConfig, RaceRow, WaveRow } from '../../lib/types';
++
++export type DistanceUnit = 'm' | 'km';
++
++export interface RaceFormLeg {
++  modality: Modality;
++  label: string;
++  distance: string;
++  unit: DistanceUnit;
++}
++
++export interface RaceFormWave {
++  id?: string;
++  name: string;
++  position: number;
++  start_at: string | null;
++}
++
++export interface RaceForm {
++  id?: string;
++  event_id: string;
++  name: string;
++  position: number;
++  team_size: number;
++  legs: RaceFormLeg[];
++  waves: RaceFormWave[];
++  config: RaceConfig;
++}
++
++/** What `api.admin.saveRace` expects (mirrors its parameter type in `src/lib/api.ts`). */
++export interface RacePayload {
++  id?: string;
++  event_id: string;
++  name: string;
++  position: number;
++  team_size: number;
++  legs: Leg[];
++  config: RaceConfig;
++  waves: Partial<WaveRow>[];
++}
++
++const DEFAULT_WAVE_NAME = 'Largada geral';
++
++function defaultWaveForm(): RaceFormWave {
++  return { name: DEFAULT_WAVE_NAME, position: 0, start_at: null };
++}
++
++/**
++ * Meters → the text/unit pair the legs editor displays: kilometers only when the distance is a
++ * whole, non-zero number of them (750 m stays "750 m"; 20000 m becomes "20 km"; a null distance
++ * — allowed for `other` legs — becomes an empty meters field).
++ */
++export function distanceToForm(distance_m: number | null): { distance: string; unit: DistanceUnit } {
++  if (distance_m === null) return { distance: '', unit: 'm' };
++  if (distance_m >= 1000 && distance_m % 1000 === 0) return { distance: String(distance_m / 1000), unit: 'km' };
++  return { distance: String(distance_m), unit: 'm' };
++}
++
++/** Parses a distance field's text (comma or dot decimal, `km` or `m`) to whole meters, or `null`
++ * for blank/invalid input — the caller decides whether blank is acceptable (only `other` legs). */
++export function parseDistance(text: string, unit: DistanceUnit): number | null {
++  const t = text.trim();
++  if (t === '') return null;
++  const n = Number(t.replace(',', '.'));
++  if (!Number.isFinite(n) || n <= 0) return null;
++  return Math.round(unit === 'km' ? n * 1000 : n);
++}
++
++function legToForm(leg: Leg): RaceFormLeg {
++  return { modality: leg.modality, label: leg.label, ...distanceToForm(leg.distance_m) };
++}
++
++function legToPayload(leg: RaceFormLeg): Leg {
++  return {
++    modality: leg.modality,
++    label: leg.label.trim() || MODALITY_LABEL[leg.modality],
++    distance_m: parseDistance(leg.distance, leg.unit),
++  };
++}
++
++function waveToForm(wave: WaveRow): RaceFormWave {
++  return { id: wave.id, name: wave.name, position: wave.position, start_at: wave.start_at };
++}
++
++/** Builds the editable form from a saved race + the event's waves (filtered to this race, in
++ * order); a race somehow left with no wave still edits as one "Largada geral" (the server would
++ * recreate it anyway per Ruling 12). */
++export function raceToForm(race: RaceRow, waves: WaveRow[]): RaceForm {
++  const raceWaves = waves
++    .filter((w) => w.race_id === race.id)
++    .slice()
++    .sort((a, b) => a.position - b.position);
++  return {
++    id: race.id,
++    event_id: race.event_id,
++    name: race.name,
++    position: race.position,
++    team_size: race.team_size,
++    legs: race.legs.map(legToForm),
++    waves: raceWaves.length > 0 ? raceWaves.map(waveToForm) : [defaultWaveForm()],
++    config: race.config,
++  };
++}
++
++/** Builds a fresh form from a race preset (the "Nova prova" picker). */
++export function presetToForm(preset: RacePreset, eventId: string): RaceForm {
++  return {
++    event_id: eventId,
++    name: preset.name,
++    position: 0,
++    team_size: preset.team_size,
++    legs: preset.legs.map(legToForm),
++    waves: [defaultWaveForm()],
++    config: defaultRaceConfig(preset.team_size),
++  };
++}
++
++/** pt-BR validation messages for the whole form (empty when it is ready to save). */
++export function validateRaceForm(f: RaceForm): string[] {
++  const errors: string[] = [];
++  if (!f.name.trim()) errors.push('Informe o nome da prova');
++  if (f.legs.length === 0) errors.push('Adicione pelo menos uma perna');
++
++  f.legs.forEach((leg, i) => {
++    const blank = leg.distance.trim() === '';
++    if (blank ? leg.modality !== 'other' : parseDistance(leg.distance, leg.unit) === null) {
++      errors.push(`Distância inválida na perna ${i + 1}`);
++    }
++  });
++
++  errors.push(...validateAgeGroups(f.config.age_groups));
++
++  for (const rd of f.config.rankings) {
++    if (rd.size < 1 || rd.size > 10) errors.push(`O pódio "${rd.name}" precisa de tamanho entre 1 e 10`);
++  }
++
++  return errors;
++}
++
++/** Converts the form to the payload `api.admin.saveRace` expects. Always includes the full
++ * `waves` list (Ruling 12: a present array upserts by id and deletes whatever is missing from
++ * it) and the full `config` object (Ruling 14: the server merges it with the existing one). */
++export function formToPayload(f: RaceForm): RacePayload {
++  return {
++    ...(f.id ? { id: f.id } : {}),
++    event_id: f.event_id,
++    name: f.name.trim(),
++    position: f.position,
++    team_size: f.team_size,
++    legs: f.legs.map(legToPayload),
++    config: f.config,
++    waves: f.waves.map((w, i) => ({
++      ...(w.id ? { id: w.id } : {}),
++      name: w.name.trim() || DEFAULT_WAVE_NAME,
++      position: i,
++    })),
++  };
++}
++
++export function teamSizeLabel(n: number): string {
++  if (n === 1) return 'Individual';
++  if (n === 2) return 'Dupla';
++  if (n === 3) return 'Trio';
++  return `Equipe de ${n}`;
++}
++
++/** The list's one-line legs summary, e.g. "Natação 750 m → Ciclismo 20 km → Corrida 5 km". */
++export function legsSummary(legs: Leg[]): string {
++  return legs
++    .map((l) => {
++      const { distance, unit } = distanceToForm(l.distance_m);
++      return distance ? `${l.label} ${distance} ${unit}` : l.label;
++    })
++    .join(' → ');
++}
+diff --git a/src/features/races/races.test.tsx b/src/features/races/races.test.tsx
+new file mode 100644
+index 0000000..326679e
+--- /dev/null
++++ b/src/features/races/races.test.tsx
+@@ -0,0 +1,212 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { render, screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { ConfirmProvider, ToastProvider } from '../../components/ui';
++import { defaultRaceConfig } from '../../domain/presets';
++import { iso, makeEntry, makeEvent, makeRace, makeTimekeeper, makeWave, T0 } from '../../domain/testing/fixtures';
++import type { EventAggregate } from '../../lib/types';
++import { EventProvider } from '../events/EventContext';
++import RacesTab from './RacesTab';
++
++const mocks = vi.hoisted(() => ({
++  serverTime: vi.fn<() => Promise<number>>(),
++  saveRace: vi.fn(),
++  deleteRace: vi.fn(),
++}));
++vi.mock('../../lib/supabase', () => ({ supabase: {} }));
++vi.mock('../../lib/api', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('../../lib/api')>()),
++  api: { serverTime: mocks.serverTime, admin: { saveRace: mocks.saveRace, deleteRace: mocks.deleteRace } },
++}));
++const { saveRace, deleteRace } = mocks;
++
++function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
++  return {
++    event: makeEvent({ id: 'ev1', name: 'Copa EBC', levels: [] }),
++    races: [], waves: [], entries: [], athletes: [], timekeepers: [makeTimekeeper({ id: 'tk1', name: 'Ana' })],
++    marks: [], resolutions: [], results: [], version: 1, server_now: iso(T0), ...p,
++  };
++}
++
++function renderTab(agg: EventAggregate, refresh = vi.fn(async () => {})) {
++  render(
++    <ToastProvider>
++      <ConfirmProvider>
++        <EventProvider eventId="ev1" agg={agg} refresh={refresh} patchAgg={vi.fn()}>
++          <RacesTab />
++        </EventProvider>
++      </ConfirmProvider>
++    </ToastProvider>,
++  );
++  return { refresh };
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.serverTime.mockImplementation(async () => Date.now());
++});
++afterEach(() => {
++  vi.useRealTimers();
++});
++
++describe('RacesTab list', () => {
++  it('shows each race with its team size, legs summary and inscriptions, and a finalizada badge only when finalized', () => {
++    const races = [
++      makeRace({ id: 'r1', name: 'Aquathlon', team_size: 1, legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }] }),
++      makeRace({ id: 'r2', name: 'Revezamento', team_size: 2, finalized_at: iso(T0), legs: [{ modality: 'bike', label: 'Ciclismo', distance_m: 20000 }] }),
++    ];
++    const entries = [makeEntry({ id: 'en1', race_id: 'r1' }), makeEntry({ id: 'en2', race_id: 'r1' })];
++    renderTab(makeAgg({ races, entries }));
++
++    expect(screen.getByText('Aquathlon')).toBeInTheDocument();
++    expect(screen.getByText('Individual')).toBeInTheDocument();
++    expect(screen.getByText('Natação 750 m → Corrida 5 km')).toBeInTheDocument();
++    expect(screen.getByText(/^2 inscri/)).toBeInTheDocument();
++
++    expect(screen.getByText('Revezamento')).toBeInTheDocument();
++    expect(screen.getByText('Dupla')).toBeInTheDocument();
++    expect(screen.getByText(/^0 inscri/)).toBeInTheDocument();
++    expect(screen.getByText('Finalizada')).toBeInTheDocument();
++  });
++
++  it('shows an empty state with no races', () => {
++    renderTab(makeAgg());
++    expect(screen.getByText(/nenhuma prova/i)).toBeInTheDocument();
++  });
++});
++
++describe('creating a race from a preset', () => {
++  it('prefills team defaults, reorders a leg and saves the exact payload', async () => {
++    const user = userEvent.setup();
++    renderTab(makeAgg());
++
++    await user.click(screen.getByTestId('new-race'));
++    await user.selectOptions(screen.getByTestId('race-preset'), 'Revezamento em dupla (natação + corrida)');
++
++    expect(screen.getByTestId('race-team-size')).toHaveValue('2');
++    // Team default config has a single "Geral" podium (Nível checkbox present but disabled: no event levels).
++    expect(screen.getByRole('checkbox', { name: 'Nível' })).toBeDisabled();
++
++    // legs start as [swim, run]; move the second one (run) up so it becomes [run, swim].
++    await user.click(screen.getByTestId('leg-move-up-1'));
++
++    saveRace.mockResolvedValue({ race: makeRace(), waves: [] });
++    await user.click(screen.getByTestId('race-save'));
++
++    expect(saveRace).toHaveBeenCalledTimes(1);
++    const payload = saveRace.mock.calls[0][0];
++    expect(payload.id).toBeUndefined();
++    expect(payload.event_id).toBe('ev1');
++    expect(payload.team_size).toBe(2);
++    expect(payload.legs).toEqual([
++      { modality: 'run', label: 'Corrida', distance_m: 5000 },
++      { modality: 'swim', label: 'Natação', distance_m: 750 },
++    ]);
++    expect(payload.config).toEqual(defaultRaceConfig(2));
++    expect(payload.waves).toEqual([{ name: 'Largada geral', position: 0 }]);
++  });
++});
++
++describe('editing an existing race', () => {
++  function setup() {
++    const race = makeRace({ id: 'r1', event_id: 'ev1', name: 'Aquathlon', team_size: 1 });
++    const waves = [
++      makeWave({ id: 'w1', race_id: 'r1', name: 'Largada geral', position: 0, start_at: iso(T0) }),
++      makeWave({ id: 'w2', race_id: 'r1', name: 'Onda 2', position: 1, start_at: null }),
++    ];
++    return renderTab(makeAgg({ races: [race], waves }));
++  }
++
++  it('prefills the form and shows each wave start time read-only', async () => {
++    const user = userEvent.setup();
++    setup();
++    await user.click(screen.getByTestId('race-edit-r1'));
++
++    expect(screen.getByTestId('race-name')).toHaveValue('Aquathlon');
++    expect(screen.getByText(/Largou às 08:00:00\.0/)).toBeInTheDocument();
++    expect(screen.getByText('Sem largada')).toBeInTheDocument();
++    // No input lets the organizer type a start time here (set only in Cronometragem).
++    expect(screen.queryByLabelText(/horário da largada/i)).not.toBeInTheDocument();
++  });
++
++  it('surfaces the server validation error in a banner instead of navigating away', async () => {
++    const user = userEvent.setup();
++    setup();
++    await user.click(screen.getByTestId('race-edit-r1'));
++
++    const { ApiError } = await import('../../lib/api');
++    saveRace.mockRejectedValueOnce(new ApiError('Não é possível mudar as pernas: já existem marcações nesta prova'));
++    await user.click(screen.getByTestId('race-save'));
++
++    expect(await screen.findByRole('alert')).toHaveTextContent('Não é possível mudar as pernas: já existem marcações nesta prova');
++    expect(screen.getByTestId('race-save')).toBeInTheDocument();
++  });
++});
++
++describe('changing team size across the individual/team boundary', () => {
++  it('asks to confirm and, once confirmed, saves the new team defaults for rankings and age groups', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r1', event_id: 'ev1', team_size: 1 });
++    renderTab(makeAgg({ races: [race], waves: [makeWave({ race_id: 'r1' })] }));
++    await user.click(screen.getByTestId('race-edit-r1'));
++
++    await user.selectOptions(screen.getByTestId('race-team-size'), '2');
++    expect(screen.getByTestId('confirm-ok')).toBeInTheDocument();
++    await user.click(screen.getByTestId('confirm-ok'));
++    expect(screen.getByTestId('race-team-size')).toHaveValue('2');
++
++    saveRace.mockResolvedValue({ race, waves: [] });
++    await user.click(screen.getByTestId('race-save'));
++
++    const payload = saveRace.mock.calls[0][0];
++    expect(payload.config.rankings).toEqual(defaultRaceConfig(2).rankings);
++    expect(payload.config.age_groups).toEqual(defaultRaceConfig(2).age_groups);
++  });
++
++  it('keeps the previous team size when the reset is cancelled', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r1', event_id: 'ev1', team_size: 1 });
++    renderTab(makeAgg({ races: [race], waves: [makeWave({ race_id: 'r1' })] }));
++    await user.click(screen.getByTestId('race-edit-r1'));
++
++    await user.selectOptions(screen.getByTestId('race-team-size'), '2');
++    await user.click(screen.getByTestId('confirm-cancel'));
++
++    expect(screen.getByTestId('race-team-size')).toHaveValue('1');
++  });
++});
++
++describe('deleting a race', () => {
++  it('deletes after confirmation and refreshes', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r1', event_id: 'ev1', name: 'Aquathlon' });
++    const { refresh } = renderTab(makeAgg({ races: [race], waves: [makeWave({ race_id: 'r1' })] }));
++
++    await user.click(screen.getByTestId('race-delete-r1'));
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    expect(deleteRace).toHaveBeenCalledWith('r1');
++    expect(refresh).toHaveBeenCalled();
++  });
++
++  it('does nothing when cancelled', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r1', event_id: 'ev1', name: 'Aquathlon' });
++    renderTab(makeAgg({ races: [race], waves: [makeWave({ race_id: 'r1' })] }));
++
++    await user.click(screen.getByTestId('race-delete-r1'));
++    await user.click(screen.getByTestId('confirm-cancel'));
++
++    expect(deleteRace).not.toHaveBeenCalled();
++  });
++});
++
++describe('races list dialog helpers', () => {
++  it('the preset select starts on a placeholder that keeps the editor closed', async () => {
++    const user = userEvent.setup();
++    renderTab(makeAgg());
++    await user.click(screen.getByTestId('new-race'));
++    expect(screen.queryByTestId('race-name')).not.toBeInTheDocument();
++    within(screen.getByTestId('race-preset')).getByText(/selecione/i);
++  });
++});
