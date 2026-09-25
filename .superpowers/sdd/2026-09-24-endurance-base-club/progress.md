@@ -248,3 +248,4 @@ Task 23: complete (commits bae2379..03af4bf, review clean; feat merged into task
 Task 20: fix round 1/5 (2 addressed, 0 open — AthleteForm stopPropagation + nested-form test, athleteHelpers.ts + sexLabel; commits e95faf2..626ad10) — scoped re-review clean
 Task 20: complete (commits bae2379..626ad10, review clean; feat merged into task/20:       Tests  443 passed (443)) — merged into feat/ebc-app as 221d2db
 Wave 2b: T21 (sonnet) and T26 (sonnet) dispatched from feat/ebc-app 221d2db (worktrees /home/user/ebc-wt/t21, t26)
+T28 prep: agent-browser 0.27 smoke-tested OK with AGENT_BROWSER_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome (the path in the brief exists here); Chrome's background calls to google.com are refused by the egress proxy — harmless
