@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { ApiError } from '../../lib/api';
 import { ClockSync } from '../../lib/clock';
 import { formatClock, formatDuration } from '../../lib/format';
+import { safeLocalStorage } from '../../lib/storage';
 import type { EntryMember, EntryRow, MarkRow, TkMarkInput, TkRegistration, TkSession, TkSyncResult } from '../../lib/types';
 import { iso, makeEntry, makeMark, makeRace, makeWave, MIN, SEC, T0 } from '../../domain/testing/fixtures';
 import { renderWithProviders } from '../../test/renderWithProviders';
@@ -82,6 +83,7 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  delete (navigator as { locks?: unknown }).locks;
 });
 
 async function flush(ms = 0) {
@@ -114,6 +116,48 @@ const tapMark = () => fireEvent.click(screen.getByTestId('mark-button'));
 const typeBib = (value: string) => fireEvent.change(screen.getByTestId('bib-input'), { target: { value } });
 const submitBib = () => fireEvent.click(screen.getByTestId('bib-submit'));
 const at = (ms: number) => formatClock(ms, { tenths: true });
+const markButtonOf = (row: HTMLElement) => within(row).getAllByRole('button')[0];
+
+/**
+ * A Web Locks stand-in shared by the "tabs" of one test: exclusive names, `ifAvailable`, waiting
+ * requests granted in order when the holder lets go, and `signal` aborts (Ruling 45).
+ */
+function installLocks() {
+  const held = new Set<string>();
+  const waiting: { name: string; grant: () => void }[] = [];
+  const letGo = (name: string) => {
+    held.delete(name);
+    const i = waiting.findIndex(w => w.name === name);
+    if (i >= 0) waiting.splice(i, 1)[0].grant();
+  };
+  const run = (name: string, cb: LockGrantedCallback<unknown>): Promise<unknown> => {
+    held.add(name);
+    return Promise.resolve().then(() => cb({ name, mode: 'exclusive' } as Lock)).finally(() => letGo(name));
+  };
+  const request = vi.fn((name: string, options: LockOptions, cb: LockGrantedCallback<unknown>): Promise<unknown> => {
+    if (!held.has(name)) return run(name, cb);
+    if (options.ifAvailable) return Promise.resolve().then(() => cb(null));
+    return new Promise((resolve, reject) => {
+      const entry = { name, grant: () => void run(name, cb).then(resolve, reject) };
+      waiting.push(entry);
+      options.signal?.addEventListener('abort', () => {
+        const i = waiting.indexOf(entry);
+        if (i >= 0) waiting.splice(i, 1);
+        reject(new DOMException('Aborted', 'AbortError'));
+      });
+    });
+  });
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } });
+  return {
+    request, held,
+    /** Another tab of this device holds `name` until the returned function is called. */
+    otherTab(name: string): () => void {
+      let free: () => void = () => {};
+      void run(name, () => new Promise<void>(resolve => { free = resolve; }));
+      return () => free();
+    },
+  };
+}
 
 describe('registration', () => {
   it('asks for the name once and opens the main screen', async () => {
@@ -286,6 +330,96 @@ describe('marking', () => {
     expect(stored()).toHaveLength(2);
   });
 
+  it('a mark left without athlete for 2 min does not take the next identification (review Important 1)', async () => {
+    await renderMain();
+    tapMark(); // never identified
+    await flush(2 * MIN);
+    tapMark(); // the next arrival
+    typeBib('101');
+    submitBib();
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(NOW0 + OFFSET + 2 * MIN), 'en1'],
+    ]);
+  });
+
+  it('a bib with only stale marks waiting asks for MARCAR or an explicit pick, and the picked stale mark takes it', async () => {
+    await renderMain();
+    tapMark();
+    await flush(2 * MIN);
+    typeBib('101');
+    submitBib();
+    expect(screen.getByText('Toque em MARCAR primeiro, ou selecione a marcação em "Sem atleta"')).toBeInTheDocument();
+    expect(stored()[0].entry_id).toBeNull();
+
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // older marks are chosen explicitly
+    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
+    submitBib();
+    expect(stored()[0]).toMatchObject({ ts: iso(NOW0 + OFFSET), entry_id: 'en1' });
+  });
+
+  it('MARCAR selects the new mark when the chosen one is older than the unassigned threshold', async () => {
+    await renderMain();
+    tapMark();
+    await flush(2 * MIN);
+    fireEvent.click(markButtonOf(unassignedRows()[0]));
+    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
+    tapMark();
+    expect(within(unassignedRows()[1]).getByRole('button', { pressed: true })).toBeInTheDocument();
+    typeBib('303');
+    submitBib();
+    expect(stored().map(m => m.entry_id)).toEqual([null, 'en3']);
+  });
+
+  it('a press that slid off MARCAR does not swallow a later screen-reader activation (Ruling 44 M2)', async () => {
+    await renderMain();
+    const button = screen.getByTestId('mark-button');
+    fireEvent.pointerDown(button, { button: 0, pointerType: 'touch' }); // the finger slides off: no click
+    expect(stored()).toHaveLength(1);
+    await flush(2 * SEC);
+    fireEvent.click(button, { detail: 1 }); // VoiceOver/TalkBack activation: a click without a pointerdown
+    expect(stored()).toHaveLength(2);
+  });
+
+  it('a long press on MARCAR records one mark', async () => {
+    await renderMain();
+    const button = screen.getByTestId('mark-button');
+    fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' });
+    await flush(1_500);
+    fireEvent.pointerUp(button, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(button, { detail: 1 });
+    expect(stored()).toHaveLength(1);
+    expect(stored()[0].ts).toBe(iso(NOW0 + OFFSET));
+  });
+
+  it('Space marks once and holding Enter does not repeat marks (Ruling 44 M2)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW0);
+    await renderMain();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    screen.getByTestId('mark-button').focus();
+    await user.keyboard(' ');
+    expect(stored()).toHaveLength(1);
+    await user.keyboard('{Enter>4/}'); // key held: 1 press + 3 auto-repeats
+    expect(stored()).toHaveLength(2);
+  });
+
+  it('MARCAR keeps the focus (and the phone keyboard) in the bib field (Ruling 44 M10)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW0);
+    await renderMain();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const input = screen.getByTestId('bib-input');
+    await user.click(input);
+    await user.click(screen.getByTestId('mark-button'));
+    expect(stored()).toHaveLength(1);
+    expect(input).toHaveFocus();
+    await user.keyboard('303');
+    await user.click(screen.getByTestId('mark-button'));
+    expect(stored().map(m => m.entry_id)).toEqual([null, 'en3']);
+    expect(input).toHaveFocus();
+  });
+
   it('vibrates for 50 ms when the device can', async () => {
     const vibrate = vi.fn(() => true);
     Object.defineProperty(navigator, 'vibrate', { configurable: true, value: vibrate });
@@ -376,6 +510,67 @@ describe('"Em prova" list', () => {
     expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en1', leg_index: 0 })]);
   });
 
+  it('an arrival tap marks now instead of using a mark left without athlete for 2 min', async () => {
+    await renderMain();
+    tapMark();
+    await flush(2 * MIN);
+    const tappedAt = Date.now();
+    fireEvent.click(within(rowFor('303')).getByRole('button'));
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(tappedAt + OFFSET), 'en3'],
+    ]);
+  });
+
+  it('an arrival tap is stamped when the finger lands and recorded when it lifts (Ruling 44 M1)', async () => {
+    await renderMain();
+    const pressedAt = Date.now();
+    const target = within(rowFor('303')).getByRole('button');
+    fireEvent.pointerDown(target, { pointerId: 1, pointerType: 'touch', clientX: 50, clientY: 300 });
+    await flush(120);
+    expect(stored()).toEqual([]);
+    fireEvent.pointerUp(target, { pointerId: 1, pointerType: 'touch', clientX: 53, clientY: 304 });
+    fireEvent.click(target, { detail: 1 }); // the click of the same press
+    expect(stored()).toEqual([expect.objectContaining({ ts: iso(pressedAt + OFFSET), entry_id: 'en3', leg_index: 0 })]);
+    expect(screen.getByTestId('assign-toast')).toHaveTextContent('Nº 303');
+  });
+
+  it('a row that moves under the finger still gets the tap it was pressed for (Ruling 44 M1)', async () => {
+    await renderMain();
+    await flush(1_900); // the next sync lands in the middle of the press
+    mocks.sync.mockImplementationOnce(okSync({ marks: [otherMark()] }));
+    const bibsInOrder = () => onCourseRows().map(r => ['101', '202', '303'].find(b => r.textContent?.includes(`Nº ${b}`)));
+    expect(bibsInOrder()).toEqual(['101', '202', '303']);
+    const pressedAt = Date.now();
+    fireEvent.pointerDown(within(rowFor('202')).getByRole('button'), { pointerId: 4, pointerType: 'touch', clientX: 80, clientY: 400 });
+    await flush(200);
+    expect(bibsInOrder()).toEqual(['202', '101', '303']); // pinned on top: 101 is now under the finger
+    const underFinger = within(onCourseRows()[1]).getByRole('button');
+    fireEvent.pointerUp(underFinger, { pointerId: 4, pointerType: 'touch', clientX: 81, clientY: 402 });
+    fireEvent.click(screen.getByTestId('oncourse-list'), { detail: 1 }); // down and up on different rows
+    expect(stored()).toEqual([expect.objectContaining({ ts: iso(pressedAt + OFFSET), entry_id: 'en2', leg_index: 0 })]);
+  });
+
+  it('a press that turns into a scroll or is cancelled records nothing', async () => {
+    await renderMain();
+    const target = within(rowFor('303')).getByRole('button');
+    fireEvent.pointerDown(target, { pointerId: 2, pointerType: 'mouse', button: 0, clientX: 50, clientY: 300 });
+    fireEvent.pointerUp(target, { pointerId: 2, pointerType: 'mouse', button: 0, clientX: 50, clientY: 360 });
+    fireEvent.click(target, { detail: 1 });
+    fireEvent.pointerDown(target, { pointerId: 3, pointerType: 'touch', clientX: 50, clientY: 300 });
+    fireEvent.pointerCancel(target, { pointerId: 3, pointerType: 'touch' });
+    expect(stored()).toEqual([]);
+  });
+
+  it('a crossing this device already marked says so instead of inviting a confirmation (Ruling 44 M8)', async () => {
+    await renderMain();
+    fireEvent.click(within(rowFor('303')).getByRole('button'));
+    const top = onCourseRows()[0];
+    expect(top).toHaveTextContent('Nº 303');
+    expect(top).toHaveTextContent('✓ marcada por você');
+    expect(top).not.toHaveTextContent('toque para confirmar');
+  });
+
   it('pins a fresh relay handoff on top to confirm, on the same leg (Rulings 22 and 10)', async () => {
     mocks.sync.mockImplementationOnce(okSync({ marks: [otherMark()] }));
     await renderMain();
@@ -395,11 +590,14 @@ describe('"Em prova" list', () => {
     expect(stored()).toEqual([expect.objectContaining({ ts: iso(tappedAt + OFFSET), entry_id: 'en2', leg_index: 0, athlete_id: 'a2' })]);
     expect(screen.getByTestId('assign-toast')).toHaveTextContent('✓ Nº 202 · Ana · fim da perna 1/2 (Natação)');
 
+    // Still pinned, but it no longer invites this device to confirm its own crossing (Ruling 44 M8).
+    expect(onCourseRows()[0]).toHaveTextContent('✓ marcada por você · Natação');
+    expect(onCourseRows()[0]).not.toHaveTextContent('toque para confirmar');
     // The median is now 7.5 s after the first mark: the window closes 37.5 s after it.
     await flush(22 * SEC);
-    expect(onCourseRows()[0]).toHaveTextContent('toque para confirmar (1s)');
+    expect(onCourseRows()[0]).toHaveTextContent('✓ marcada por você');
     await flush(1 * SEC);
-    expect(screen.getByTestId('oncourse-list')).not.toHaveTextContent('toque para confirmar');
+    expect(screen.getByTestId('oncourse-list')).not.toHaveTextContent('marcada por você');
   });
 
   it('keeps a finished entry listed until its finish can no longer be confirmed', async () => {
@@ -518,6 +716,79 @@ describe('sync loop', () => {
     expect(status()).toHaveTextContent('Online · tudo sincronizado');
   });
 
+  it.each([
+    ['accepted', (id: string) => ({ accepted: [id], rejected: [] })],
+    ['rejected', (id: string) => ({ accepted: [], rejected: [{ id, reason: 'Alterada pela organização' }] })],
+  ])('an edit made while its mark is in flight stays pending when the old version is %s (Ruling 44 M3)', async (_label, answerFor) => {
+    await renderMain();
+    tapMark();
+    const id = stored()[0].id;
+    let answer: (r: TkSyncResult) => void = () => {};
+    mocks.sync.mockImplementationOnce(() => new Promise<TkSyncResult>(resolve => { answer = resolve; }));
+    await flush(2 * SEC);
+    expect(mocks.sync.mock.calls[1][3]).toEqual([expect.objectContaining({ id, entry_id: null })]);
+
+    typeBib('101');
+    submitBib(); // identified while the unassigned version is on its way
+    await act(async () => {
+      answer({ ...answerFor(id), server_now: iso(Date.now() + OFFSET), version: 1, marks: [], waves: [] });
+    });
+    expect(storedItems()[0]).toMatchObject({ state: 'pending', mark: { entry_id: 'en1' } });
+    const row = within(screen.getByTestId('my-marks')).getByRole('listitem');
+    expect(row).toHaveTextContent('⏳');
+    expect(row).not.toHaveTextContent('Alterada');
+
+    await flush(2 * SEC);
+    expect(mocks.sync.mock.calls[2][3]).toEqual([expect.objectContaining({ id, entry_id: 'en1' })]);
+    expect(within(screen.getByTestId('my-marks')).getByRole('listitem')).toHaveTextContent('✓');
+  });
+
+  it('warns in the header when the marks cannot be kept on the device (Ruling 44 M5)', async () => {
+    await renderMain();
+    expect(screen.queryByText(/Não foi possível guardar as marcações/)).not.toBeInTheDocument();
+    const setItem = Storage.prototype.setItem;
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+      if (key === OUTBOX_KEY) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      setItem.call(this, key, value);
+    });
+    try {
+      tapMark();
+      expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível guardar as marcações neste aparelho');
+      expect(unassignedRows()).toHaveLength(1); // marking goes on, in memory
+    } finally {
+      spy.mockRestore();
+      safeLocalStorage().removeItem(OUTBOX_KEY); // leave the in-memory fallback for the next tests
+    }
+  });
+
+  it('the invalid-link screen says the marks stay on the device (Ruling 44 M6)', async () => {
+    await renderMain();
+    tapMark();
+    mocks.sync.mockRejectedValueOnce(new ApiError('Link de cronometragem inválido ou desativado', 'P0001'));
+    await flush(2 * SEC);
+    expect(screen.getByText('Link de cronometragem inválido ou desativado. Peça um novo link à organização.')).toBeInTheDocument();
+    expect(screen.getByText(/Suas marcações continuam guardadas neste aparelho/)).toBeInTheDocument();
+    expect(stored()).toHaveLength(1);
+  });
+
+  it('offers Reatribuir on a rejected mark whose entry is gone (Ruling 44 M7)', async () => {
+    const ts = iso(NOW0 - 5 * MIN);
+    const lost = { id: 'lost', ts, device_ts: ts, clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: 'gone', leg_index: 0, athlete_id: null, discarded: false, local_updated_at: NOW0 - 5 * MIN };
+    window.localStorage.setItem(OUTBOX_KEY, JSON.stringify({ items: { lost: { mark: lost, state: 'pending' } } }));
+    mocks.sync.mockImplementationOnce(okSync({ accepted: [], rejected: [{ id: 'lost', reason: 'Inscrição não encontrada' }] }));
+    await renderMain();
+    const row = within(screen.getByTestId('my-marks')).getByRole('listitem');
+    expect(row).toHaveTextContent('Inscrição não encontrada');
+    expect(unassignedRows()).toHaveLength(0);
+
+    fireEvent.click(within(row).getByRole('button', { name: /Reatribuir/ }));
+    expect(unassignedRows()).toHaveLength(1);
+    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
+    typeBib('303');
+    submitBib();
+    expect(storedItems()[0]).toMatchObject({ state: 'pending', mark: { id: 'lost', entry_id: 'en3', leg_index: 0 } });
+  });
+
   it('keeps marks the server neither accepted nor rejected pending and re-sends them (Ruling 28)', async () => {
     await renderMain();
     tapMark();
@@ -589,6 +860,40 @@ describe('sync loop', () => {
     expect(last[1]).toBe('tk-new');
     expect(last[3]).toEqual([expect.objectContaining({ id, ts: iso(NOW0 + OFFSET) })]);
     expect(unassignedRows()).toHaveLength(1);
+  });
+});
+
+describe('one active tab per link and device (Ruling 45)', () => {
+  it('holds the Web Lock while open and lets it go when closed', async () => {
+    const locks = installLocks();
+    const { unmount } = await renderMain();
+    expect(locks.request).toHaveBeenCalledWith('ebc.tk.e1', { ifAvailable: true }, expect.any(Function));
+    expect(locks.held.has('ebc.tk.e1')).toBe(true);
+    unmount();
+    await flush();
+    expect(locks.held.has('ebc.tk.e1')).toBe(false);
+  });
+
+  it('does not mark in a second tab, and takes over with what the first one saved when it closes', async () => {
+    const locks = installLocks();
+    const closeOther = locks.otherTab('ebc.tk.e1');
+    window.localStorage.setItem(REG_KEY, JSON.stringify(REG));
+    renderPage();
+    await flush();
+    expect(screen.getByText('Este link já está aberto em outra aba deste aparelho — use aquela aba')).toBeInTheDocument();
+    expect(screen.queryByTestId('mark-button')).not.toBeInTheDocument();
+    await flush(10 * SEC);
+    expect(mocks.sync).not.toHaveBeenCalled();
+
+    // The other tab marked meanwhile, then was closed.
+    const ts = iso(NOW0 + OFFSET + 3 * SEC);
+    const theirs = { id: 'theirs', ts, device_ts: ts, clock_offset_ms: OFFSET, clock_rtt_ms: 100, entry_id: null, leg_index: null, athlete_id: null, discarded: false, local_updated_at: NOW0 + 3 * SEC };
+    window.localStorage.setItem(OUTBOX_KEY, JSON.stringify({ items: { theirs: { mark: theirs, state: 'pending' } } }));
+    closeOther();
+    await flush();
+    expect(screen.getByTestId('mark-button')).toBeInTheDocument();
+    expect(unassignedRows()).toHaveLength(1);
+    expect(mocks.sync.mock.calls[0][3]).toEqual([expect.objectContaining({ id: 'theirs' })]);
   });
 });
 

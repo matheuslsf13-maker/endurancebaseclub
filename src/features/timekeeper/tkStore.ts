@@ -142,11 +142,54 @@ export function applyWaveStarts(session: TkSession, waves: Pick<WaveRow, 'id' | 
   return changed ? { ...session, waves: next } : session;
 }
 
+/** A mark still without an athlete this long after its tap becomes an "unassigned" issue (spec §8);
+ * it also leaves the automatic pick below. */
+export const STALE_UNASSIGNED_MS = 60_000;
+
+/** Older than the unassigned-issue threshold at `nowMs` (synced time). */
+export function isStale(mark: MarkRow, nowMs: number): boolean {
+  return nowMs - Date.parse(mark.ts) > STALE_UNASSIGNED_MS;
+}
+
+/**
+ * Which "Sem atleta" mark a typed bib or an "Em prova" tap goes to. `auto`: the oldest mark of the
+ * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: one mark — `chosen` when
+ * the timekeeper picked it (kept however old it gets), otherwise it holds only while it is not
+ * stale, like the automatic pick.
+ */
+export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string; chosen: boolean };
+
+/**
+ * The oldest unassigned mark younger than the unassigned-issue threshold. FIFO only within a
+ * burst: after four arrivals the bibs typed in arrival order go to marks 1..4, but a mark left
+ * unidentified for longer never takes a later arrival's bib (every identification after it
+ * would be one arrival off). Older marks are used only when chosen explicitly.
+ */
+export function burstHead(unassigned: MarkRow[], nowMs: number): MarkRow | null {
+  let head: MarkRow | null = null;
+  for (const m of unassigned) {
+    if (!isStale(m, nowMs) && (head === null || m.ts < head.ts || (m.ts === head.ts && m.id < head.id))) head = m;
+  }
+  return head;
+}
+
+/** The mark `sel` points at among `unassigned` (this timekeeper's marks without an athlete). */
+export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
+  if (sel.mode === 'none') return null;
+  if (sel.mode === 'id') {
+    const m = unassigned.find(x => x.id === sel.id);
+    if (m && (sel.chosen || !isStale(m, nowMs))) return m.id;
+  }
+  return burstHead(unassigned, nowMs)?.id ?? null;
+}
+
 /** A crossing other timekeepers can still confirm: shown pinned on top of "Em prova" (Ruling 22). */
 export interface ConfirmInfo {
   leg_index: number; leg_label: string; leg_ms: number | null; crossing_ms: number;
   /** Whole seconds left in the same-crossing window (1..window). */
   remaining_s: number;
+  /** This timekeeper already has a mark in the crossing: a tap would only duplicate it. */
+  mine: boolean;
 }
 
 export interface OnCourseItem {
@@ -170,8 +213,9 @@ const bibCollator = new Intl.Collator('pt-BR', { numeric: true });
  * latest crossing is still inside the same-crossing window — a relay handoff or a finish — is
  * pinned on top, most recent first, and stays listed even once finished until the window closes,
  * so the card just tapped does not jump away and the other timekeepers can confirm it (Ruling 22).
+ * With `timekeeperId`, a pinned crossing that already counts one of its marks is flagged `mine`.
  */
-export function onCourse(session: TkSession, marks: MarkRow[], nowMs: number): OnCourseItem[] {
+export function onCourse(session: TkSession, marks: MarkRow[], nowMs: number, timekeeperId: string | null = null): OnCourseItem[] {
   const idx = sessionIndex(session);
   const marksByEntry = new Map<string, MarkRow[]>();
   for (const m of marks) {
@@ -200,6 +244,8 @@ export function onCourse(session: TkSession, marks: MarkRow[], nowMs: number): O
           leg_index: latest.leg, leg_label: race.legs[latest.leg].label, leg_ms: timing.legs[latest.leg].leg_ms,
           crossing_ms: latest.at,
           remaining_s: Math.min(race.config.same_crossing_window_s, Math.ceil((latest.at + windowMs - nowMs) / 1000)),
+          // Each timekeeper's earliest mark of a crossing is one of its candidates (spec §8).
+          mine: timekeeperId !== null && timing.legs[latest.leg].crossing.candidates.some(c => c.timekeeper_id === timekeeperId),
         }
       : null;
     if (!running && confirm === null) continue;

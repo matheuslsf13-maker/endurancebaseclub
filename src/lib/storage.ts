@@ -63,6 +63,12 @@ export function safeLocalStorage(): KeyValueStorage {
   };
 }
 
+/** True when `k` could not be kept in window.localStorage and lives only in this page's memory
+ * (lost on reload) — lets a screen warn that what it keeps is not persisted. */
+export function isMemoryOnly(k: string): boolean {
+  return fallbackKeys.has(k);
+}
+
 export function readJSON<T>(s: KeyValueStorage, key: string, fallbackValue: T): T {
   try {
     const raw = s.getItem(key);

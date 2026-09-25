@@ -106,6 +106,9 @@ export class Outbox {
     for (const r of rejected) {
       const item = this.items[r.id];
       if (!item) continue;
+      // Like an ack, a rejection only concerns the version that was sent: an edit made while it
+      // was in flight stays pending and goes on the next sync (the server judges it on its own).
+      if (item.mark.local_updated_at !== item.sent_at_version) continue;
       item.state = 'rejected';
       item.reason = r.reason;
     }

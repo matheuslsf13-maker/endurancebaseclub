@@ -5,10 +5,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
-import type { ClockSync } from '../../lib/clock';
+import type { ClockState, ClockSync } from '../../lib/clock';
 import { Outbox } from '../../lib/outbox';
 import type { LocalMark, OutboxState } from '../../lib/outbox';
-import { readJSON, safeLocalStorage, writeJSON } from '../../lib/storage';
+import { isMemoryOnly, readJSON, safeLocalStorage, writeJSON } from '../../lib/storage';
 import type { EntryRow, MarkRow, RaceRow, TkMarkInput, TkSession, TkSyncResult } from '../../lib/types';
 import { useClock } from '../../hooks/useClock';
 import { entryDisplayName, legAthleteId, mergeById } from '../../domain/eventModel';
@@ -37,7 +37,11 @@ const outboxKey = (eventId: string, timekeeperId: string) => `ebc.tk.${eventId}.
  * marks still pending under a registration that stopped working (rotated link, unknown id). */
 const outboxesKey = (eventId: string) => `ebc.tk.outboxes.${eventId}`;
 
-export type TkPhase = 'loading' | 'invalid' | 'register' | 'main' | 'disabled';
+/** `other_tab`: another tab of this device has the link open (Ruling 45) — nothing is marked here. */
+export type TkPhase = 'loading' | 'invalid' | 'register' | 'main' | 'disabled' | 'other_tab';
+
+/** The synced instant of a tap and the clock state behind it, read when the finger landed. */
+export interface TapStamp { tapMs: number; deviceMs: number; clock: ClockState | null }
 
 /** What the device keeps after `tk_register` (`ebc.tk.reg.<token>`). */
 export interface TkDevice { timekeeper_id: string; secret: string; name: string }
@@ -70,6 +74,8 @@ export interface Timekeeper {
   loadError: string | null;
   pendingCount: number;
   rejectedCount: number;
+  /** The outbox could not be written to the device storage: marks live only in this page. */
+  storageFailed: boolean;
   /** ± uncertainty of the synced clock in ms (half the best round trip), null if never synced. */
   clockQuality: number | null;
   /** Synced now, refreshed every second and after every action. */
@@ -82,8 +88,10 @@ export interface Timekeeper {
   myMarks: MyMark[];
   onCourse: OnCourseItem[];
   register(name: string): Promise<void>;
-  /** Records a mark at the synced instant of the call; with a bib, also assigns it. */
-  mark(bibText?: string): { markId: string; assignment: AssignResult | null };
+  /** The synced instant now, to record a mark later at the moment a press began. */
+  stamp(): TapStamp;
+  /** Records a mark at the synced instant of the call (or at `at`); with a bib, also assigns it. */
+  mark(bibText?: string, at?: TapStamp): { markId: string; ts: string; assignment: AssignResult | null };
   assign(markId: string, entryId: string, athleteId?: string | null): AssignResult;
   assignBib(markId: string, bibText: string): AssignResult;
   changeLeg(markId: string, legIndex: number): AssignResult;
@@ -139,6 +147,15 @@ function deviceLabel(): string {
   return typeof navigator === 'undefined' ? '' : navigator.userAgent.slice(0, 200);
 }
 
+/** The browser's Web Locks, or null where they do not exist (insecure origin, old browser). */
+function webLocks(): LockManager | null {
+  const locks = typeof navigator === 'undefined' ? undefined : (navigator as Navigator & { locks?: LockManager }).locks;
+  return locks && typeof locks.request === 'function' ? locks : null;
+}
+
+/** Ruling 45: `held` = this tab may time; `busy` = another tab of this device has the link open. */
+type LockState = 'pending' | 'held' | 'busy';
+
 export function useTimekeeper(token: string): Timekeeper {
   const storage = useMemo(() => safeLocalStorage(), []);
   const clock = useClock();
@@ -154,6 +171,7 @@ export function useTimekeeper(token: string): Timekeeper {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [rev, setRev] = useState(0);
   const [nowMs, setNowMs] = useState(() => clock.now());
+  const [lock, setLock] = useState<LockState>(() => (webLocks() ? 'pending' : 'held'));
 
   // The async loops and the tap handlers read the latest values from refs, never from a stale render.
   const sessionRef = useRef(session);
@@ -283,11 +301,59 @@ export function useTimekeeper(token: string): Timekeeper {
     setPhase('register');
   }, [storage, token]);
 
-  // The sync loop: single-flight (never two tk_sync requests out, or acks could be misapplied),
-  // every 2 s, ×2 backoff up to 10 s on failures, paused while the page is hidden.
+  // Ruling 45: one active tab per link and device. Two tabs would each keep their own outbox in
+  // memory and overwrite each other's unsynced marks in storage, so only the tab holding the
+  // Web Lock times; a second tab waits and takes over when the first one closes. Without Web
+  // Locks the app runs as before.
   const eventId = session?.event.id ?? null;
   useEffect(() => {
-    if (phase !== 'main' || !registration || !eventId) return;
+    const locks = webLocks();
+    if (!eventId || !locks) return;
+    const name = `ebc.tk.${eventId}`;
+    const abort = new AbortController();
+    let letGo: () => void = () => {};
+    const take = () => {
+      // Another tab may have written since this one started: read everything again.
+      boxRef.current = null;
+      cacheRef.current = null;
+      const device = readDevice(storage, token);
+      if (device?.timekeeper_id !== deviceRef.current?.timekeeper_id) {
+        deviceRef.current = device;
+        setRegistration(device);
+        setPhase(p => (device ? (p === 'register' ? 'main' : p) : (p === 'main' ? 'register' : p)));
+      }
+      setLock('held');
+      bump();
+      return new Promise<void>(resolve => { letGo = resolve; });
+    };
+    // Web Locks refused here (e.g. an opaque-origin frame): run as without them.
+    const runWithout = () => {
+      if (!abort.signal.aborted) setLock('held');
+    };
+    try {
+      locks.request(name, { ifAvailable: true }, held => {
+        if (abort.signal.aborted) return undefined;
+        if (held) return take();
+        setLock('busy');
+        locks.request(name, { signal: abort.signal }, () => (abort.signal.aborted ? undefined : take())).catch(() => {
+          // Aborted on close, or refused: this tab stays out.
+        });
+        return undefined;
+      }).catch(runWithout);
+    } catch {
+      runWithout();
+    }
+    return () => {
+      abort.abort();
+      letGo();
+    };
+  }, [eventId, storage, token, bump]);
+  const active = lock === 'held';
+
+  // The sync loop: single-flight (never two tk_sync requests out, or acks could be misapplied),
+  // every 2 s, ×2 backoff up to 10 s on failures, paused while the page is hidden.
+  useEffect(() => {
+    if (phase !== 'main' || !active || !registration || !eventId) return;
     const device = registration;
     const box = outboxFor(eventId, device.timekeeper_id);
     rememberOutbox(eventId, device.timekeeper_id);
@@ -354,7 +420,7 @@ export function useTimekeeper(token: string): Timekeeper {
       window.removeEventListener('online', resume);
       window.removeEventListener('offline', onOffline);
     };
-  }, [phase, registration, eventId, token, outboxFor, cacheFor, applySyncResult, dropRegistration, bump, rememberOutbox]);
+  }, [phase, active, registration, eventId, token, outboxFor, cacheFor, applySyncResult, dropRegistration, bump, rememberOutbox]);
 
   // Leg timers and confirmation countdowns.
   useEffect(() => {
@@ -430,11 +496,16 @@ export function useTimekeeper(token: string): Timekeeper {
     return success(c, next, plan.entry, plan.race, plan.suggestion, plan.warning);
   };
 
-  const mark = (bibText?: string) => {
-    // The tap instant, read before anything else can delay it.
+  const stamp = (): TapStamp => {
+    // The tap instant first: nothing may delay it.
     const tapMs = clock.now();
-    const deviceMs = Date.now();
-    const input = newMark(tapMs, deviceMs, clock.state());
+    return { tapMs, deviceMs: Date.now(), clock: clock.state() };
+  };
+
+  const mark = (bibText?: string, at?: TapStamp) => {
+    // The tap instant, read before anything else can delay it (or taken when the press began).
+    const t = at ?? stamp();
+    const input = newMark(t.tapMs, t.deviceMs, t.clock);
     const c = context();
     // Stored unassigned first, so the tap survives whatever happens while assigning it.
     c.box.upsert(input);
@@ -447,7 +518,7 @@ export function useTimekeeper(token: string): Timekeeper {
       }
     }
     bump();
-    return { markId: input.id, assignment };
+    return { markId: input.id, ts: input.ts, assignment };
   };
 
   const withMark = (markId: string, fn: (c: Ctx, base: TkMarkInput) => AssignResult): AssignResult => {
@@ -503,8 +574,9 @@ export function useTimekeeper(token: string): Timekeeper {
   // ---- derived state ----
 
   const derived = useMemo(() => {
-    if (!session || !registration) {
-      return { marks: [] as MarkRow[], unassigned: [] as MarkRow[], myMarks: [] as MyMark[], pendingCount: 0, rejectedCount: 0 };
+    // A tab without the lock never loads the outbox: it would hold a copy that goes stale.
+    if (!session || !registration || !active) {
+      return { marks: [] as MarkRow[], unassigned: [] as MarkRow[], myMarks: [] as MyMark[], pendingCount: 0, rejectedCount: 0, storageFailed: false };
     }
     const evId = session.event.id;
     const me = registration.timekeeper_id;
@@ -526,22 +598,29 @@ export function useTimekeeper(token: string): Timekeeper {
       myMarks,
       pendingCount: box.pendingCount(),
       rejectedCount: items.filter(it => it.state === 'rejected').length,
+      storageFailed: isMemoryOnly(outboxKey(evId, me)),
     };
     // `rev` stands for the outbox and marks cache, which are mutated in place.
-  }, [session, registration, rev, outboxFor, cacheFor]);
+  }, [session, registration, active, rev, outboxFor, cacheFor]);
 
+  const me = registration?.timekeeper_id ?? null;
   const onCourseList = useMemo(
-    () => (session ? onCourse(session, derived.marks, nowMs) : []),
-    [session, derived.marks, nowMs],
+    () => (session ? onCourse(session, derived.marks, nowMs, me) : []),
+    [session, derived.marks, nowMs, me],
   );
+
+  // Timing screens wait for the lock; the others (invalid, disabled, loading) show as they are.
+  const shownPhase: TkPhase = !active && (phase === 'main' || phase === 'register')
+    ? (lock === 'busy' ? 'other_tab' : 'loading')
+    : phase;
 
   const rtt = clock.rttMs;
   return {
-    phase, session, index: session ? indexFor(session) : null, registration, clock,
+    phase: shownPhase, session, index: session ? indexFor(session) : null, registration, clock,
     online, synced, syncError, loadError,
-    pendingCount: derived.pendingCount, rejectedCount: derived.rejectedCount,
+    pendingCount: derived.pendingCount, rejectedCount: derived.rejectedCount, storageFailed: derived.storageFailed,
     clockQuality: clock.synced && rtt !== null ? Math.round(rtt / 2) : null,
     nowMs, marks: derived.marks, unassigned: derived.unassigned, myMarks: derived.myMarks, onCourse: onCourseList,
-    register, mark, assign, assignBib, changeLeg, unassign, discard, restore, retry,
+    register, stamp, mark, assign, assignBib, changeLeg, unassign, discard, restore, retry,
   };
 }

@@ -3,7 +3,7 @@
 // "Em prova". Everything a timekeeper does is kept on the device first (useTimekeeper).
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
+import type { FormEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { useParams } from 'react-router';
 import { Button, Input, Modal, Spinner, useToast } from '../../components/ui';
 import { Logo } from '../../components/Logo';
@@ -13,10 +13,10 @@ import { formatClock, formatDateBR, formatDuration } from '../../lib/format';
 import { safeLocalStorage } from '../../lib/storage';
 import type { MarkRow } from '../../lib/types';
 import { legAthleteId } from '../../domain/eventModel';
-import { legText, memberName } from './tkStore';
-import type { OnCourseItem } from './tkStore';
+import { burstHead, isStale, legText, memberName, selectedMarkId } from './tkStore';
+import type { OnCourseItem, Selection } from './tkStore';
 import { useTimekeeper } from './useTimekeeper';
-import type { AssignResult, MyMark, Timekeeper } from './useTimekeeper';
+import type { AssignResult, MyMark, TapStamp, Timekeeper } from './useTimekeeper';
 
 export default function TimekeeperPage() {
   const { token = '' } = useParams();
@@ -88,6 +88,17 @@ const markTime = (m: MarkRow) => clockText(Date.parse(m.ts));
 const qualityFmt = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fold = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 
+/** A click this soon after a pointer press on the same control is that press's own click. */
+const CLICK_AFTER_POINTER_MS = 1_000;
+/** A press whose finger moved farther than this is a scroll or a drag, not a tap. */
+const TAP_SLOP_PX = 16;
+
+/** The click a pointer press produces itself (handled on the press): it counts clicks (detail ≥ 1)
+ * and follows the press within a second. Keyboard clicks (detail 0) are never one. */
+function isClickOfPress(e: MouseEvent<HTMLButtonElement>, lastPointerAt: number): boolean {
+  return e.detail > 0 && e.timeStamp - lastPointerAt < CLICK_AFTER_POINTER_MS;
+}
+
 function TimekeeperApp({ token }: { token: string }) {
   useLightThemeByDefault();
   const tk = useTimekeeper(token);
@@ -113,6 +124,23 @@ function TimekeeperApp({ token }: { token: string }) {
           <Logo size={64} />
           <h1 className="brand-title text-lg font-semibold">Link inválido</h1>
           <p>Link de cronometragem inválido ou desativado. Peça um novo link à organização.</p>
+          {tk.pendingCount > 0 ? (
+            <p className="text-sm text-muted">
+              Suas marcações continuam guardadas neste aparelho ({tk.pendingCount} ainda não {tk.pendingCount === 1 ? 'enviada' : 'enviadas'}).
+              Abra o novo link neste mesmo aparelho para enviá-las.
+            </p>
+          ) : tk.myMarks.length > 0 && (
+            <p className="text-sm text-muted">Suas marcações continuam guardadas neste aparelho.</p>
+          )}
+        </Centered>
+      );
+    case 'other_tab':
+      return (
+        <Centered>
+          <Logo size={64} />
+          <h1 className="brand-title text-lg font-semibold">Link já aberto</h1>
+          <p>Este link já está aberto em outra aba deste aparelho — use aquela aba</p>
+          <p className="text-sm text-muted">Se você fechar a outra aba, esta assume a cronometragem.</p>
         </Centered>
       );
     case 'disabled':
@@ -194,26 +222,24 @@ function RegisterScreen({ tk }: { tk: Timekeeper }) {
   );
 }
 
-/** Which "Sem atleta" mark a bib or an "Em prova" tap goes to. `auto` = the oldest one, so marks
- * taken in a burst are identified in arrival order; `none` = the user deselected (taps on
- * "Em prova" then mark new arrivals). */
-type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string };
-
-function selectedMarkId(sel: Selection, unassigned: MarkRow[]): string | null {
-  if (sel.mode === 'none') return null;
-  if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) return sel.id;
-  return unassigned[0]?.id ?? null;
-}
+/** An "Em prova" tap, fixed when the finger lands: the list may move under it before it lifts. */
+interface RowTap { item: OnCourseItem; stamp: TapStamp; markId: string | null }
+interface RowPress extends RowTap { pointerId: number; x: number; y: number }
 
 function MainScreen({ tk }: { tk: Timekeeper }) {
   const toast = useToast();
   const [bib, setBib] = useState('');
+  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (see tkStore `selectedMarkId`):
+  // the oldest of the current burst unless one was chosen; `none` = deselected, so "Em prova"
+  // taps mark new arrivals.
   const [sel, setSel] = useState<Selection>({ mode: 'auto' });
   const [legSheet, setLegSheet] = useState<string | null>(null);
   const assignToastId = useRef<string | null>(null);
-  const pointerMarked = useRef(false);
+  const lastMarkPointer = useRef(Number.NEGATIVE_INFINITY);
+  const rowPress = useRef<RowPress | null>(null);
+  const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
   const bibId = useId();
-  const selectedId = selectedMarkId(sel, tk.unassigned);
+  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs);
   const selectedMark = selectedId ? tk.unassigned.find(m => m.id === selectedId) ?? null : null;
 
   function showAssigned(r: Extract<AssignResult, { ok: true }>) {
@@ -243,7 +269,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
               size="sm" variant="secondary" data-testid="toast-undo"
               onClick={act(() => {
                 tk.unassign(markId);
-                setSel({ mode: 'id', id: markId });
+                setSel({ mode: 'id', id: markId, chosen: true });
               })}
             >
               Desfazer
@@ -279,7 +305,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
 
   function doMark() {
     // useTimekeeper reads the synced clock first thing in mark(): nothing here may run before it.
-    const { markId, assignment } = tk.mark(bib);
+    const { markId, ts, assignment } = tk.mark(bib);
     vibrate();
     if (assignment?.ok) {
       setBib('');
@@ -290,25 +316,38 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       // The bib typed belongs to this mark: select it so the corrected bib goes to it, not to an
       // older mark still waiting.
       showError(assignment.error);
-      setSel({ mode: 'id', id: markId });
+      setSel({ mode: 'id', id: markId, chosen: false });
       return;
     }
-    // A burst of taps keeps the oldest selected, so bibs are then typed in arrival order.
-    if (selectedId === null) setSel({ mode: 'id', id: markId });
+    // Spec §7.3.2: the new mark becomes the selected one — except inside a burst, where the
+    // burst's oldest stays selected so bibs typed in arrival order land on marks 1, 2, 3…
+    // A selection older than the unassigned threshold never outlives a new tap: it would take
+    // this arrival's bib, and every identification after it would be one arrival off.
+    const current = selectedId ? tk.unassigned.find(m => m.id === selectedId) : undefined;
+    if (!current || isStale(current, Date.parse(ts))) setSel({ mode: 'id', id: markId, chosen: false });
   }
 
   // Marks on pointerdown — the instant the finger lands, and a tap that turns into a slight drag
-  // still counts. The click that follows the same press is ignored; keyboard presses (detail 0)
-  // and clicks without a pointerdown still mark.
+  // still counts. The click of the same press is ignored by its time (a press that slid off the
+  // button has no click, and must not swallow a later one); keyboard presses and screen-reader
+  // activations come without a pointer press and mark on click.
   function onMarkPointerDown(e: PointerEvent<HTMLButtonElement>) {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    pointerMarked.current = true;
     doMark();
+    lastMarkPointer.current = e.timeStamp;
+    // Keeps the focus — and the phone keyboard — in the bib field; the click still fires.
+    e.preventDefault();
+  }
+  function onMarkPointerUp(e: PointerEvent<HTMLButtonElement>) {
+    lastMarkPointer.current = e.timeStamp; // a long press: its click comes when the finger lifts
   }
   function onMarkClick(e: MouseEvent<HTMLButtonElement>) {
-    const fromPointer = pointerMarked.current && e.detail > 0;
-    pointerMarked.current = false;
-    if (!fromPointer) doMark();
+    if (isClickOfPress(e, lastMarkPointer.current)) return;
+    doMark();
+  }
+  function onMarkKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
+    // A held Enter repeats its click: one press, one mark.
+    if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault();
   }
 
   function onBibSubmit(e: FormEvent) {
@@ -318,9 +357,14 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       toast.show({ message: 'Digite o nº de peito' });
       return;
     }
-    const target = selectedId ?? tk.unassigned[0]?.id ?? null;
+    // The selected mark, else the oldest of the current burst — never a stale one unless chosen.
+    const target = selectedId ?? burstHead(tk.unassigned, tk.nowMs)?.id ?? null;
     if (!target) {
-      toast.show({ message: 'Toque em MARCAR primeiro' });
+      toast.show({
+        message: tk.unassigned.length > 0
+          ? 'Toque em MARCAR primeiro, ou selecione a marcação em "Sem atleta"'
+          : 'Toque em MARCAR primeiro',
+      });
       return;
     }
     const r = tk.assignBib(target, text);
@@ -328,22 +372,62 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     report(r);
   }
 
-  function onRowTap(item: OnCourseItem) {
+  function commitRowTap({ item, stamp, markId }: RowTap) {
     // Ruling 10: never pass the row's current athlete — confirming a relay handoff shows the
     // next athlete as current, and the leg must come from the crossing times.
-    if (selectedId) {
-      report(tk.assign(selectedId, item.entry.id));
+    if (markId && tk.unassigned.some(m => m.id === markId)) {
+      report(tk.assign(markId, item.entry.id));
       return;
     }
-    const { markId } = tk.mark(); // arrival tap: marks now, then identifies
+    const { markId: newId } = tk.mark(undefined, stamp); // arrival tap: the instant of the press
     vibrate();
-    const r = tk.assign(markId, item.entry.id);
-    if (!r.ok) setSel({ mode: 'id', id: markId });
+    const r = tk.assign(newId, item.entry.id);
+    if (!r.ok) setSel({ mode: 'id', id: newId, chosen: false });
     report(r);
   }
 
+  // "Em prova" rows move (pinned crossings arrive with every sync, windows close): what a press
+  // does — the entry, the mark it identifies, the instant — is fixed on pointerdown and committed
+  // on pointerup, wherever the finger is then, if it barely moved (a scroll cancels it).
+  const commitLatest = useRef(commitRowTap);
+  useLayoutEffect(() => {
+    commitLatest.current = commitRowTap;
+  });
+  useEffect(() => {
+    const up = (e: globalThis.PointerEvent) => {
+      const press = rowPress.current;
+      if (!press || e.pointerId !== press.pointerId) return;
+      rowPress.current = null;
+      lastRowPointer.current = e.timeStamp;
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > TAP_SLOP_PX) return;
+      commitLatest.current(press);
+    };
+    const cancel = (e: globalThis.PointerEvent) => {
+      if (rowPress.current?.pointerId === e.pointerId) rowPress.current = null;
+    };
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    return () => {
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+    };
+  }, []);
+
+  function onRowPointerDown(item: OnCourseItem, e: PointerEvent<HTMLButtonElement>) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const stamp = tk.stamp(); // the instant the finger landed
+    lastRowPointer.current = e.timeStamp;
+    rowPress.current = { item, stamp, markId: selectedId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+  }
+  function onRowClick(item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) {
+    // The click of a press already handled when the finger lifted (it may land on another row, or
+    // on none, when the list moved). Keyboard and screen-reader activations tap here.
+    if (isClickOfPress(e, lastRowPointer.current)) return;
+    commitRowTap({ item, stamp: tk.stamp(), markId: selectedId });
+  }
+
   function toggleSelect(id: string) {
-    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id });
+    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id, chosen: true });
   }
 
   function onDiscard(m: MarkRow) {
@@ -357,7 +441,8 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
 
   function onReassign(m: MarkRow) {
     tk.unassign(m.id);
-    setSel({ mode: 'id', id: m.id });
+    if (m.discarded) tk.restore(m.id); // a rejected mark discarded here goes back to "Sem atleta"
+    setSel({ mode: 'id', id: m.id, chosen: true });
   }
 
   function onChangeLeg(markId: string, legIndex: number) {
@@ -394,16 +479,19 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
           type="button"
           data-testid="mark-button"
           onPointerDown={onMarkPointerDown}
+          onPointerUp={onMarkPointerUp}
+          onMouseDown={e => e.preventDefault()}
           onClick={onMarkClick}
+          onKeyDown={onMarkKeyDown}
           onContextMenu={e => e.preventDefault()}
           className="brand-title min-h-[35vh] w-full touch-none select-none rounded-2xl bg-accent text-5xl font-bold text-accent-fg shadow-lg transition-transform active:scale-[0.98] focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           Marcar
         </button>
 
-        <UnassignedList marks={tk.unassigned} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
+        <UnassignedList marks={tk.unassigned} nowMs={tk.nowMs} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
 
-        <OnCourseList tk={tk} selectedMark={selectedMark} onTap={onRowTap} />
+        <OnCourseList tk={tk} selectedMark={selectedMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
 
         <MyMarksList tk={tk} onDiscard={onDiscard} onRestore={id => tk.restore(id)} onReassign={onReassign} onChangeLeg={setLegSheet} />
       </main>
@@ -449,6 +537,12 @@ function Header({ tk }: { tk: Timekeeper }) {
           ⚠ {tk.rejectedCount === 1 ? '1 marcação recusada' : `${tk.rejectedCount} marcações recusadas`} — veja “Minhas marcações”
         </p>
       )}
+      {tk.storageFailed && (
+        <p role="alert" className="mx-auto max-w-xl px-4 pb-2 text-xs font-semibold text-danger">
+          ⚠ Não foi possível guardar as marcações neste aparelho (memória cheia ou bloqueada) — não feche nem
+          recarregue esta página até tudo sincronizar.
+        </p>
+      )}
       {tk.syncError && (
         <p className="mx-auto max-w-xl px-4 pb-2 text-xs font-medium text-danger">
           Erro ao sincronizar: {tk.syncError} — tentando de novo
@@ -481,8 +575,8 @@ function SectionTitle({ id, children }: { id: string; children: ReactNode }) {
   return <h2 id={id} className="brand-title text-xs font-semibold text-muted">{children}</h2>;
 }
 
-function UnassignedList({ marks, selectedId, onSelect, onDiscard }: {
-  marks: MarkRow[]; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
+function UnassignedList({ marks, nowMs, selectedId, onSelect, onDiscard }: {
+  marks: MarkRow[]; nowMs: number; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
 }) {
   const titleId = useId();
   return (
@@ -502,7 +596,9 @@ function UnassignedList({ marks, selectedId, onSelect, onDiscard }: {
                 }`}
               >
                 <span className="tabular text-lg font-semibold">{markTime(m)}</span>
-                <span className="text-xs text-muted">{selected ? 'Selecionada' : 'Tocar para selecionar'}</span>
+                <span className="text-xs text-muted">
+                  {selected ? 'Selecionada' : isStale(m, nowMs) ? 'Mais de 1 min · tocar para selecionar' : 'Tocar para selecionar'}
+                </span>
               </button>
               <button
                 type="button"
@@ -521,8 +617,10 @@ function UnassignedList({ marks, selectedId, onSelect, onDiscard }: {
   );
 }
 
-function OnCourseList({ tk, selectedMark, onTap }: {
-  tk: Timekeeper; selectedMark: MarkRow | null; onTap: (item: OnCourseItem) => void;
+function OnCourseList({ tk, selectedMark, onRowPointerDown, onRowClick }: {
+  tk: Timekeeper; selectedMark: MarkRow | null;
+  onRowPointerDown: (item: OnCourseItem, e: PointerEvent<HTMLButtonElement>) => void;
+  onRowClick: (item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) => void;
 }) {
   const titleId = useId();
   const [query, setQuery] = useState('');
@@ -577,7 +675,10 @@ function OnCourseList({ tk, selectedMark, onTap }: {
       <ul data-testid="oncourse-list" className="flex flex-col gap-2">
         {items.map(item => (
           <li key={item.entry.id}>
-            <OnCourseRow item={item} showRace={multiRace} onTap={() => onTap(item)} />
+            <OnCourseRow
+              item={item} showRace={multiRace}
+              onPointerDown={e => onRowPointerDown(item, e)} onClick={e => onRowClick(item, e)}
+            />
           </li>
         ))}
       </ul>
@@ -592,15 +693,24 @@ function OnCourseList({ tk, selectedMark, onTap }: {
   );
 }
 
-function OnCourseRow({ item, showRace, onTap }: { item: OnCourseItem; showRace: boolean; onTap: () => void }) {
+function OnCourseRow({ item, showRace, onPointerDown, onClick }: {
+  item: OnCourseItem; showRace: boolean;
+  onPointerDown: (e: PointerEvent<HTMLButtonElement>) => void; onClick: (e: MouseEvent<HTMLButtonElement>) => void;
+}) {
   const { entry, race, confirm } = item;
+  const legTime = confirm && confirm.leg_ms !== null ? ` ${formatDuration(confirm.leg_ms)}` : '';
+  // A crossing this device already counts is not offered again: a second tap would only be a
+  // duplicate of its own mark (Ruling 44 M8).
   const confirmText = confirm
-    ? `✓ ${confirm.leg_label}${confirm.leg_ms !== null ? ` ${formatDuration(confirm.leg_ms)}` : ''} — toque para confirmar (${confirm.remaining_s}s)`
+    ? confirm.mine
+      ? `✓ marcada por você · ${confirm.leg_label}${legTime}`
+      : `✓ ${confirm.leg_label}${legTime} — toque para confirmar (${confirm.remaining_s}s)`
     : null;
   return (
     <button
       type="button"
-      onClick={onTap}
+      onPointerDown={onPointerDown}
+      onClick={onClick}
       className={`flex min-h-16 w-full flex-col gap-0.5 rounded-xl border px-3 py-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
         confirm ? 'border-success bg-success/10' : 'border-border bg-surface'
       }`}
@@ -639,6 +749,9 @@ function MyMarksList({ tk, onDiscard, onRestore, onReassign, onChangeLeg }: {
           const entry = mark.entry_id ? index?.entriesById.get(mark.entry_id) : undefined;
           const race = entry ? index?.racesById.get(entry.race_id) : undefined;
           const time = markTime(mark);
+          // Any rejected mark can be identified again — even one whose entry no longer exists —
+          // except a discard by the organization, which the timekeeper cannot undo.
+          const canReassign = state === 'rejected' ? mark.discarded_by !== 'organizer' : !mark.discarded && !!entry;
           const what = mark.discarded
             ? `Descartada${mark.discarded_by === 'organizer' ? ' pela organização' : ''}`
             : entry && race && mark.leg_index !== null
@@ -658,7 +771,7 @@ function MyMarksList({ tk, onDiscard, onRestore, onReassign, onChangeLeg }: {
                     Perna
                   </Button>
                 )}
-                {!mark.discarded && entry && (
+                {canReassign && (
                   <Button size="sm" variant="secondary" aria-label={`Reatribuir a marcação das ${time}`} onClick={() => onReassign(mark)}>
                     Reatribuir
                   </Button>
