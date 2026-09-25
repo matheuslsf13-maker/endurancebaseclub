@@ -1,5 +1,6 @@
 import { Button, Checkbox, Input } from '../../components/ui';
 import type { RankingDef, RankingDim } from '../../lib/types';
+import { moveItem } from './raceForm';
 
 const DIM_ORDER: RankingDim[] = ['sex', 'age', 'level'];
 const DIM_LABEL: Record<RankingDim, string> = { sex: 'Sexo', age: 'Faixa etária', level: 'Nível' };
@@ -34,11 +35,8 @@ export function RankingsEditor({ rankings, cumulative, hasLevels, onChange, onCu
   }
 
   function move(i: number, dir: -1 | 1) {
-    const j = i + dir;
-    if (j < 0 || j >= rankings.length) return;
-    const next = rankings.slice();
-    [next[i], next[j]] = [next[j], next[i]];
-    onChange(next);
+    const next = moveItem(rankings, i, dir);
+    if (next !== rankings) onChange(next);
   }
 
   function remove(i: number) {

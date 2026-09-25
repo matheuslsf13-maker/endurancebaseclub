@@ -1,6 +1,7 @@
 import { Button, Input, Select } from '../../components/ui';
 import { MODALITY_LABEL } from '../../domain/presets';
 import type { Modality } from '../../lib/types';
+import { moveItem } from './raceForm';
 import type { DistanceUnit, RaceFormLeg } from './raceForm';
 
 const MODALITY_OPTIONS = (Object.keys(MODALITY_LABEL) as Modality[]).map((m) => ({ value: m, label: MODALITY_LABEL[m] }));
@@ -34,11 +35,8 @@ export function LegsEditor({ legs, onChange }: LegsEditorProps) {
   }
 
   function move(i: number, dir: -1 | 1) {
-    const j = i + dir;
-    if (j < 0 || j >= legs.length) return;
-    const next = legs.slice();
-    [next[i], next[j]] = [next[j], next[i]];
-    onChange(next);
+    const next = moveItem(legs, i, dir);
+    if (next !== legs) onChange(next);
   }
 
   function remove(i: number) {

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { defaultRaceConfig, RACE_PRESETS } from '../../domain/presets';
+import { defaultRaceConfig, normalizeRaceConfig, RACE_PRESETS } from '../../domain/presets';
 import { makeRace, makeWave } from '../../domain/testing/fixtures';
+import type { RaceConfig } from '../../lib/types';
 import {
-  distanceToForm, formToPayload, legsSummary, parseDistance, presetToForm, raceToForm, teamSizeLabel,
+  distanceToForm, formToPayload, legsSummary, moveItem, parseDistance, presetToForm, raceToForm, teamSizeLabel,
   validateRaceForm,
 } from './raceForm';
 import type { RaceForm } from './raceForm';
@@ -79,6 +80,43 @@ describe('raceToForm', () => {
     const race = makeRace({ id: 'r1' });
     const form = raceToForm(race, []);
     expect(form.waves).toEqual([{ name: 'Largada geral', position: 0, start_at: null }]);
+  });
+
+  it('normalizes a partial/legacy config, filling in missing keys with the team-size defaults', () => {
+    // Simulates a config saved before some keys existed (or trimmed by hand) — not something
+    // RaceConfig's own type allows, but real legacy rows in the database can look like this.
+    const legacyConfig = { cumulative: true } as unknown as RaceConfig;
+    const race = makeRace({ id: 'r1', team_size: 2, config: legacyConfig });
+    const form = raceToForm(race, []);
+
+    expect(form.config).toEqual(normalizeRaceConfig(legacyConfig, 2));
+    expect(form.config.rankings).toEqual(defaultRaceConfig(2).rankings);
+    expect(form.config.age_groups).toEqual(defaultRaceConfig(2).age_groups);
+    expect(form.config.divergence_threshold_s).toBe(defaultRaceConfig(2).divergence_threshold_s);
+    expect(form.config.time_source).toBe(defaultRaceConfig(2).time_source);
+    // The one field the legacy config did carry survives normalization.
+    expect(form.config.cumulative).toBe(true);
+  });
+});
+
+describe('moveItem', () => {
+  it('is a no-op at either bound, returning the same array reference', () => {
+    const items = [1, 2, 3];
+    expect(moveItem(items, 0, -1)).toBe(items);
+    expect(moveItem(items, 2, 1)).toBe(items);
+  });
+
+  it('swaps the item up or down, returning a new array', () => {
+    const items = ['a', 'b', 'c'];
+    const up = moveItem(items, 1, -1);
+    expect(up).toEqual(['b', 'a', 'c']);
+    expect(up).not.toBe(items);
+
+    const down = moveItem(items, 1, 1);
+    expect(down).toEqual(['a', 'c', 'b']);
+    expect(down).not.toBe(items);
+    // The input array itself is never mutated.
+    expect(items).toEqual(['a', 'b', 'c']);
   });
 });
 

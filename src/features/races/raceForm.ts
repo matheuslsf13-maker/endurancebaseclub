@@ -1,5 +1,5 @@
 import { validateAgeGroups } from '../../domain/categories';
-import { defaultRaceConfig, MODALITY_LABEL } from '../../domain/presets';
+import { defaultRaceConfig, MODALITY_LABEL, normalizeRaceConfig } from '../../domain/presets';
 import type { RacePreset } from '../../domain/presets';
 import type { Leg, Modality, RaceConfig, RaceRow, WaveRow } from '../../lib/types';
 
@@ -87,7 +87,9 @@ function waveToForm(wave: WaveRow): RaceFormWave {
 
 /** Builds the editable form from a saved race + the event's waves (filtered to this race, in
  * order); a race somehow left with no wave still edits as one "Largada geral" (the server would
- * recreate it anyway per Ruling 12). */
+ * recreate it anyway per Ruling 12). The saved `config` is normalized against the race's
+ * `team_size` so a partial or legacy config (missing keys added since it was last saved) still
+ * opens with every field filled in, instead of `undefined`s reaching the editor's inputs. */
 export function raceToForm(race: RaceRow, waves: WaveRow[]): RaceForm {
   const raceWaves = waves
     .filter((w) => w.race_id === race.id)
@@ -101,7 +103,7 @@ export function raceToForm(race: RaceRow, waves: WaveRow[]): RaceForm {
     team_size: race.team_size,
     legs: race.legs.map(legToForm),
     waves: raceWaves.length > 0 ? raceWaves.map(waveToForm) : [defaultWaveForm()],
-    config: race.config,
+    config: normalizeRaceConfig(race.config, race.team_size),
   };
 }
 
@@ -165,6 +167,17 @@ export function teamSizeLabel(n: number): string {
   if (n === 2) return 'Dupla';
   if (n === 3) return 'Trio';
   return `Equipe de ${n}`;
+}
+
+/** Swaps the item at `i` with its neighbor at `i + dir` (-1 up, 1 down), returning a new array;
+ * out of bounds is a no-op that returns `items` itself unchanged. Shared by every reorderable
+ * list in the editor (legs, podium rankings). */
+export function moveItem<T>(items: T[], i: number, dir: -1 | 1): T[] {
+  const j = i + dir;
+  if (j < 0 || j >= items.length) return items;
+  const next = items.slice();
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
 }
 
 /** The list's one-line legs summary, e.g. "Natação 750 m → Ciclismo 20 km → Corrida 5 km". */
