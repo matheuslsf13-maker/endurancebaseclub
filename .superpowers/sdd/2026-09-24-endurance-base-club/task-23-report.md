@@ -106,3 +106,37 @@ No other file was touched (confirmed via `git status --porcelain` / `git diff --
 
 1. **The `eventShell.test.tsx` collision described above** — not blocking, not mine to fix, flagged for the controller.
 2. **Minor a11y nicety, not fixed**: `TimekeepersPanel`'s "Ativo" checkbox label is the literal word "Ativo" in every row (not "Ativo — Bia"), since the shared `Checkbox` only takes one `label` used for both the visible text and the accessible name; row context is still available through the table structure, but a screen-reader user tabbing through several rows' checkboxes in isolation only hears "Ativo" each time. Fixing this nicely would mean either changing the shared `Checkbox` (out of my Files block) or showing a redundant per-row name next to the checkbox. Left as-is; flagging for awareness.
+
+## Fix round 1
+
+Review verdict: "Needs fixes", one Important finding — `errorMessage(e: unknown)` (`e instanceof ApiError ? e.message : 'Erro inesperado'`) was defined identically four times: `LiveBoard.tsx`, `TimekeepersPanel.tsx`, `TimingTab.tsx`, `WavesPanel.tsx`.
+
+- Merged `feat/ebc-app` into `task/23` first (`git merge --no-edit feat/ebc-app`, clean, no conflicts) — this pulls in the app-shell fix, so `eventShell.test.tsx`'s stub-text collision noted under Concerns above is gone.
+- Added `src/features/timing/timingHelpers.ts` (new file, granted by the controller) exporting a single `errorMessage(e: unknown): string`. Removed the four local copies and their now-unused `ApiError` imports from `LiveBoard.tsx`, `TimekeepersPanel.tsx`, `TimingTab.tsx` and `WavesPanel.tsx`, each now importing `errorMessage` from `./timingHelpers`.
+- No behavior change; no test changes needed.
+
+Gates after the fix, on the merged tree:
+
+```
+$ npx vitest run src/features/timing
+ Test Files  1 passed (1)
+      Tests  22 passed (22)
+
+$ npx vitest run
+ Test Files  31 passed (31)
+      Tests  393 passed (393)
+
+$ npm run typecheck
+(exit 0, no diagnostics)
+
+$ npm run build
+✓ 279 modules transformed.
+dist/assets/index-*.js   718.92 kB │ gzip: 211.60 kB
+✓ built in 391ms
+```
+
+Full suite is now fully green (393/393) — the `eventShell.test.tsx` collision is resolved by the merge, not by any edit of mine to that file.
+
+Commits: `51a34e6` merge `feat/ebc-app` into `task/23`; `03af4bf` `refactor(timing): share error message helper`.
+
+Files changed in this round: new `src/features/timing/timingHelpers.ts`; modified `src/features/timing/{LiveBoard,TimekeepersPanel,TimingTab,WavesPanel}.tsx` (import swap only).

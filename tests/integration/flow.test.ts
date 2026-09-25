@@ -1,0 +1,351 @@
+// End-to-end flow through the real @supabase/supabase-js client against the local shim: proves
+// migrations 0001-0006 work together the way the browser will call them (spec §15 item 4):
+// organizer -> event -> races -> athletes -> entries -> timekeepers (open/register/sync) -> live ->
+// resolution -> finalize -> public. One describe, sequential its sharing state (ids/tokens/marks).
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { startStack, type Stack } from './helpers';
+
+const DB = 'ebc_t8';
+const PORT = 54331;
+
+let stack: Stack;
+const anon = () => createClient(stack.url, 'sb_publishable_local_dev', { auth: { persistSession: false, autoRefreshToken: false } });
+
+// Builds one TkMarkInput-shaped payload for tk_sync. `overrides` lets a single test bend one
+// optional field (e.g. a malformed clock_offset_ms) without repeating every other field.
+function mark(
+  id: string,
+  tsMs: number,
+  entryId: string | null,
+  legIndex: number | null,
+  athleteId: string | null,
+  overrides: Record<string, unknown> = {}
+) {
+  const iso = new Date(tsMs).toISOString();
+  return {
+    id,
+    ts: iso,
+    device_ts: iso,
+    clock_offset_ms: 0,
+    clock_rtt_ms: 100,
+    entry_id: entryId,
+    leg_index: legIndex,
+    athlete_id: athleteId,
+    discarded: false,
+    ...overrides,
+  };
+}
+
+beforeAll(async () => {
+  stack = await startStack(DB, PORT);
+}, 120_000);
+
+afterAll(() => {
+  stack?.stop();
+});
+
+describe('full RPC flow through supabase-js', () => {
+  let sbOwner: SupabaseClient;
+
+  let eventId: string;
+  let eventSlug: string;
+  let tkToken: string;
+
+  let relayRaceId: string;
+  let relayWaveId: string;
+  let runRaceId: string;
+
+  let anaId: string;
+  let betoId: string;
+  let caioId: string;
+  let teamEntryId: string;
+
+  let tk1Id: string;
+  let tk1Secret: string;
+  let tk2Id: string;
+  let tk2Secret: string;
+
+  let T0: number;
+  let mkT1Leg0: string;
+  let mkT1Leg1: string;
+  let mkT2Leg0: string;
+  let mkT2Leg1: string;
+
+  it('1. bootstraps the owner, logs in and forces a password change', async () => {
+    await stack.sql("select public.bootstrap_owner('owner@ebc.test','senha-forte-1','Owner')");
+
+    sbOwner = anon();
+    const signIn = await sbOwner.auth.signInWithPassword({ email: 'owner@ebc.test', password: 'senha-forte-1' });
+    expect(signIn.error).toBeNull();
+
+    const me1 = await sbOwner.rpc('admin_me');
+    expect(me1.error).toBeNull();
+    expect(me1.data).toMatchObject({ email: 'owner@ebc.test', role: 'owner', must_change_password: true });
+
+    const updated = await sbOwner.auth.updateUser({ password: 'senha-nova-123' });
+    expect(updated.error).toBeNull();
+    const changed = await sbOwner.rpc('admin_password_changed');
+    expect(changed.error).toBeNull();
+
+    const me2 = await sbOwner.rpc('admin_me');
+    expect(me2.data.must_change_password).toBe(false);
+    expect(me2.data.role).toBe('owner');
+  });
+
+  it('2. creates the event and its two races', async () => {
+    const ev = await sbOwner.rpc('admin_save_event', {
+      p_event: { name: 'Copa Clube', date: '2026-10-11', is_public: true, levels: ['Elite', 'Base'] },
+    });
+    expect(ev.error).toBeNull();
+    expect(ev.data).toMatchObject({ is_public: true, levels: ['Elite', 'Base'] });
+    expect(ev.data.public_slug).toEqual(expect.any(String));
+    expect(ev.data.tk_token).toEqual(expect.any(String));
+    eventId = ev.data.id;
+    eventSlug = ev.data.public_slug;
+    tkToken = ev.data.tk_token;
+
+    const relay = await sbOwner.rpc('admin_save_race', {
+      p_race: {
+        event_id: eventId,
+        name: 'Revezamento',
+        team_size: 2,
+        legs: [
+          { modality: 'swim', label: 'Natação', distance_m: 750 },
+          { modality: 'run', label: 'Corrida', distance_m: 5000 },
+        ],
+      },
+    });
+    expect(relay.error).toBeNull();
+    expect(relay.data.race.team_size).toBe(2);
+    expect(relay.data.race.legs).toHaveLength(2);
+    expect(relay.data.waves).toHaveLength(1); // no waves sent -> default "Largada geral"
+    relayRaceId = relay.data.race.id;
+    relayWaveId = relay.data.waves[0].id;
+
+    const run = await sbOwner.rpc('admin_save_race', {
+      p_race: {
+        event_id: eventId,
+        name: 'Corrida 5K',
+        team_size: 1,
+        legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }],
+      },
+    });
+    expect(run.error).toBeNull();
+    expect(run.data.race.team_size).toBe(1);
+    runRaceId = run.data.race.id;
+  });
+
+  it('3. registers athletes and entries', async () => {
+    const ana = await sbOwner.rpc('admin_save_athlete', { p_athlete: { name: 'Ana', sex: 'F', birth_date: '1990-06-15' } });
+    expect(ana.error).toBeNull();
+    anaId = ana.data.id;
+
+    const beto = await sbOwner.rpc('admin_save_athlete', { p_athlete: { name: 'Beto', sex: 'M', birth_date: '1988-01-20' } });
+    expect(beto.error).toBeNull();
+    betoId = beto.data.id;
+
+    const caio = await sbOwner.rpc('admin_save_athlete', { p_athlete: { name: 'Caio', sex: 'M', birth_date: '1995-03-03' } });
+    expect(caio.error).toBeNull();
+    caioId = caio.data.id;
+
+    const entry = await sbOwner.rpc('admin_save_entry', {
+      p_entry: {
+        race_id: relayRaceId,
+        team_name: 'Tubarões',
+        level: 'Elite',
+        members: [
+          { athlete_id: anaId, legs: [0] },
+          { athlete_id: betoId, legs: [1] },
+        ],
+      },
+    });
+    expect(entry.error).toBeNull();
+    expect(entry.data.team_name).toBe('Tubarões');
+    expect(entry.data.members).toHaveLength(2);
+    teamEntryId = entry.data.id;
+
+    const bulk = await sbOwner.rpc('admin_bulk_create_entries', { p_race_id: runRaceId, p_athlete_ids: [caioId] });
+    expect(bulk.error).toBeNull();
+    expect(bulk.data).toHaveLength(1);
+    expect(bulk.data[0].members[0].athlete_id).toBe(caioId);
+  });
+
+  it('4. opens the timekeeper link and registers two timekeepers', async () => {
+    const tkAnon = anon();
+    const open = await tkAnon.rpc('tk_open', { p_token: tkToken });
+    expect(open.error).toBeNull();
+    expect(open.data.event.id).toBe(eventId);
+    const teamEntryOpen = open.data.entries.find((e: any) => e.team_name === 'Tubarões');
+    expect(teamEntryOpen).toBeDefined();
+    expect('notes' in teamEntryOpen).toBe(false); // Ruling 29: tk_open entries omit notes
+
+    const reg1 = await tkAnon.rpc('tk_register', { p_token: tkToken, p_name: 'Ana', p_device_label: 'Celular 1' });
+    expect(reg1.error).toBeNull();
+    tk1Id = reg1.data.timekeeper_id;
+    tk1Secret = reg1.data.secret;
+
+    const reg2 = await tkAnon.rpc('tk_register', { p_token: tkToken, p_name: 'Bia', p_device_label: 'Celular 2' });
+    expect(reg2.error).toBeNull();
+    tk2Id = reg2.data.timekeeper_id;
+    tk2Secret = reg2.data.secret;
+  });
+
+  it('5. sets the relay wave start', async () => {
+    T0 = Date.now();
+    const wave = await sbOwner.rpc('admin_set_wave_start', { p_wave_id: relayWaveId, p_start_at: new Date(T0).toISOString() });
+    expect(wave.error).toBeNull();
+    expect(new Date(wave.data.start_at).getTime()).toBe(T0);
+  });
+
+  it('6. two timekeepers mark both legs, with a 4s divergence on leg 0', async () => {
+    mkT1Leg0 = randomUUID();
+    mkT1Leg1 = randomUUID();
+    mkT2Leg0 = randomUUID();
+    mkT2Leg1 = randomUUID();
+
+    const tk1 = anon();
+    const sync1 = await tk1.rpc('tk_sync', {
+      p_token: tkToken,
+      p_timekeeper_id: tk1Id,
+      p_secret: tk1Secret,
+      p_marks: [
+        mark(mkT1Leg0, T0 + 10 * 60_000, teamEntryId, 0, anaId),
+        mark(mkT1Leg1, T0 + 30 * 60_000, teamEntryId, 1, betoId),
+      ],
+      p_since: null,
+    });
+    expect(sync1.error).toBeNull();
+    expect(sync1.data.accepted).toHaveLength(2);
+    expect(sync1.data.rejected).toHaveLength(0);
+
+    const tk2 = anon();
+    const sync2 = await tk2.rpc('tk_sync', {
+      p_token: tkToken,
+      p_timekeeper_id: tk2Id,
+      p_secret: tk2Secret,
+      p_marks: [
+        // Ruling 28b: a malformed optional field is sanitized to null, never a rejection reason.
+        mark(mkT2Leg0, T0 + 10 * 60_000 + 4_000, teamEntryId, 0, anaId, { clock_offset_ms: 'not-a-number' }),
+        mark(mkT2Leg1, T0 + 30 * 60_000 + 500, teamEntryId, 1, betoId),
+      ],
+      p_since: null,
+    });
+    expect(sync2.error).toBeNull();
+    expect(sync2.data.accepted).toHaveLength(2);
+    expect(sync2.data.rejected).toHaveLength(0);
+    const storedLeg0 = sync2.data.marks.find((m: any) => m.id === mkT2Leg0);
+    expect(storedLeg0.clock_offset_ms).toBeNull();
+  });
+
+  it('7. shows all four marks live and resolves leg 0 to a chosen mark', async () => {
+    const live = await sbOwner.rpc('admin_live', { p_event_id: eventId, p_since: null });
+    expect(live.error).toBeNull();
+    expect(live.data.marks).toHaveLength(4);
+
+    const res = await sbOwner.rpc('admin_set_resolution', {
+      p_entry_id: teamEntryId,
+      p_leg_index: 0,
+      p_mode: 'mark',
+      p_mark_id: mkT1Leg0,
+      p_manual_ts: null,
+      p_note: 'foto',
+    });
+    expect(res.error).toBeNull();
+    expect(res.data.mode).toBe('mark');
+    expect(res.data.mark_id).toBe(mkT1Leg0);
+  });
+
+  it('7b. once the organizer moves a mark, a stale timekeeper resync of it is rejected', async () => {
+    // Ruling 27: admin_update_mark flips org_edited; a replayed tk_sync that would revert the
+    // organizer's placement is rejected instead of silently winning the race.
+    const moved = await sbOwner.rpc('admin_update_mark', { p_mark_id: mkT2Leg1, p_patch: { leg_index: 0 } });
+    expect(moved.error).toBeNull();
+    expect(moved.data.leg_index).toBe(0);
+    expect(moved.data.org_edited).toBe(true);
+
+    const tk2 = anon();
+    const replay = await tk2.rpc('tk_sync', {
+      p_token: tkToken,
+      p_timekeeper_id: tk2Id,
+      p_secret: tk2Secret,
+      p_marks: [mark(mkT2Leg1, T0 + 30 * 60_000 + 500, teamEntryId, 1, betoId)], // its original (stale) view
+      p_since: null,
+    });
+    expect(replay.error).toBeNull();
+    expect(replay.data.accepted).toHaveLength(0);
+    expect(replay.data.rejected).toEqual([{ id: mkT2Leg1, reason: 'Alterada pela organização' }]);
+  });
+
+  it('8. the public event and live feeds hide organizer-only fields', async () => {
+    const pub = anon();
+    const event = await pub.rpc('pub_event', { p_slug: eventSlug });
+    expect(event.error).toBeNull();
+    expect(event.data.athletes.length).toBeGreaterThan(0);
+    for (const a of event.data.athletes) expect('email' in a).toBe(false);
+
+    const teamEntryPub = event.data.entries.find((e: any) => e.team_name === 'Tubarões');
+    expect(teamEntryPub).toBeDefined();
+    expect(teamEntryPub.members.some((m: any) => m.name === 'Ana')).toBe(true);
+    expect('notes' in teamEntryPub).toBe(false); // Ruling 29
+
+    expect(event.data.marks).toHaveLength(4);
+    for (const mk of event.data.marks) {
+      expect('device_ts' in mk).toBe(false);
+      expect('clock_offset_ms' in mk).toBe(false);
+      expect('clock_rtt_ms' in mk).toBe(false);
+      expect('org_edited' in mk).toBe(false);
+    }
+
+    const live = await pub.rpc('pub_live', { p_slug: eventSlug, p_since: event.data.server_now });
+    expect(live.error).toBeNull();
+    expect(live.data.marks).toHaveLength(0);
+  });
+
+  it('9. finalizes the relay race and reflects it on the athlete profile/list', async () => {
+    const row = {
+      entry_id: teamEntryId,
+      athlete_ids: [anaId, betoId],
+      status: 'finished',
+      final_ms: 1_800_000,
+      overall_pos: 1,
+      data: {
+        event: { id: eventId, name: 'Copa Clube', date: '2026-10-11' },
+        race: { id: relayRaceId, name: 'Revezamento', team_size: 2 },
+        bib: '1',
+        team_name: 'Tubarões',
+        members: [
+          { athlete_id: anaId, name: 'Ana', legs: [0] },
+          { athlete_id: betoId, name: 'Beto', legs: [1] },
+        ],
+        legs: [],
+        category: { sex: 'MISTO', age: null, age_group: null, level: 'Elite' },
+        status: 'finished',
+        total_ms: 1_800_000,
+        penalty_ms: 0,
+        final_ms: 1_800_000,
+        positions: { overall: 1, sex: null, finishers: 1 },
+        podiums: [],
+      },
+    };
+    const fin = await sbOwner.rpc('admin_finalize_race', { p_race_id: relayRaceId, p_rows: [row] });
+    expect(fin.error).toBeNull();
+    expect(fin.data.count).toBe(1);
+
+    const profile = await sbOwner.rpc('admin_athlete_profile', { p_athlete_id: anaId });
+    expect(profile.error).toBeNull();
+    expect(profile.data.results).toHaveLength(1);
+
+    const athletes = await sbOwner.rpc('admin_list_athletes');
+    expect(athletes.error).toBeNull();
+    const anaRow = athletes.data.find((a: any) => a.id === anaId);
+    expect(anaRow.wins).toBe(1);
+  });
+
+  it('10. anon cannot execute admin_* RPCs', async () => {
+    const { error, status } = await anon().rpc('admin_list_events');
+    expect(error).not.toBeNull();
+    expect(error?.code === '42501' || status === 401 || status === 403).toBe(true);
+  });
+});
