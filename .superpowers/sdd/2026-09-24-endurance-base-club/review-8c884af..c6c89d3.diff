@@ -1,0 +1,154 @@
+# Review package: 8c884af..c6c89d3 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+c6c89d3 fix(review): explain and reset a resolution whose mark was discarded
+
+## Files changed
+ src/features/review/CrossingEditor.tsx | 17 +++++++++++++++--
+ src/features/review/review.test.tsx    | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 48 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/features/review/CrossingEditor.tsx b/src/features/review/CrossingEditor.tsx
+index 259e1a1..21af7d5 100644
+--- a/src/features/review/CrossingEditor.tsx
++++ b/src/features/review/CrossingEditor.tsx
+@@ -20,23 +20,30 @@ export interface CrossingEditorProps {
+  * never with ad-hoc arithmetic. */
+ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorProps) {
+   const { agg, index, timing, refresh } = useEventContext();
+   const toast = useToast();
+ 
+   const entry = index.entriesById.get(entryId);
+   const race = entry ? index.racesById.get(entry.race_id) : undefined;
+   const legTiming = timing.byEntry.get(entryId)?.legs[legIndex];
+   const crossing = legTiming?.crossing ?? null;
+   const resolution = crossing?.resolution ?? null;
++  // A stored `mark` resolution can point at a mark that computeCrossing no longer lists among
++  // `candidates` (it was discarded since, or lost to a duplicate) — `crossing.chosen_mark_discarded`
++  // is the domain's own signal for exactly that "official time already fell back to the system
++  // time" case. Seeding the form from that stale resolution would leave no radio checked and
++  // silently resend the same broken decision, so start from `system` instead — the value the
++  // official time already shows — and say so.
++  const markMissing = resolution?.mode === 'mark' && !!crossing && !crossing.candidates.some((c) => c.mark_id === resolution.mark_id);
+ 
+-  const [mode, setMode] = useState<ResolutionMode>(resolution?.mode ?? 'system');
+-  const [markId, setMarkId] = useState<string | null>(resolution?.mode === 'mark' ? resolution.mark_id : null);
++  const [mode, setMode] = useState<ResolutionMode>(markMissing ? 'system' : (resolution?.mode ?? 'system'));
++  const [markId, setMarkId] = useState<string | null>(!markMissing && resolution?.mode === 'mark' ? resolution.mark_id : null);
+   const [manualText, setManualText] = useState(() =>
+     resolution?.mode === 'manual' && resolution.manual_ts ? formatClock(Date.parse(resolution.manual_ts), { millis: true }) : '',
+   );
+   const [manualError, setManualError] = useState<string | null>(null);
+   const [note, setNote] = useState(resolution?.note ?? '');
+   const [saving, setSaving] = useState(false);
+   const [clearing, setClearing] = useState(false);
+   const [busyMarkId, setBusyMarkId] = useState<string | null>(null);
+   const [moveBib, setMoveBib] = useState<Record<string, string>>({});
+   const [moveLeg, setMoveLeg] = useState<Record<string, number>>({});
+@@ -248,20 +255,25 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
+                     </div>
+                   </td>
+                 </tr>
+               );
+             })}
+           </tbody>
+         </Table>
+ 
+         <fieldset className="flex flex-col gap-3">
+           <legend className="text-sm font-medium">Decisão</legend>
++          {markMissing && (
++            <p className="rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
++              A marcação escolhida foi descartada — escolha outra decisão.
++            </p>
++          )}
+           <label className="flex min-h-11 items-center gap-2">
+             <input type="radio" name="resolution" data-testid="resolution-system" checked={mode === 'system'} onChange={() => setMode('system')} />
+             <span>
+               {systemLabel}: {systemTime}
+             </span>
+           </label>
+           {crossing.candidates.map((c) => (
+             <label key={c.mark_id} className="flex min-h-11 items-center gap-2">
+               <input
+                 type="radio"
+@@ -283,20 +295,21 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
+             <span>Manual:</span>
+             <input
+               type="text"
+               placeholder="hh:mm:ss.d"
+               value={manualText}
+               onChange={(e) => {
+                 setManualText(e.target.value);
+                 setMode('manual');
+               }}
+               data-testid="resolution-manual-input"
++              aria-label="Hora manual"
+               className="min-h-11 w-32 rounded-xl border border-border bg-surface px-2"
+             />
+           </label>
+           {manualError && (
+             <p role="alert" className="text-sm text-danger">
+               {manualError}
+             </p>
+           )}
+           <Input label="Observação" value={note} onChange={(e) => setNote(e.target.value)} />
+         </fieldset>
+diff --git a/src/features/review/review.test.tsx b/src/features/review/review.test.tsx
+index 30f07a8..4fbd1fc 100644
+--- a/src/features/review/review.test.tsx
++++ b/src/features/review/review.test.tsx
+@@ -152,20 +152,53 @@ describe('ReviewTab: resolving a divergence', () => {
+     // passagens" instead of the issues list's "Resolver" button.
+     agg.resolutions = [makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: a.id })];
+     renderReview(agg);
+ 
+     await user.click(screen.getAllByTestId('crossing-row')[0]);
+     await user.click(screen.getByRole('button', { name: 'Remover decisão' }));
+ 
+     expect(mocks.clearResolution).toHaveBeenCalledWith('en1', 0);
+   });
+ 
++  it('recovers when the chosen mark has since been discarded: warns, pre-selects system, saves system', async () => {
++    const user = userEvent.setup();
++    const a = makeMark({ at: L0, timekeeper_id: 'tk1' });
++    const b = makeMark({ at: L0 + 14 * SEC, timekeeper_id: 'tk2', discarded: true, discarded_by: 'organizer' });
++    const finish = makeMark({ at: T0 + 30 * MIN, leg_index: 1 });
++    const agg = makeAgg({
++      marks: [a, b, finish],
++      resolutions: [makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: b.id })],
++    });
++    renderReview(agg);
++
++    await user.click(screen.getByRole('button', { name: 'Resolver' }));
++    expect(screen.getByText('A marcação escolhida foi descartada — escolha outra decisão.')).toBeInTheDocument();
++    expect(screen.getByTestId('resolution-system')).toBeChecked();
++    // The discarded mark is still listed, with its badge and a way back.
++    expect(screen.getByText('Descartada')).toBeInTheDocument();
++    expect(screen.getByRole('button', { name: 'Restaurar' })).toBeInTheDocument();
++    // No radio exists for the discarded mark (computeCrossing excludes it from `candidates`).
++    expect(screen.queryByTestId(`resolution-mark-${b.id}`)).not.toBeInTheDocument();
++
++    await user.click(screen.getByTestId('resolution-save'));
++    expect(mocks.setResolution).toHaveBeenCalledWith('en1', 0, 'system', null, null, '');
++  });
++
++  it('gives the manual time input its own accessible name', async () => {
++    const user = userEvent.setup();
++    const { agg } = divergenceAgg();
++    renderReview(agg);
++
++    await user.click(screen.getByRole('button', { name: 'Resolver' }));
++    expect(screen.getByLabelText('Hora manual')).toBe(screen.getByTestId('resolution-manual-input'));
++  });
++
+   it('discarding a candidate mark calls updateMark', async () => {
+     const user = userEvent.setup();
+     const { agg, a } = divergenceAgg();
+     renderReview(agg);
+ 
+     await user.click(screen.getByRole('button', { name: 'Resolver' }));
+     await user.click(screen.getAllByRole('button', { name: 'Descartar' })[0]);
+ 
+     expect(mocks.updateMark).toHaveBeenCalledWith(a.id, { discarded: true });
+   });

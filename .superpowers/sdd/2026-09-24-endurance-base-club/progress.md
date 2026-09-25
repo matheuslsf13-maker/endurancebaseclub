@@ -188,3 +188,48 @@ Task 6: complete (commits d415c39..45a2f9e, review clean; feat merged into task/
 Task 18: implemented 3c55071 (task/18, base bae2379; 16 focused tests; 9 full-suite failures = T17 eventShell stub-text tests → Ruling 36) — review dispatched
 Task 7: amendment 598995f (Ruling 35; RED→GREEN) — side effect: shim.test's ad hoc probe functions lost implicit PUBLIC execute (3/5 failing)
 - Ruling 37: tests/integration/shim.test.ts granted to T7 to add explicit grants to its own probe functions (the least-privilege default is the intended behavior; bootstrap.sql and 0006 untouched) — cost if wrong: none.
+Task 24: implemented 8c884af (task/24, base bae2379; 12 focused tests; 1 full-suite failure = T17 stub-text test → Ruling 36) — review dispatched
+Task 7: amendment 2 d353d11 (Ruling 37; shim 5/5); feat f532a4e merged into task/7 → 2427895 (SQL 7/7 PASS, shim 5/5) — review dispatched (f532a4e..2427895, opus)
+Task 24: review dispatched (bae2379..8c884af, sonnet)
+Task 8: dispatched (worktree /home/user/ebc-wt/t8, branch task/8 from task/7 2427895, sonnet; own DB ebc_t8 + shim port 54331) — Ruling 6 style while T7's review runs
+Task 8: dispatched above. Task 17: fix round 1 applied (commits 3cd4f76..a647630; 24 files/287 tests, typecheck, build ok; ApiError gains optional `status`) — scoped re-review dispatched
+Task 19: review Needs fixes (sonnet) — Important: normalizeRaceConfig (brief Consumes) unused in raceToForm; verbatim duplicated move() in LegsEditor/RankingsEditor — fix round 1/5 dispatched (resume implementer)
+Task 19: minor (deferred): blank leg label silently replaced by modality default (no validation, server requires a name); AgeGroups generator silently no-ops on invalid input; no client range check for window/threshold; per-row fields share accessible names; no direct tests for LegsEditor label-keep / AgeGroupsEditor / RankingsEditor toggles; no h1 while editing
+- Ruling 38: subagents see the OLD app's CLAUDE.md in their injected context (loaded by the harness at session start from the repo's old main); every dispatch now says to ignore it and follow the on-disk CLAUDE.md/contracts/spec (added to wave2-context.md; running implementers notified) — cost if wrong: none.
+Task 20: implemented 1b8f0fd (task/20, base bae2379; 24 focused tests; 2 full-suite failures = T17 stub-text tests → Ruling 36) — review dispatched
+Task 18: review — spec ✅, 1 Important (parseLevels/errorMessage/copyToClipboard duplicated across EventsPage/EventGeneralTab/SettingsPage) — fix round 1/5 dispatched (resume implementer)
+- Ruling 39: "Duplicar" lands on the copy's Geral tab (/eventos/:id) — the organizer reviews name/date first; "Novo evento" keeps /provas — cost if wrong: one extra tab click.
+- Ruling 40 (promotes T18 Minor 2 — silent loss of unsaved input under multi-organizer refetch): EventGeneralTab re-seeds from agg.event only when not dirty or when the event id changes; otherwise keeps the user's values and shows "Os dados do evento mudaram em outro lugar…" + Recarregar. Final review to check other agg-bound forms (RaceEditor, EntryForm) for the same hazard — cost if wrong: none.
+Task 18: minor (deferred): per-card/per-row action buttons (Duplicar/Excluir/Remover) lack item-specific accessible names
+Task 25: implemented 884253b (task/25, base bae2379; 14 focused tests; 1 full-suite failure = T17 stub-text test → Ruling 36) — review dispatched
+- Ruling 41: ClassificationTable and PodiumView take an extra required prop `athletesById: Map<string, AthleteRow>` (admin entries carry only athlete ids; names come from the aggregate's athletes) — accepted as the contract; T26 passes the map built from pub_event's athletes — cost if wrong: none.
+Task 23: implemented c03ef19 (task/23, base bae2379; 22 focused tests; 1 full-suite failure = T17 stub-text → Ruling 36) — review dispatched
+Task 24: review Needs fixes (sonnet) — Important: chosen_mark_discarded crossing reopens with no radio checked and re-saves the broken resolution — fix round 1/5 dispatched (resume implementer; + a11y name of resolution-manual-input, same component)
+Task 24: minor (deferred): "Mover" mini-form leg select silently ignored when a bib is typed; empty "Mover" is a silent no-op
+Task 7: review Needs fixes (opus; grant model verified empirically: anon = server_time + tk_open/register/sync + 4 pub_*; authenticated + 30 admin_*; no PUBLIC execute; helpers non-executable; tables no grants) — Important: resolutions' `note` and `decided_by` exposed by pub_event/pub_live
+- Ruling 42: T7 fix round also takes three promoted minors (correctness/security, same file, trivial): age via timestamp overload (DST-start birthdays off by one under America/Sao_Paulo) + discriminating late-year test; mark_public_json stable not immutable (+ assert no org_edited in public marks); 60_security asserts resolve_public_event is not executable — cost if wrong: none.
+Task 7: fix round 1/5 dispatched (resume implementer)
+Task 7: minor (deferred): pub_athlete sorts by snapshot date instead of joined ev.date; pub_live untested on an existing private slug; AthleteProfile.athlete typed AthleteRow but pub_athlete returns 5 keys (consumers must not rely on birth_date/public_profile); spec says non-discarded marks, brief/code return all (harmless)
+- Note for T29: Ruling 35's role-global default-privilege revoke applies to the role that runs apply_migration in production — verify after deploy with has_function_privilege checks as part of the SQL tests run in production.
+Task 19: fix round 1 applied (commits 12747ed..efd40e8; 36 focused tests) — scoped re-review dispatched
+Task 19: fix round 1/5 (2 addressed, 0 open — normalizeRaceConfig, moveItem helper; commits 12747ed..efd40e8) — scoped re-review clean → ready to merge after task/17 lands in feat (merge feat into task/19, full suite, then merge)
+Task 17: fix round 1/5 (5 addressed, 0 open — resilient session restore, .env.test, fresh timekeepers, RPC timeouts via AbortController+setTimeout, marker shell tests; commits 3cd4f76..a647630) — scoped re-review clean (opus)
+Task 17: minor (deferred): offline "Sair" with expired token is undone by TOKEN_REFRESHED when the network returns (dropSession ignores signOut error; remove ebc.auth or skip restore after explicit sign-out); restore running during a 42501 sign-in can apply(ANON) over FORBIDDEN (session.tsx:131); signed-in RPC timeout not a hard deadline while a token refresh hangs; persistent non-auth restore failure spins forever without a hint; timed-out writes may have committed (retry → duplicate); contracts.md ApiError lacks the new optional status field
+Task 17: complete (commits 7e293bd..a647630, review clean) — merged into feat/ebc-app as e699be5
+Task 19: complete (commits bae2379..efd40e8, review clean; feat merged into task/19: 343 tests green) — merged into feat/ebc-app as 4703006
+Task 25: review Approved (sonnet)
+Task 25: minor (deferred): entryLabel vs MemberNames duplicate member/leg formatting (' / ' vs ' · '); printed page repeats race name + badge; redundant null re-checks in finalize handlers
+Task 25: complete (commits bae2379..884253b, review clean; feat merged into task/25:       Tests  357 passed (357)) — merged into feat/ebc-app as 4af9aab
+Task 24: fix round 1 applied (commits 8c884af..c6c89d3; 14 focused tests) — scoped re-review dispatched
+Task 20: review Needs fixes (sonnet) — Important: AthleteForm nested submit bubbles to an outer form (reuse contract for T21); todayIsoBrasilia duplicated — fix round 1/5 dispatched (resume implementer; + sexLabel reuse)
+Task 20: minor (deferred): ageToday duplicates athleteAge fallback; table shows raw M/F; no .xlsx-path import test
+Task 27: dispatched (worktree /home/user/ebc-wt/t27 from feat/ebc-app, sonnet; Rulings 26 prompt-mode update, 30 lazy routes in App.tsx; grants: App.tsx, new src/components/UpdatePrompt.tsx, vercel.json headers for sw.js)
+Task 8: implemented fc400e9 (task/8, base 2427895; integration 16/16 incl. 11 flow; SQL 7/7) — review dispatched
+Task 7: fix round 1 applied (commits 2427895..a466ec2; SQL 7/7, shim 5/5) — scoped re-review dispatched
+INTERRUPTION 2026-09-25 ~15:55 UTC: account session limit (HTTP 429, reset 16:20 UTC) stopped every running agent; container and worktrees survived, local Postgres restarted. State recovered from git: T18 fix committed (c5e16d8, re-review lost); T20 fix uncommitted in t20; T22 implementation uncommitted in t22 (was at final gates); T23 review came back before the cut (Needs fixes: errorMessage duplicated in 4 files); T24 re-review clean; T27 not started; T7 re-review and T8 review lost. Resuming with lower concurrency (≤ 6 agents).
+Task 24: fix round 1/5 (2 addressed, 0 open; commits 8c884af..c6c89d3) — scoped re-review clean
+Task 24: complete (commits bae2379..c6c89d3, review clean; feat merged into task/24:       Tests  371 passed (371)) — merged into feat/ebc-app as df991c9
+Task 23: review Needs fixes (sonnet) — Important: identical errorMessage helper in LiveBoard/TimekeepersPanel/TimingTab/WavesPanel — fix round 1/5 (resume implementer)
+Task 23: minor (deferred): re-starting an already started wave uses the same confirm copy (no "já largou às…" warning); per-row "Ativo" checkbox names not distinct; no empty state when nobody is on course
+Task 18: fix round 1 applied (commits 3c55071..c5e16d8) — scoped re-review dispatched
+Resumed after interruption: T22 (resume), T20 fix (resume), T23 fix round 1 (resume), T7 re-review (retry), T18 re-review, T8 review (retry); T27 on hold until a slot frees

@@ -228,3 +228,134 @@ Every file is in the brief's Files block, is `src/test/setup.ts`, or is a new te
    `eventShell.test.tsx` shows the pattern. I kept this fail-fast behavior on purpose: a silent fallback URL would let an unmocked test hit `127.0.0.1:54321`. Adding a `.env.test` is outside my Files block.
 2. **The build warns that the single chunk is larger than 500 kB** (605 kB, 177 kB gzip). This comes mostly from supabase-js, React, the router and TanStack Query, not from the stubs. Route-level `React.lazy` or `manualChunks` would be the fix, but `vite.config.ts` belongs to Task 27 (PWA), and splitting stub pages now gains nothing. Worth revisiting once the timekeeper page is real, because it is served to phones at the trackside.
 3. **`useClock` is a process-wide singleton with an app-lifetime interval and listener.** This is what the brief asks for. Tests that need a fresh clock should use `vi.resetModules()` plus a dynamic import, as in `useClock.test.ts`.
+
+## Fix round 1
+
+**Status: DONE.** Commit `a647630` fix(app): resilient session restore, request timeouts, fresh timekeepers. It sits on top of `3cd4f76`. Nothing was pushed.
+
+Scope: review Important 1 and Rulings 32, 33, 34 and 36. The other review minors are deferred, as instructed.
+
+The work followed TDD. The new tests were written first and failed: 27 failures across `api.test.ts`, `supabase.test.ts`, `auth.test.tsx` and `useEventData.test.tsx`, including `supabaseUrl is required.`. Then came the implementation.
+
+### Important 1: session restore (`src/features/auth/session.tsx`)
+
+- **Transient `getSession()` errors now retry.** The error from `getSession()` is no longer ignored. On an offline reload with an expired token, supabase-js returns `{session: null, error}`, and the error is transient (`AuthRetryableFetchError`, a `TypeError`, status 0 or ≥ 500). In that case supabase-js keeps the session in storage, so the status stays `loading` and we retry. Any other `getSession` error means supabase-js has already removed the session, so the status becomes `anon`. I checked both paths in auth-js 2.117.1: `_callRefreshToken` removes the session only for non-retryable errors.
+- **The session is dropped only when the server refuses it.** That means HTTP 401, `PGRST301` or `PGRST303` (the new `ApiError.status` field carries the HTTP status), or `42501`, which gives `forbidden` as before. Everything else stays `loading` and retries with backoff: offline, 5xx, `PGRST002`, a captive portal, or an unexpected error. The backoff starts at 3 s, doubles, and is capped at 30 s. Retries are single-flight.
+- **`dropSession()` now uses `signOut({ scope: 'local' })`.** This covers the 42501 path, the refused-JWT path, and the user's own "Sair". A problem on one device no longer revokes the organizer's other sessions.
+- **The auth listener re-runs the restore after a token refresh or a sign-in elsewhere.** On `TOKEN_REFRESHED` or `SIGNED_IN`, while the status is `loading` or `anon`, it runs the restore again. The call is deferred with `setTimeout(0)` because supabase-js calls listeners while holding its auth lock. The provider's own `signIn` is excluded through a `signingIn` ref, so the profile is not loaded twice. `SIGNED_OUT` also cancels a pending retry.
+- **Tests:** 9 new ones in `auth.test.tsx`, in a nested describe "restoring a stored session" with fake timers:
+  - A retryable `getSession` error stays `loading`, calls no sign-out, and recovers on the 3 s retry.
+  - `TOKEN_REFRESHED` recovers the session immediately.
+  - A 503 `PGRST002` during `admin_me` does not sign out, retries at 3 s and then 6 s, and ends as `organizer`.
+  - `PGRST301`, `PGRST303` and a plain 401 each sign out with `{scope:'local'}` and become `anon`.
+  - A refused refresh (`refresh_token_not_found`) becomes `anon` with no retries.
+  - A `SIGNED_IN` from another tab loads the organizer.
+  - The provider's own sign-in loads the profile once, not twice.
+- **Updated tests:** the 42501 test and the "Sair" test now assert `signOut` was called with `{ scope: 'local' }`.
+- **Test mock change:** the rpc mock now returns a builder with `.abortSignal()`, because of item 4.
+
+### Ruling 32: `.env.test`
+
+- **The file:** `.env.test` at the repo root contains `VITE_SUPABASE_URL=http://127.0.0.1:54321` and `VITE_SUPABASE_KEY=sb_publishable_local_dev`. These are the local, non-secret values from `.env.e2e`, under the same variable names as `.env.development`. The file is committed; `.gitignore` does not match it.
+- **New `src/lib/supabase.test.ts` (2 tests):** the real `./supabase` imports in Vitest, and the brief's client options are in effect: `storageKey 'ebc.auth'`, `persistSession`, `autoRefreshToken`, and `detectSessionInUrl: false`.
+- **Production build unaffected:** I checked that `dist/` contains `wlishmznbhhcqzncdxnq.supabase.co` and no `127.0.0.1:54321`.
+- **The earlier concern 1 (importing the real client throws) is resolved.** The shell tests still mock the client so that no real GoTrue client is created.
+
+### Ruling 33: fresh timekeepers (`src/hooks/useEventData.ts`)
+
+- **Unknown timekeeper:** when a live delta brings a mark whose `timekeeper_id` is not null and not in `agg.timekeepers`, the hook calls `refresh()`. It uses the same guard as a version change: skipped while a fetch is already running.
+- **30 s full refetch while `live`:** skipped while `document.hidden` or while a fetch is in flight.
+  - **Why not TanStack's `refetchInterval`:** I tried it first. Its timer restarts on every cache update (`QueryObserver.onQueryUpdate` → `#updateTimers`), so the 2 s delta poll kept postponing it and it never fired. I confirmed this with a probe, so the hook uses an explicit interval effect instead.
+  - **Overlap with a delta poll:** handled by the existing check that detects a refetch landing mid-poll. The test shows the next delta poll continues from the refetched `server_now − 10 s`, and the refetched timekeepers survive the delta polls that follow.
+- **Tests:** 3 new ones in `useEventData.test.tsx`:
+  - An unknown timekeeper triggers a refetch. Known timekeepers and organizer marks (null `timekeeper_id`) do not.
+  - Live tabs refetch every 30 s, with polls continuing on the refetched lists, and not while hidden.
+  - Idle tabs never do the 30 s refetch.
+
+### Ruling 34: request timeouts (`src/lib/api.ts`)
+
+- **Timeouts:** every RPC is awaited as `supabase.rpc(...).abortSignal(signal)`. The default timeout is 15 s; `server_time` gets 5 s.
+- **Why `AbortController` + `setTimeout` instead of `AbortSignal.timeout(ms)`, as the ruling proposed:**
+  1. `AbortSignal.timeout` is missing on Safari < 16, which older timekeeper iPhones may run. There every RPC would throw and be mapped to "no connection".
+  2. Its timer cannot be cleared once the answer arrives.
+  3. I confirmed with a probe that Vitest fake timers do not drive it under jsdom, so the required timeout test would be impossible.
+
+  The timer is cleared in `finally`.
+- **Error mapping:** an aborted request resolves in postgrest-js as `status: 0` and maps to `ApiError('Sem conexão com o servidor','network')`. A rejected `AbortError` or `TimeoutError` maps to the same error.
+- **`ApiError` now also carries `status: number | null`.** It is an additive, optional third constructor argument.
+- **Tests:** 5 new ones in `api.test.ts`, all with fake timers:
+  - A never-answering RPC is still pending at 14 999 ms and fails as a network `ApiError` at 15 000 ms.
+  - `server_time` gives up at 5 s.
+  - An abort that rejects (rather than resolves) maps to network too.
+  - The timer is cleared after a normal answer (`vi.getTimerCount() === 0`) and the RPC received an `AbortSignal`.
+  - A 401 keeps its HTTP status on the `ApiError`.
+
+### Ruling 36: shell tests independent of the stub pages (`src/features/events/eventShell.test.tsx`)
+
+- **Markers:** every page module the routes lead to is replaced with a tiny marker `<div data-testid="page-<id>">`, created through a hoisted `vi.mock` helper. That is 15 pages: PublicHome, EventsPage, EventGeneralTab, the 5 other tabs, AthletesPage, AthleteProfilePage, HelpPage, SettingsPage, TimekeeperPage, PublicEventPage, PublicAthletePage. The assertions check the markers instead of stub text.
+- **Context check:** the Geral marker renders `useEventContext().agg.event.name`, which proves the tab outlet renders inside the event context.
+- **Coverage kept or extended:** the tab tests also check the event header, and the public-route tests check that the organizer Layout is absent.
+- **Verified:** I temporarily replaced three stub pages with components that throw, and the shell tests still passed (29/29). Stubs restored.
+- **No other test asserted stub text** (checked with grep).
+
+### Test evidence (clean tree at `a647630`)
+
+```
+$ npx vitest run
+ RUN  v5.0.1 /home/user/ebc-wt/t17
+
+ Test Files  24 passed (24)
+      Tests  287 passed (287)
+   Start at  13:06:38
+   Duration  23.84s (environment 65%, tests 15%, setup 12%, transform 6%, import 3%)
+
+Environment  jsdom was created 24 times · 41.12s total, 65% of tracked time
+             create it once per worker with pool: 'vmThreads' (keeps per-file isolation) or isolate: false (shares it across files)
+             learn more: https://vitest.dev/guide/improving-performance#test-environments
+
+$ npm run typecheck
+> endurance-base-club@1.0.0 typecheck
+> tsc --noEmit -p tsconfig.json
+(exit 0, no diagnostics)
+
+$ npm run build
+> endurance-base-club@1.0.0 build
+> vite build
+vite v8.3.1 building client environment for production...
+✓ 229 modules transformed.
+dist/index.html                   0.81 kB │ gzip:   0.44 kB
+dist/assets/index-3woTnV0h.css   20.76 kB │ gzip:   5.08 kB
+dist/assets/index-Dtdq1Ine.js   605.94 kB │ gzip: 177.08 kB
+(!) Some chunks are larger than 500 kB after minification. [Ruling 30: T27]
+✓ built in 1.21s
+```
+
+- The output is pristine: no stderr and no act() warnings.
+- Task-owned tests: 134 in total.
+
+| File | Tests |
+|---|---|
+| `api.test.ts` | 47 |
+| `supabase.test.ts` | 2 |
+| `auth.test.tsx` | 33 |
+| `useClock.test.ts` | 6 |
+| `useEventData.test.tsx` | 15 |
+| `eventShell.test.tsx` | 29 |
+| `setup.test.tsx` | 2 |
+
+- The task test files passed 3 repeated runs (134/134 each).
+
+### Files changed in `a647630`
+
+- `.env.test` (new; granted by Ruling 32)
+- `src/lib/api.ts`, `src/lib/api.test.ts`
+- `src/lib/supabase.test.ts` (new)
+- `src/features/auth/session.tsx`, `src/features/auth/auth.test.tsx`
+- `src/hooks/useEventData.ts`, `src/hooks/useEventData.test.tsx`
+- `src/features/events/eventShell.test.tsx`
+
+### Notes and concerns (none blocking)
+
+1. **Contract addition:** `ApiError` gained `status: number | null` as an optional third constructor argument. Existing `new ApiError(msg, code)` callers are unaffected.
+2. **Timeout implementation:** it uses `AbortController` + `setTimeout` rather than the literal `AbortSignal.timeout`. The reasons are Safari < 16 support and testability, as explained under Ruling 34.
+3. **"Sair" offline with an expired token (not fixed; outside this round's scope):** supabase-js cannot refresh the token, so its `signOut` returns an error without clearing storage. The screen shows `anon`, but the session comes back on the next online reload. This is a supabase-js behavior, confirmed in auth-js `_signOut`. The fix would be to clear the stored `ebc.auth` key when `signOut` returns an error; it could be a follow-up minor.

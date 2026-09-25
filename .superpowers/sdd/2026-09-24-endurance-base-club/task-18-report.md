@@ -123,3 +123,110 @@ Nothing else touched (`git diff --stat` against `bae2379` shows exactly these 4 
 1. **9 pre-existing failures in `src/features/events/eventShell.test.tsx` after this change — expected, out of my scope.** That file (Task 17's, not in my Files block) asserts on the *stub* placeholder text (`"EventsPage"`, `"HelpPage"`, `"SettingsPage"`, `"EventGeneralTab"`) as a routing smoke check. Replacing those four stubs with real components — exactly what this brief and `App.tsx`'s comment ("your page is currently a stub there — replace the stub file") ask for — necessarily removes that placeholder text, so those 9 assertions now fail. I verified none of them are testing functional regressions in `EventLayout`/routing/polling itself: each failure is the test's own literal-text checkpoint (e.g. `expect(await screen.findByText('EventGeneralTab'))`) failing before it can reach its real assertions. Per the wave-2 shared context ("small fixes to the shell may arrive later — build against the contracts, not against incidental details"), I did not touch that file; the same collision will recur for every other wave-2a task as it replaces its own stub, so `eventShell.test.tsx` will need updating once during integration (dropping the stub-text checks in favor of routing/structure assertions, e.g. by test id or heading role) — flagging for the controller rather than guessing at the fix myself.
 2. **`Duplicar` destination is an assumption** (see Decision 1) — the brief doesn't name it. If the controller intends `/eventos/:id/provas` instead (matching "Novo evento"), it's a one-line change in `EventsPage.tsx`'s `onDuplicated` callback.
 3. **Password-generator modulo bias.** `57` doesn't evenly divide `2^32`, so the very last alphabet character is drawn with a ~1.16×10⁻⁸ relatively lower probability than the others — cryptographically irrelevant for a 12-char temporary password, but noting it since a security-focused reviewer might ask.
+
+## Fix round 1
+
+Addresses the review's one Important finding and the controller's promoted Minor (Ruling 40). Both fixed on the same `task/18` branch, same worktree.
+
+### 1. (Important) De-duplicated `parseLevels`, `errorMessage`, `copyToClipboard`
+
+- **New file `src/features/events/eventHelpers.ts`** — one exported implementation of each:
+  - `parseLevels(text): string[]` (moved from `EventsPage.tsx`, unchanged).
+  - `errorMessage(err, fallback): string` (moved, unchanged; was duplicated verbatim in `EventsPage.tsx`, `EventGeneralTab.tsx` and `SettingsPage.tsx`).
+  - `copyToClipboard(text): Promise<boolean>` (moved, unchanged; was duplicated verbatim in `EventGeneralTab.tsx` and `SettingsPage.tsx`).
+- **`EventsPage.tsx`**: now `import { errorMessage, parseLevels } from './eventHelpers'`; its own copies deleted.
+- **`EventGeneralTab.tsx`**: now `import { copyToClipboard, errorMessage, parseLevels } from './eventHelpers'`; its own copies deleted.
+- **`SettingsPage.tsx`**: now `import { copyToClipboard, errorMessage } from '../events/eventHelpers'` (cross-folder import, as the controller's note explicitly sanctioned: "keep ONE exported implementation... and import it elsewhere"); its own copies deleted.
+- **New file `src/features/events/eventHelpers.test.ts`** (6 tests): `parseLevels` — the brief's own example (`"Elite, Base, Elite"` → `['Elite','Base']`), extra whitespace/empty segments, case sensitivity, a single value, and empty/blank input; `errorMessage` — a plain `Error`'s message, falling back when the message is empty, and falling back for a string/plain object/`null`/`undefined` (none of which are an `Error`). Kept deliberately independent of `lib/api`'s `ApiError` class (a comment explains why: importing `lib/api` pulls in `lib/supabase`, which throws without `VITE_SUPABASE_URL` outside a real build — the same hazard the controller flagged for `events.test.tsx`); a plain `Error` covers the same code path since `ApiError extends Error`.
+
+### 2. (Ruling 40) `EventGeneralTab` no longer discards unsaved edits on a background refetch
+
+Rewrote the reseed effect in `EventGeneralTab.tsx`:
+
+- Added `dirty` (has the organizer touched any field since the form was last seeded?) and `serverChanged` (the server's `event` changed while the form was dirty) state, plus an `eventIdRef` to detect a genuine navigation to a *different* event.
+- The `useEffect` keyed on `event` now only re-seeds the form (via a new `seedFromEvent(ev)` helper) when `event.id` changed (a different event — always safe to reseed) **or** the form isn't dirty. When the form is dirty on the *same* event and `event` still changed identity — i.e., something else (another tab, another organizer, a live poll) saved over it — it sets `serverChanged` and leaves the organizer's typed values alone. `dirty` is read in the effect without being a dependency (commented why): the effect must fire only on an `event` change, never merely because the organizer started typing.
+- Every field's `onChange` now goes through a small `edited(setter, value)` wrapper that also calls `setDirty(true)`.
+- `onSubmit` clears `dirty`/`serverChanged` **before** `await refresh()`, so the aggregate update that follows a successful save is never mistaken for someone else's concurrent change.
+- New UI: when `serverChanged`, a warning-toned banner at the top of the form — "Os dados do evento mudaram em outro lugar — salve para sobrescrever ou recarregue." — with a "Recarregar" button that reseeds from the current `event` and clears both flags (`reloadFromServer`).
+
+### Tests (added to `src/features/events/events.test.tsx`, in the `EventGeneralTab` describe block)
+
+- A new `renderTabDirect(ctx)` helper wraps the tree in a single, stable `<MemoryRouter>` (unlike the existing routes-table-based `renderTab`, whose `createMemoryRouter` instance would need to change to swap the context value, which risks a full remount and defeats the point of the test). It returns `rerenderWithContext(next)`, which calls RTL's `rerender` with the same tree shape but a new `EventContext.Provider value`, mirroring exactly how the real `EventProvider` re-renders `EventGeneralTab` with a fresh `agg`/`event` on a poll or refetch — no component type changes, so `EventGeneralTab`'s own `useState` genuinely survives across the rerender, the same way it would in the app.
+- **"keeps unsaved edits when the event changes elsewhere, and offers to reload (Ruling 40)"**: types a new name, then `rerenderWithContext` with a *second*, same-id event carrying a different name (simulating a concurrent save elsewhere) → the typed value survives and the warning banner appears; clicking "Recarregar" then adopts the new server value and the banner disappears.
+- **"re-seeds freely from a fresh event while the form is untouched"**: no edits made before the `rerender` → the form silently picks up the new value, no banner (guards against the fix being overly conservative).
+- **"does not warn about its own save landing"**: edits the name, saves (mocked `saveEvent`), then `rerenderWithContext`s with the aggregate a real `refresh()` would have produced (same edited name) → no banner, confirming the save-then-refetch path isn't mistaken for an external change.
+
+### TDD evidence
+
+Stashed only `EventGeneralTab.tsx` (leaving the new tests in place) to reproduce Ruling 40 against the previously-committed unconditional-reseed version:
+
+```
+$ git stash push -- src/features/events/EventGeneralTab.tsx
+$ npx vitest run src/features/events/events.test.tsx
+ Test Files  1 failed (1)
+      Tests  1 failed | 18 passed (19)
+
+ FAIL  … > EventGeneralTab > keeps unsaved edits when the event changes elsewhere, and offers to reload (Ruling 40)
+Error: expect(element).toHaveValue(Nome em edição)
+Expected the element to have value:
+  Nome em edição
+Received:
+  Copa EBC (renomeada em outro lugar)
+```
+Exactly the reported bug, and only that one test fails (the other two new tests and everything else stay green, confirming they don't accidentally depend on the fix).
+
+```
+$ git stash pop
+$ npx vitest run src/features/events/events.test.tsx src/features/events/eventHelpers.test.ts
+ Test Files  2 passed (2)
+      Tests  25 passed (25)
+```
+Repeated 3× with no flakiness.
+
+### Gate outputs
+
+```
+$ npx vitest run src/features/events
+ Test Files  1 failed | 2 passed (3)
+      Tests  9 failed | 45 passed (54)
+```
+The 9 failures are the same pre-existing `eventShell.test.tsx` stub-text assertions noted in the original report (Task 17's file, fixed on its side per the coordinator's note) — nothing here regressed; my own two files (`events.test.tsx`, `eventHelpers.test.ts`) are 45/45.
+
+```
+$ npx vitest run          # full repo
+ Test Files  1 failed | 26 passed (27)
+      Tests  9 failed | 304 passed (313)
+```
+304 passing (was 295; +9 from this round: 3 new `EventGeneralTab` tests + 6 new `eventHelpers` unit tests), same 9 pre-existing `eventShell.test.tsx` failures, ignored per the coordinator's note.
+
+```
+$ npm run typecheck
+> tsc --noEmit -p tsconfig.json
+(exit 0, no diagnostics)
+```
+
+```
+$ npm run build
+> vite build
+✓ 230 modules transformed.
+dist/index.html                   0.81 kB │ gzip:  0.44 kB
+dist/assets/index-*.css          22.13 kB │ gzip:  5.36 kB
+dist/assets/index-*.js          628.68 kB │ gzip: 182.21 kB
+✓ built in ~0.9s
+```
+
+### Files changed (this round)
+
+- Modified: `src/features/events/EventsPage.tsx`, `src/features/events/EventGeneralTab.tsx`, `src/features/settings/SettingsPage.tsx`, `src/features/events/events.test.tsx`
+- New: `src/features/events/eventHelpers.ts`, `src/features/events/eventHelpers.test.ts`
+
+### Self-review findings
+
+- Re-checked every caller of the three moved helpers by name (`grep -n "function parseLevels\|function errorMessage\|function copyToClipboard"` across the four screen files and `eventHelpers.ts`) — exactly one implementation of each, in `eventHelpers.ts`; nothing left behind.
+- Double-checked the save-success ordering claim (`setDirty(false)` before `await refresh()`) actually prevents the false-positive banner with a dedicated test ("does not warn about its own save landing") rather than just reasoning about it.
+- Confirmed the "untouched form" path still re-seeds freely (its own test), so the fix doesn't overshoot into never updating the form from live data.
+- No new test ids, no UI copy in English, no new colors (the banner uses the existing `warning` token via `border-warning/40 bg-warning/10 text-warning`, consistent with `Badge`'s own warning tone classes elsewhere in this codebase).
+
+### Concerns
+
+- None new. The pre-existing `eventShell.test.tsx` stub-text collision (see the original report's Concern 1) is explicitly deferred to Task 17's side per this round's instructions.
