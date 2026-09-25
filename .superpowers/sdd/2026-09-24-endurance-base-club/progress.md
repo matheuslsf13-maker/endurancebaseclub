@@ -239,3 +239,7 @@ Task 18: fix round 1/5 (2 addressed, 0 open — eventHelpers.ts shared helpers, 
 Task 18: complete (commits bae2379..c5e16d8, review clean; feat merged into task/18: 396 tests green) — merged into feat/ebc-app as 943c7b5
 Task 23: fix round 1 applied (merge 51a34e6 + 03af4bf timingHelpers.ts; 393 tests green) — scoped re-review dispatched
 Task 20: fix round 1 applied (merge e95faf2 + 626ad10; 382 tests green) — scoped re-review dispatched
+Task 8: review Approved (sonnet)
+- Ruling 43: pub_event keeps returning discarded marks too (brief/T7 text: "all, including discarded so clients can drop them") over spec §6's "não descartadas" — live deltas must be able to carry a discard so public clients remove a mark they already hold; payload already strips audit fields — cost if wrong: a few extra rows in the public payload.
+Task 8: minor (deferred): timekeeper named "Ana" collides with athlete "Ana" in the flow (brief-mandated names)
+Task 8: complete (commits 2427895..fc400e9, review clean; feat merged into task/8, integration green) — merged into feat/ebc-app as 8c46b43
