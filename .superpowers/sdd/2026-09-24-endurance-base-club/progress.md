@@ -249,3 +249,5 @@ Task 20: fix round 1/5 (2 addressed, 0 open — AthleteForm stopPropagation + ne
 Task 20: complete (commits bae2379..626ad10, review clean; feat merged into task/20:       Tests  443 passed (443)) — merged into feat/ebc-app as 221d2db
 Wave 2b: T21 (sonnet) and T26 (sonnet) dispatched from feat/ebc-app 221d2db (worktrees /home/user/ebc-wt/t21, t26)
 T28 prep: agent-browser 0.27 smoke-tested OK with AGENT_BROWSER_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome (the path in the brief exists here); Chrome's background calls to google.com are refused by the egress proxy — harmless
+Task 22: implemented d7250c4 + merge 61ed433 (feat 2b0471a) + e0882f9 (390 px fixes); merged tree 431 tests green, typecheck, build — review dispatched (2b0471a..e0882f9, opus)
+Task 22: concerns → deferred to T28/final review: kit Toast tones are see-through and the action row squeezes the message on phones (T22 worked around it locally); two tabs of the same tk link on one device can overwrite each other's saved marks list (each tab still sends its own)
