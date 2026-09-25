@@ -219,35 +219,62 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   function showAssigned(r: Extract<AssignResult, { ok: true }>) {
     if (assignToastId.current) toast.dismiss(assignToastId.current);
     const markId = r.markId;
-    assignToastId.current = toast.show({
+    const warned = r.warning !== null || r.suggestion.warning !== null;
+    let id = '';
+    const act = (fn: () => void) => () => {
+      toast.dismiss(id);
+      fn();
+    };
+    // Neutral tone (opaque) and the actions under the text: the kit's tinted tones are see-through
+    // and its action row leaves the message a narrow column on a phone.
+    id = toast.show({
       testid: 'assign-toast',
-      tone: r.warning || r.suggestion.warning ? 'warning' : 'success',
       durationMs: 8_000,
       message: (
-        <div className="flex flex-col gap-0.5">
-          <p className="font-semibold">{r.message}</p>
-          {r.warning && r.warning !== r.message && <p>{r.warning}</p>}
+        <div className="flex flex-col gap-1">
+          <p className="font-semibold">
+            {warned && <span aria-hidden="true" className="text-warning">⚠ </span>}
+            {r.message}
+          </p>
+          {r.warning && r.warning !== r.message && <p className="text-warning">{r.warning}</p>}
           <p className="tabular text-xs text-muted">Marcação das {clockText(Date.parse(r.ts))}</p>
+          <div className="mt-1 flex flex-wrap gap-2">
+            <Button
+              size="sm" variant="secondary" data-testid="toast-undo"
+              onClick={act(() => {
+                tk.unassign(markId);
+                setSel({ mode: 'id', id: markId });
+              })}
+            >
+              Desfazer
+            </Button>
+            {r.race.legs.length > 1 && (
+              <Button size="sm" variant="secondary" data-testid="toast-change-leg" onClick={act(() => setLegSheet(markId))}>
+                Trocar perna
+              </Button>
+            )}
+          </div>
         </div>
       ),
-      actions: [
-        {
-          label: 'Desfazer', testid: 'toast-undo',
-          onClick: () => {
-            tk.unassign(markId);
-            setSel({ mode: 'id', id: markId });
-          },
-        },
-        ...(r.race.legs.length > 1
-          ? [{ label: 'Trocar perna', testid: 'toast-change-leg', onClick: () => setLegSheet(markId) }]
-          : []),
-      ],
+    });
+    assignToastId.current = id;
+  }
+
+  /** Error toast: opaque neutral tone (see showAssigned) announced as an alert by its content. */
+  function showError(message: string) {
+    toast.show({
+      message: (
+        <p role="alert" className="font-semibold">
+          <span aria-hidden="true" className="text-danger">⚠ </span>
+          {message}
+        </p>
+      ),
     });
   }
 
   function report(r: AssignResult) {
     if (r.ok) showAssigned(r);
-    else toast.show({ message: r.error, tone: 'danger' });
+    else showError(r.error);
   }
 
   function doMark() {
@@ -262,7 +289,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     if (assignment) {
       // The bib typed belongs to this mark: select it so the corrected bib goes to it, not to an
       // older mark still waiting.
-      toast.show({ message: assignment.error, tone: 'danger' });
+      showError(assignment.error);
       setSel({ mode: 'id', id: markId });
       return;
     }
@@ -288,12 +315,12 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     e.preventDefault();
     const text = bib.trim();
     if (!text) {
-      toast.show({ message: 'Digite o nº de peito', tone: 'warning' });
+      toast.show({ message: 'Digite o nº de peito' });
       return;
     }
     const target = selectedId ?? tk.unassigned[0]?.id ?? null;
     if (!target) {
-      toast.show({ message: 'Toque em MARCAR primeiro', tone: 'warning' });
+      toast.show({ message: 'Toque em MARCAR primeiro' });
       return;
     }
     const r = tk.assignBib(target, text);
@@ -409,9 +436,10 @@ function Header({ tk }: { tk: Timekeeper }) {
         <Logo size={28} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold">{tk.session?.event.name}</p>
-          <p data-testid="tk-sync-status" role="status" aria-live="polite" className="flex items-center gap-1.5 text-xs text-muted">
-            <span aria-hidden="true" className={`inline-block h-2 w-2 shrink-0 rounded-full ${dot}`} />
-            <span className="truncate">{text}</span>
+          <p data-testid="tk-sync-status" role="status" aria-live="polite" className="flex items-start gap-1.5 text-xs leading-tight text-muted">
+            <span aria-hidden="true" className={`mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full ${dot}`} />
+            {/* Wraps instead of truncating: the offline count is what the timekeeper must see. */}
+            <span>{text}</span>
           </p>
         </div>
         <ThemeToggle />
