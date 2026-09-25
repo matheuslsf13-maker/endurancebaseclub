@@ -152,3 +152,80 @@ explicitly since it's outside my stated 3-file ownership.
   informational — worth a quick look by the controller, but I don't believe either blocks merging.
 - I did not touch `supabase/migrations/0005_timing.sql` / `tk_open` (Task 6's fix round owns that
   concurrently), matching the brief.
+- See "Amendment (Ruling 35)" below for a new, deliberate consequence: the local dev shim's own
+  smoke test now partially fails because of the stricter fix, and I did not touch it (see there).
+
+## Amendment (Ruling 35)
+
+Commit `598995f` "fix(db): revoke default PUBLIC execute on future functions", on top of the
+original `4f48716`.
+
+### What changed
+- `supabase/migrations/0006_public_grants.sql`: added
+  `alter default privileges revoke execute on functions from public;` (the role-global form, no
+  `in schema`) right after the existing schema-scoped default-privilege revokes, with a comment
+  explaining why the schema-scoped form alone doesn't work and noting this line is not
+  schema-scoped so it only needs to be set once (unlike the per-migration `DO` re-grant walk).
+- `supabase/tests/60_security.sql`: added a check, right after the `owner`/`stranger` setup and
+  before the `as_anon()` switch (so it runs as the superuser, which has `CREATE` on schema
+  `public`): `create function public.zz_probe() returns int language sql as 'select 1'`, then
+  asserts `has_function_privilege('anon', 'public.zz_probe()', 'execute')` and the same for
+  `authenticated` are both `false`. It rolls back with the rest of the file, confirmed with a
+  direct query afterward (`select proname from pg_proc where proname = 'zz_probe'` → 0 rows).
+
+### RED → GREEN
+**RED** (before adding the new `alter default privileges` line, with the new check already in
+`60_security.sql`):
+```
+FAIL supabase/tests/60_security.sql
+  ERROR: a function created after 0006 must not be executable by anon
+```
+**GREEN** (after adding the line): `EBC_DB=ebc_t7 bash scripts/test-sql.sh` → all 7 files PASS,
+reproduced on a second fresh reset.
+
+### Empirical verification of the mechanism (why Ruling 35 is correct)
+Isolated repro across three throwaway databases:
+1. `alter default privileges in schema public revoke execute on functions from public, anon;` with
+   no prior grant on record → `pg_default_acl` ends up with **zero rows** for that (owner, schema,
+   objtype); a function created afterward is still `PUBLIC`-executable (Postgres falls back to its
+   hard-coded default because there's no stored override).
+2. Same but with an explicit prior `alter default privileges in schema public grant all on
+   functions to public;` first, then the schema-scoped revoke → the `pg_default_acl` row still
+   goes back to **zero rows** (the "revoke down to nothing beyond hard-coded default" case gets
+   deleted, not stored as an explicit "no privilege" override) → same result, still
+   `PUBLIC`-executable.
+3. The role-global form (`alter default privileges revoke execute on functions from public;`, no
+   `in schema`) → `pg_default_acl` keeps a **non-empty** row (`defaclnamespace = 0`, i.e. every
+   schema) with only the owner listed → a function created afterward has `proacl` with no `PUBLIC`
+   entry, and `has_function_privilege('anon', ..., 'execute')` / `'public'` both come back `false`.
+
+Re-verified directly on `ebc_t7` post-migration that this doesn't regress `service_role`'s own
+default execute grant (Supabase's expected server-side bypass): both the schema-scoped
+(`service_role=X`, from `dev/db/bootstrap.sql`, untouched by 0006) and the new global
+(owner-only) default-ACL rows apply together to a freshly created function, giving it
+`{postgres=X, service_role=X}` with no `anon`/`authenticated`/`PUBLIC` — confirmed with
+`has_function_privilege` for all three roles.
+
+### New consequence: the local dev shim's own smoke test partially regresses
+Re-ran `npx vitest run tests/integration/shim.test.ts -c vitest.integration.config.ts` after this
+change: **2 passed, 3 failed** (previously 5/5). The three failures are exactly the tests that call
+the shim's own ad hoc `shim_echo`/`shim_fail`/`shim_bigint` functions — those are created directly
+in the test's `beforeAll` (plain `create function ...`, no explicit grant), *after*
+`db-local.sh reset` has already applied every migration including the new global revoke. Since
+those functions are created outside the app's migration/grant system, they no longer get an
+automatic `PUBLIC` execute grant either, and `anon`/`authenticated` can no longer call them through
+the shim — e.g. `shim_fail`'s RPC call now fails with "permission denied for function shim_fail"
+instead of reaching the function body's own `raise exception 'Falhou'`.
+
+This is the intended, direct consequence of closing exactly the gap Ruling 35 targets — it is not
+a bug in the migration, but it does mean `tests/integration/shim.test.ts` is no longer fully green
+against a fully-migrated database. Per the original task instructions I did **not** modify that
+test file (or `dev/db/bootstrap.sql`, which is also outside my file ownership); the trivial fix
+would be adding an explicit `grant execute on function public.shim_echo(jsonb,int),
+public.shim_fail(), public.shim_bigint() to anon, authenticated;` right after those functions are
+created in the test's `beforeAll`, but I'm leaving that call to the controller since it touches a
+file I don't own and wasn't asked of me. Flagging prominently rather than silently leaving it
+broken.
+
+Both throwaway databases created during this verification (`zz_probe3`, and the shim test's own
+`ebc_shim`) were dropped afterward; no residue left in `ebc_t7`.
