@@ -1,0 +1,276 @@
+# Review package: 12747ed..efd40e8 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+efd40e8 fix(races): normalize loaded config, share list reorder helper
+
+## Files changed
+ src/features/races/LegsEditor.tsx     |  8 +++----
+ src/features/races/RankingsEditor.tsx |  8 +++----
+ src/features/races/raceForm.test.ts   | 42 +++++++++++++++++++++++++++++++++--
+ src/features/races/raceForm.ts        | 19 +++++++++++++---
+ 4 files changed, 62 insertions(+), 15 deletions(-)
+
+## Diff
+diff --git a/src/features/races/LegsEditor.tsx b/src/features/races/LegsEditor.tsx
+index bfdded8..3f41161 100644
+--- a/src/features/races/LegsEditor.tsx
++++ b/src/features/races/LegsEditor.tsx
+@@ -1,13 +1,14 @@
+ import { Button, Input, Select } from '../../components/ui';
+ import { MODALITY_LABEL } from '../../domain/presets';
+ import type { Modality } from '../../lib/types';
++import { moveItem } from './raceForm';
+ import type { DistanceUnit, RaceFormLeg } from './raceForm';
+ 
+ const MODALITY_OPTIONS = (Object.keys(MODALITY_LABEL) as Modality[]).map((m) => ({ value: m, label: MODALITY_LABEL[m] }));
+ const UNIT_OPTIONS: { value: DistanceUnit; label: string }[] = [
+   { value: 'm', label: 'm' },
+   { value: 'km', label: 'km' },
+ ];
+ 
+ function newLeg(): RaceFormLeg {
+   return { modality: 'run', label: MODALITY_LABEL.run, distance: '', unit: 'm' };
+@@ -27,25 +28,22 @@ export function LegsEditor({ legs, onChange }: LegsEditorProps) {
+ 
+   function onModalityChange(i: number, modality: Modality) {
+     const leg = legs[i];
+     // Only replace the label when it still matched the old modality's default — a custom label
+     // the organizer typed in is left alone.
+     const label = leg.label === MODALITY_LABEL[leg.modality] ? MODALITY_LABEL[modality] : leg.label;
+     update(i, { modality, label });
+   }
+ 
+   function move(i: number, dir: -1 | 1) {
+-    const j = i + dir;
+-    if (j < 0 || j >= legs.length) return;
+-    const next = legs.slice();
+-    [next[i], next[j]] = [next[j], next[i]];
+-    onChange(next);
++    const next = moveItem(legs, i, dir);
++    if (next !== legs) onChange(next);
+   }
+ 
+   function remove(i: number) {
+     if (legs.length <= 1) return;
+     onChange(legs.filter((_, idx) => idx !== i));
+   }
+ 
+   return (
+     <div className="flex flex-col gap-3">
+       {legs.map((leg, i) => (
+diff --git a/src/features/races/RankingsEditor.tsx b/src/features/races/RankingsEditor.tsx
+index fc78edd..a1e4e88 100644
+--- a/src/features/races/RankingsEditor.tsx
++++ b/src/features/races/RankingsEditor.tsx
+@@ -1,12 +1,13 @@
+ import { Button, Checkbox, Input } from '../../components/ui';
+ import type { RankingDef, RankingDim } from '../../lib/types';
++import { moveItem } from './raceForm';
+ 
+ const DIM_ORDER: RankingDim[] = ['sex', 'age', 'level'];
+ const DIM_LABEL: Record<RankingDim, string> = { sex: 'Sexo', age: 'Faixa etária', level: 'Nível' };
+ 
+ let rankingSeq = 0;
+ function newRanking(): RankingDef {
+   rankingSeq += 1;
+   return { id: `ranking-${Date.now()}-${rankingSeq}`, name: 'Novo pódio', dims: ['sex'], size: 3 };
+ }
+ 
+@@ -27,25 +28,22 @@ export function RankingsEditor({ rankings, cumulative, hasLevels, onChange, onCu
+ 
+   function toggleDim(i: number, dim: RankingDim, checked: boolean) {
+     const rd = rankings[i];
+     const set = new Set(rd.dims);
+     if (checked) set.add(dim);
+     else set.delete(dim);
+     update(i, { dims: DIM_ORDER.filter((d) => set.has(d)) });
+   }
+ 
+   function move(i: number, dir: -1 | 1) {
+-    const j = i + dir;
+-    if (j < 0 || j >= rankings.length) return;
+-    const next = rankings.slice();
+-    [next[i], next[j]] = [next[j], next[i]];
+-    onChange(next);
++    const next = moveItem(rankings, i, dir);
++    if (next !== rankings) onChange(next);
+   }
+ 
+   function remove(i: number) {
+     onChange(rankings.filter((_, idx) => idx !== i));
+   }
+ 
+   return (
+     <div className="flex flex-col gap-3">
+       {rankings.map((rd, i) => (
+         <div key={rd.id} className="flex flex-col gap-2 rounded-xl border border-border p-3">
+diff --git a/src/features/races/raceForm.test.ts b/src/features/races/raceForm.test.ts
+index 412ebf4..3d7f8d6 100644
+--- a/src/features/races/raceForm.test.ts
++++ b/src/features/races/raceForm.test.ts
+@@ -1,15 +1,16 @@
+ import { describe, expect, it } from 'vitest';
+-import { defaultRaceConfig, RACE_PRESETS } from '../../domain/presets';
++import { defaultRaceConfig, normalizeRaceConfig, RACE_PRESETS } from '../../domain/presets';
+ import { makeRace, makeWave } from '../../domain/testing/fixtures';
++import type { RaceConfig } from '../../lib/types';
+ import {
+-  distanceToForm, formToPayload, legsSummary, parseDistance, presetToForm, raceToForm, teamSizeLabel,
++  distanceToForm, formToPayload, legsSummary, moveItem, parseDistance, presetToForm, raceToForm, teamSizeLabel,
+   validateRaceForm,
+ } from './raceForm';
+ import type { RaceForm } from './raceForm';
+ 
+ function preset(id: string) {
+   const p = RACE_PRESETS.find((x) => x.id === id);
+   if (!p) throw new Error(`preset not found: ${id}`);
+   return p;
+ }
+ 
+@@ -73,20 +74,57 @@ describe('raceToForm', () => {
+       { id: 'w1', name: 'Onda 1', position: 0, start_at: '2026-10-11T11:00:00.000Z' },
+       { id: 'w2', name: 'Onda 2', position: 1, start_at: null },
+     ]);
+   });
+ 
+   it('falls back to one "Largada geral" when the race has no wave', () => {
+     const race = makeRace({ id: 'r1' });
+     const form = raceToForm(race, []);
+     expect(form.waves).toEqual([{ name: 'Largada geral', position: 0, start_at: null }]);
+   });
++
++  it('normalizes a partial/legacy config, filling in missing keys with the team-size defaults', () => {
++    // Simulates a config saved before some keys existed (or trimmed by hand) — not something
++    // RaceConfig's own type allows, but real legacy rows in the database can look like this.
++    const legacyConfig = { cumulative: true } as unknown as RaceConfig;
++    const race = makeRace({ id: 'r1', team_size: 2, config: legacyConfig });
++    const form = raceToForm(race, []);
++
++    expect(form.config).toEqual(normalizeRaceConfig(legacyConfig, 2));
++    expect(form.config.rankings).toEqual(defaultRaceConfig(2).rankings);
++    expect(form.config.age_groups).toEqual(defaultRaceConfig(2).age_groups);
++    expect(form.config.divergence_threshold_s).toBe(defaultRaceConfig(2).divergence_threshold_s);
++    expect(form.config.time_source).toBe(defaultRaceConfig(2).time_source);
++    // The one field the legacy config did carry survives normalization.
++    expect(form.config.cumulative).toBe(true);
++  });
++});
++
++describe('moveItem', () => {
++  it('is a no-op at either bound, returning the same array reference', () => {
++    const items = [1, 2, 3];
++    expect(moveItem(items, 0, -1)).toBe(items);
++    expect(moveItem(items, 2, 1)).toBe(items);
++  });
++
++  it('swaps the item up or down, returning a new array', () => {
++    const items = ['a', 'b', 'c'];
++    const up = moveItem(items, 1, -1);
++    expect(up).toEqual(['b', 'a', 'c']);
++    expect(up).not.toBe(items);
++
++    const down = moveItem(items, 1, 1);
++    expect(down).toEqual(['a', 'c', 'b']);
++    expect(down).not.toBe(items);
++    // The input array itself is never mutated.
++    expect(items).toEqual(['a', 'b', 'c']);
++  });
+ });
+ 
+ describe('formToPayload', () => {
+   it('converts a comma-decimal km distance to whole meters', () => {
+     const form = baseForm({ legs: [{ modality: 'bike', label: 'Ciclismo', distance: '2,5', unit: 'km' }] });
+     const payload = formToPayload(form);
+     expect(payload.legs).toEqual([{ modality: 'bike', label: 'Ciclismo', distance_m: 2500 }]);
+   });
+ 
+   it('turns an empty "other" leg distance into null', () => {
+diff --git a/src/features/races/raceForm.ts b/src/features/races/raceForm.ts
+index 23c7ad6..e17a904 100644
+--- a/src/features/races/raceForm.ts
++++ b/src/features/races/raceForm.ts
+@@ -1,12 +1,12 @@
+ import { validateAgeGroups } from '../../domain/categories';
+-import { defaultRaceConfig, MODALITY_LABEL } from '../../domain/presets';
++import { defaultRaceConfig, MODALITY_LABEL, normalizeRaceConfig } from '../../domain/presets';
+ import type { RacePreset } from '../../domain/presets';
+ import type { Leg, Modality, RaceConfig, RaceRow, WaveRow } from '../../lib/types';
+ 
+ export type DistanceUnit = 'm' | 'km';
+ 
+ export interface RaceFormLeg {
+   modality: Modality;
+   label: string;
+   distance: string;
+   unit: DistanceUnit;
+@@ -80,35 +80,37 @@ function legToPayload(leg: RaceFormLeg): Leg {
+     distance_m: parseDistance(leg.distance, leg.unit),
+   };
+ }
+ 
+ function waveToForm(wave: WaveRow): RaceFormWave {
+   return { id: wave.id, name: wave.name, position: wave.position, start_at: wave.start_at };
+ }
+ 
+ /** Builds the editable form from a saved race + the event's waves (filtered to this race, in
+  * order); a race somehow left with no wave still edits as one "Largada geral" (the server would
+- * recreate it anyway per Ruling 12). */
++ * recreate it anyway per Ruling 12). The saved `config` is normalized against the race's
++ * `team_size` so a partial or legacy config (missing keys added since it was last saved) still
++ * opens with every field filled in, instead of `undefined`s reaching the editor's inputs. */
+ export function raceToForm(race: RaceRow, waves: WaveRow[]): RaceForm {
+   const raceWaves = waves
+     .filter((w) => w.race_id === race.id)
+     .slice()
+     .sort((a, b) => a.position - b.position);
+   return {
+     id: race.id,
+     event_id: race.event_id,
+     name: race.name,
+     position: race.position,
+     team_size: race.team_size,
+     legs: race.legs.map(legToForm),
+     waves: raceWaves.length > 0 ? raceWaves.map(waveToForm) : [defaultWaveForm()],
+-    config: race.config,
++    config: normalizeRaceConfig(race.config, race.team_size),
+   };
+ }
+ 
+ /** Builds a fresh form from a race preset (the "Nova prova" picker). */
+ export function presetToForm(preset: RacePreset, eventId: string): RaceForm {
+   return {
+     event_id: eventId,
+     name: preset.name,
+     position: 0,
+     team_size: preset.team_size,
+@@ -160,19 +162,30 @@ export function formToPayload(f: RaceForm): RacePayload {
+   };
+ }
+ 
+ export function teamSizeLabel(n: number): string {
+   if (n === 1) return 'Individual';
+   if (n === 2) return 'Dupla';
+   if (n === 3) return 'Trio';
+   return `Equipe de ${n}`;
+ }
+ 
++/** Swaps the item at `i` with its neighbor at `i + dir` (-1 up, 1 down), returning a new array;
++ * out of bounds is a no-op that returns `items` itself unchanged. Shared by every reorderable
++ * list in the editor (legs, podium rankings). */
++export function moveItem<T>(items: T[], i: number, dir: -1 | 1): T[] {
++  const j = i + dir;
++  if (j < 0 || j >= items.length) return items;
++  const next = items.slice();
++  [next[i], next[j]] = [next[j], next[i]];
++  return next;
++}
++
+ /** The list's one-line legs summary, e.g. "Natação 750 m → Ciclismo 20 km → Corrida 5 km". */
+ export function legsSummary(legs: Leg[]): string {
+   return legs
+     .map((l) => {
+       const { distance, unit } = distanceToForm(l.distance_m);
+       return distance ? `${l.label} ${distance} ${unit}` : l.label;
+     })
+     .join(' → ');
+ }

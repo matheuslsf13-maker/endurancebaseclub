@@ -211,3 +211,4 @@ Task 7: review Needs fixes (opus; grant model verified empirically: anon = serve
 Task 7: fix round 1/5 dispatched (resume implementer)
 Task 7: minor (deferred): pub_athlete sorts by snapshot date instead of joined ev.date; pub_live untested on an existing private slug; AthleteProfile.athlete typed AthleteRow but pub_athlete returns 5 keys (consumers must not rely on birth_date/public_profile); spec says non-discarded marks, brief/code return all (harmless)
 - Note for T29: Ruling 35's role-global default-privilege revoke applies to the role that runs apply_migration in production — verify after deploy with has_function_privilege checks as part of the SQL tests run in production.
+Task 19: fix round 1 applied (commits 12747ed..efd40e8; 36 focused tests) — scoped re-review dispatched
