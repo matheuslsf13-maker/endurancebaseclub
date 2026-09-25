@@ -4,9 +4,11 @@ select tests.as_user(tests.get('owner')::uuid);
 
 -- fixtures: one event (created private), a relay race (swim leg 0, run leg 1), two athletes (one
 -- with email/phone/birth_date, one without), a team entry bib 101, and the wave's start time set.
-do $$ declare ev jsonb; ra jsonb; a jsonb; b jsonb; e jsonb; v_t0 timestamptz := now(); begin
+-- the event's date is a fixed literal (not derived from now()) so the age_event/age_year_end
+-- assertions below can use literal expected numbers instead of re-deriving the same formula.
+do $$ declare ev jsonb; ra jsonb; a jsonb; b jsonb; e jsonb; v_t0 timestamptz := now(); v_event_date constant date := '2026-11-15'; begin
   perform tests.set('t0', v_t0::text);
-  ev := public.admin_save_event(jsonb_build_object('name', 'Copa Pública', 'date', v_t0::date, 'is_public', false));
+  ev := public.admin_save_event(jsonb_build_object('name', 'Copa Pública', 'date', v_event_date, 'is_public', false));
   perform tests.set('ev', ev ->> 'id');
   perform tests.set('slug', ev ->> 'public_slug');
 
@@ -15,7 +17,10 @@ do $$ declare ev jsonb; ra jsonb; a jsonb; b jsonb; e jsonb; v_t0 timestamptz :=
   perform tests.set('race', ra -> 'race' ->> 'id');
   perform public.admin_set_wave_start((ra -> 'waves' -> 0 ->> 'id')::uuid, v_t0);
 
-  a := public.admin_save_athlete('{"name":"Atleta A","sex":"M","email":"a@x.com","phone":"11999999999","birth_date":"1990-01-01"}'::jsonb);
+  -- birth_date is late in the year (Dec 31) so that, as of the Nov 15 event date, age_event
+  -- (35 -- the birthday hasn't happened yet that year) differs from age_year_end (36 -- plain
+  -- calendar-year difference): a discriminating fixture, not one where the two happen to agree.
+  a := public.admin_save_athlete('{"name":"Atleta A","sex":"M","email":"a@x.com","phone":"11999999999","birth_date":"1990-12-31"}'::jsonb);
   perform tests.set('ath_a', a ->> 'id');
   b := public.admin_save_athlete('{"name":"Atleta B","sex":"F"}'::jsonb);
   perform tests.set('ath_b', b ->> 'id');
@@ -53,6 +58,14 @@ do $$ declare m1 uuid := gen_random_uuid(); m2 uuid := gen_random_uuid(); begin
   perform tests.set('mark_discarded', m2::text);
 end $$;
 
+-- a resolution on leg 0 pointing at the live mark, carrying an organizer-only note and (via
+-- decided_by) the organizer's own user id: pub_event/pub_live must never leak either field.
+select tests.as_user(tests.get('owner')::uuid);
+do $$ begin
+  perform public.admin_set_resolution(tests.get('entry')::uuid, 0, 'mark', tests.get('mark_live')::uuid, null,
+    'ajuste interno da organização, não divulgar');
+end $$;
+
 -- pub_events(): now public.
 select tests.as_anon();
 do $$ begin
@@ -64,7 +77,7 @@ end $$;
 -- pub_event: event has no tk_token/tk_enabled, entries include member names but not notes,
 -- athletes never carry email/phone/birth_date, age_year_end/age_event are computed (null when
 -- there is no birth_date), marks include the discarded one and never carry clock-audit fields.
-do $$ declare pub jsonb; v_athlete jsonb; v_a jsonb; v_b jsonb; v_expected_year_end int; v_expected_age int; begin
+do $$ declare pub jsonb; v_athlete jsonb; v_a jsonb; v_b jsonb; begin
   pub := public.pub_event(tests.get('slug'));
 
   assert not (pub -> 'event' ? 'tk_token'), 'public event payload must not carry tk_token';
@@ -84,14 +97,11 @@ do $$ declare pub jsonb; v_athlete jsonb; v_a jsonb; v_b jsonb; v_expected_year_
   end loop;
 
   select el into v_a from jsonb_array_elements(pub -> 'athletes') as t(el) where el ->> 'id' = tests.get('ath_a');
-  -- computed straight from t0 (== the event's own date), not by reading public.events directly:
-  -- this whole block runs as anon, and anon has no table grants at all after 0006.
-  v_expected_year_end := date_part('year', tests.get('t0')::timestamptz::date) - date_part('year', '1990-01-01'::date);
-  v_expected_age := date_part('year', age(tests.get('t0')::timestamptz::date, '1990-01-01'::date));
-  assert (v_a ->> 'age_year_end')::int = v_expected_year_end,
-    'expected age_year_end ' || v_expected_year_end || ', got ' || (v_a ->> 'age_year_end');
-  assert (v_a ->> 'age_event')::int = v_expected_age,
-    'expected age_event ' || v_expected_age || ', got ' || (v_a ->> 'age_event');
+  -- literal expected numbers (event date 2026-11-15, birth_date 1990-12-31), not re-derived with
+  -- the same age()/extract() formula under test: age_event=35 (birthday not yet reached that
+  -- year) is deliberately one less than age_year_end=36 (plain calendar-year difference).
+  assert (v_a ->> 'age_year_end')::int = 36, 'expected age_year_end 36, got ' || (v_a ->> 'age_year_end');
+  assert (v_a ->> 'age_event')::int = 35, 'expected age_event 35, got ' || (v_a ->> 'age_event');
 
   select el into v_b from jsonb_array_elements(pub -> 'athletes') as t(el) where el ->> 'id' = tests.get('ath_b');
   assert (v_b ->> 'age_year_end') is null, 'age_year_end should be null without a birth_date';
@@ -101,6 +111,11 @@ do $$ declare pub jsonb; v_athlete jsonb; v_a jsonb; v_b jsonb; v_expected_year_
   assert not (pub -> 'marks' -> 0 ? 'device_ts'), 'pub_event marks must not carry device_ts';
   assert not (pub -> 'marks' -> 0 ? 'clock_offset_ms'), 'pub_event marks must not carry clock_offset_ms';
   assert not (pub -> 'marks' -> 0 ? 'clock_rtt_ms'), 'pub_event marks must not carry clock_rtt_ms';
+  assert not (pub -> 'marks' -> 0 ? 'org_edited'), 'pub_event marks must not carry org_edited';
+
+  assert jsonb_array_length(pub -> 'resolutions') = 1;
+  assert not (pub -> 'resolutions' -> 0 ? 'note'), 'pub_event resolutions must not carry the organizer note';
+  assert not (pub -> 'resolutions' -> 0 ? 'decided_by'), 'pub_event resolutions must not carry decided_by';
 end $$;
 
 -- pub_live: same delta semantics as admin_live, same mark projection, discarded included.
@@ -109,6 +124,11 @@ do $$ declare live jsonb; begin
   assert jsonb_array_length(live -> 'marks') = 2, 'pub_live should include the discarded mark too';
   assert jsonb_array_length(live -> 'waves') = 1;
   assert not (live -> 'marks' -> 0 ? 'device_ts');
+  assert not (live -> 'marks' -> 0 ? 'org_edited'), 'pub_live marks must not carry org_edited';
+
+  assert jsonb_array_length(live -> 'resolutions') = 1;
+  assert not (live -> 'resolutions' -> 0 ? 'note'), 'pub_live resolutions must not carry the organizer note';
+  assert not (live -> 'resolutions' -> 0 ? 'decided_by'), 'pub_live resolutions must not carry decided_by';
 
   live := public.pub_live(tests.get('slug'), now() + interval '1 hour');
   assert jsonb_array_length(live -> 'marks') = 0, 'marks after the cutoff should be empty';
