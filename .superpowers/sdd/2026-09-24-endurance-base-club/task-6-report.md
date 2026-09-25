@@ -186,3 +186,156 @@ output (no stray NOTICE/WARNING).
     re-tested here since it's entirely delegated to the already
     well-covered shared `assert_organizer()` helper (tested in
     `20_admin_events.sql`); flagging only for completeness, not as a gap.
+
+## Fix round 1
+
+Review verdict: "Needs fixes" (diff `d415c39..2bfd23f`). Commit
+`45a2f9e fix(db): replay-safe tk_sync, organizer edit precedence, discriminating tests`
+on `task/6`. Both changed files remain `supabase/migrations/0005_timing.sql`
+and `supabase/tests/40_timing.sql`, per the fix instructions.
+
+### 1. Spec gap: discriminating test for `admin_set_resolution`'s "mark" mode
+
+The old test reused `mark_assigned` for the "mark from the wrong leg" P0001
+case, but by that point in the file `mark_assigned` had already been
+discarded (line 129 at the time) *and* unassigned (line 147), so the call
+failed for the wrong reason — a mutation removing `and leg_index =
+p_leg_index` from `admin_set_resolution` still passed.
+
+Fix: added two purpose-built fixtures instead of reusing `mark_assigned`:
+- `mark_leg0_discarded` — a discarded mark directly inserted on the
+  *correct* leg (0), discriminating the `not discarded` predicate alone.
+- `mark_unassigned` reassigned via `admin_update_mark` onto `(entry, leg 1)`
+  — a genuinely non-discarded mark on the *wrong* leg, discriminating the
+  `leg_index = p_leg_index` predicate alone.
+
+Verified by mutation testing (temporarily edited, re-ran, restored):
+```
+$ sed -i '279s/.../.../ ' supabase/migrations/0005_timing.sql   # drop "and leg_index = p_leg_index"
+$ EBC_DB=ebc_t6 bash scripts/test-sql.sh
+...
+ERROR: expected error P0001 but statement succeeded: ... mark_unassigned ...
+```
+```
+$ # restore, then drop "and not discarded" instead
+$ EBC_DB=ebc_t6 bash scripts/test-sql.sh
+...
+ERROR: expected error P0001 but statement succeeded: ... mark_leg0_discarded ...
+```
+Both mutations were caught (the corresponding new test failed); the
+migration was restored to the identical original (`diff` confirmed) before
+committing.
+
+### 2. Ruling 27 — organizer edits must win over stale timekeeper replays
+
+Added `marks.org_edited boolean not null default false`. `admin_update_mark`
+now sets it to true whenever the update actually changes `entry_id` or
+`leg_index` (comparing against the row's current stored values — a
+discard-only patch, or a patch that resolves to the same values, does *not*
+flip it). `tk_sync`'s existing-row branch now checks: if `org_edited` is
+true and the incoming payload disagrees with the current stored
+`entry_id`/`leg_index`/`athlete_id`/`discarded` in any way, the mark is
+rejected with `Alterada pela organização` and nothing changes; if the
+payload matches exactly, it's accepted (idempotent). This sits after the
+existing ownership check and before the existing discard check, so it
+doesn't change behavior for marks the organizer has never repositioned.
+
+Test: registers a third timekeeper (Carla), sends a mark on leg 1, then (as
+owner) moves it to leg 0 via `admin_update_mark` (asserting `org_edited`
+flips to true) and pins a `mode='mark'` resolution to it there. Carla's
+device then replays its *original* leg-1 payload — asserted rejected with
+`Alterada pela organização`, and both the mark's `leg_index` (via
+`admin_live`) and the resolution (via `admin_live`) are asserted intact
+afterward. A final re-send matching the *current* (leg 0) state is asserted
+accepted.
+
+### 3. Ruling 28 — tk_sync robustness
+
+(a) The new-mark `insert` now ends `on conflict (id) do nothing`; if it
+loses a race (0 rows affected), the code re-selects the row and falls
+through to the existing-row path (ownership + idempotent update) instead of
+letting a unique-violation escape as a raw rejection.
+
+(b) Optional hint/audit fields never reject a mark: `device_ts`,
+`clock_offset_ms`, `clock_rtt_ms` and `athlete_id` are each cast inside
+their own nested `begin/exception` block that falls back to `null` on any
+error; `clock_offset_ms`/`clock_rtt_ms` are additionally rounded to the
+nearest integer (Postgres `round(numeric)` rounds half away from zero, so
+`12.5 → 13`); an `athlete_id` that isn't a member of the target entry (or
+there is no entry) is nulled via an `entry_members` membership check. `ts`
+remains strictly validated exactly as before (±48h of the wall clock).
+
+(c) The per-mark `exception` block now has two arms: `when sqlstate
+'P0001'` (all of the function's own validation raises default to P0001)
+appends to `rejected` as before; `when others` does nothing, leaving that
+mark out of both `accepted` and `rejected` so the device's outbox keeps it
+`pending` and retries next cycle rather than showing a raw/English error.
+
+Tests: (a) directly inserts a mark row owned by Beto (simulating a
+concurrent send that already landed) and confirms `tk_sync` sending the
+same id is accepted with 0 rejected. (b) sends a mark with
+`clock_offset_ms: 12.5` and a random, non-member `athlete_id`; asserts it's
+accepted and, from the returned `marks` delta, that `clock_offset_ms = 13`
+and `athlete_id` is null.
+
+### 4. Ruling 29 — `tk_open` must not expose `notes`
+
+`tk_open`'s `entries` projection is now `entry_json(en.id, true) - 'notes'`
+(status/level/penalty_ms untouched). Test: added `notes` to the fixture
+entry, asserted `tk_open`'s entry still has `status` but the `notes` key
+is entirely absent (`not (... ? 'notes')`).
+
+### RED
+
+Ran the full suite with the new/changed assertions against the
+*unmodified* (pre-fix) migration:
+
+```
+$ EBC_DB=ebc_t6 bash scripts/test-sql.sh
+PASS supabase/tests/00_helpers.sql
+PASS supabase/tests/10_schema.sql
+PASS supabase/tests/20_admin_events.sql
+PASS supabase/tests/30_admin_athletes_entries.sql
+FAIL supabase/tests/40_timing.sql
+...
+ERROR: tk_open entries must not expose the organizer-only notes field
+```
+
+### GREEN
+
+After applying all four fixes to `0005_timing.sql` (plus one test-only
+ordering fix — a role switch back to the owner was missing before the
+finalize-race section, since the new Ruling-28 tests end `as_anon`):
+
+```
+$ EBC_DB=ebc_t6 bash scripts/test-sql.sh
+PASS supabase/tests/00_helpers.sql
+PASS supabase/tests/10_schema.sql
+PASS supabase/tests/20_admin_events.sql
+PASS supabase/tests/30_admin_athletes_entries.sql
+PASS supabase/tests/40_timing.sql
+```
+
+Ran twice more after committing to confirm stability.
+
+### Files changed (fix round 1)
+
+- `/home/user/ebc-wt/t6/supabase/migrations/0005_timing.sql` (+87/-21):
+  new `marks.org_edited` column; `tk_open` hides `notes`; `tk_sync`
+  rewritten for replay-safety/robustness (org_edited check, `on conflict do
+  nothing` fallthrough, hint-field sanitization, split P0001/others
+  exception handling); `admin_update_mark` computes and persists
+  `org_edited`.
+- `/home/user/ebc-wt/t6/supabase/tests/40_timing.sql` (+144/-21 net): fixed
+  the discriminating-test gap; added Ruling 27 replay-safety scenario,
+  Ruling 28a/28b robustness cases, and the Ruling 29 `notes`-hiding
+  assertion; bumped the `admin_live` marks-count assertion from 3 to 4 (one
+  extra fixture mark).
+
+### Concerns
+
+None blocking. All four required findings addressed and covered by tests
+that fail without the fix (RED) and pass with it (GREEN); the two
+mutation-tested predicates were separately confirmed to catch their
+respective mutations. Minor findings from the review were left as-is per
+the fix instructions (deferred to the final review).
