@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { computeEventTiming } from './consolidation';
@@ -152,10 +152,14 @@ describe('buildEventWorkbook', () => {
 
   it('writeXlsx produces bytes openpyxl can read', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'ebc-workbook-'));
-    const file = path.join(dir, 'planilha.xlsx');
-    writeFileSync(file, writeXlsx(model));
-    const out = execSync(`python3 "${path.join(process.cwd(), 'scripts/verify-xlsx.py')}" "${file}"`, { encoding: 'utf-8' });
-    expect(out).toContain('OK 10 sheets');
+    try {
+      const file = path.join(dir, 'planilha.xlsx');
+      writeFileSync(file, writeXlsx(model));
+      const out = execSync(`python3 "${path.join(process.cwd(), 'scripts/verify-xlsx.py')}" "${file}"`, { encoding: 'utf-8' });
+      expect(out).toContain('OK 10 sheets');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
