@@ -122,3 +122,8 @@ Task 5: review dispatched (b9cb55e..d415c39, sonnet)
 Task 12: review dispatched (4df3f5f..3741efa, sonnet)
 - Ruling 19: Task 6 starts now from task/5 (d415c39) while T4's fix round and T5's review run (extends Ruling 6); T6 owns only 0005_timing.sql + 40_timing.sql, so later merges of T4/T5 fixes are conflict-free — cost if wrong: a follow-up fix if a T4/T5 fix changes entry_json or a helper T6 calls.
 Task 6: dispatched (worktree /home/user/ebc-wt/t6, branch task/6, base d415c39, sonnet)
+Task 10: fix round 1/5 (3 addressed, 0 open — Rulings 8, 10, 11; commits fb6c7d7..bc8513e) — scoped re-review clean
+Task 10: complete (commits f7c9c74..bc8513e, review clean) — merged into feat/ebc-app as 1db1227
+Task 11: complete (commits fb6c7d7..b8eb0df, review clean) — merged into feat/ebc-app as d648fac
+Task 15: feat/ebc-app (d648fac) merged into task/15 (9f0f4c1); completion implementer dispatched (sonnet) — review BASE = d648fac
+Task 17: feat/ebc-app (d648fac) merged into task/17 (8066ba6); completion implementer dispatched (opus) — review BASE = d648fac
