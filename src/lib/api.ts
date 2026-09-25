@@ -7,18 +7,25 @@ import type {
 } from './types';
 
 /** Every `api` failure: the pt-BR message to show plus the Postgres/PostgREST error code
- * (`P0001` validation, `42501` permission, …) or `'network'` when the server was unreachable. */
+ * (`P0001` validation, `42501` permission, `PGRST301` rejected JWT, …) or `'network'` when the
+ * server was unreachable or did not answer in time. `status` is the HTTP status, when there was one. */
 export class ApiError extends Error {
   code: string | null;
+  status: number | null;
 
-  constructor(message: string, code: string | null = null) {
+  constructor(message: string, code: string | null = null, status: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
+    this.status = status;
   }
 }
 
 const NETWORK_MESSAGE = 'Sem conexão com o servidor';
+/** A request hung on a bad mobile connection must not hold single-flight loops (sync, polls) forever. */
+const RPC_TIMEOUT_MS = 15_000;
+/** Clock samples are only useful with a short round trip; the next one comes soon anyway. */
+const SERVER_TIME_TIMEOUT_MS = 5_000;
 
 interface RpcResult {
   data: unknown;
@@ -28,22 +35,33 @@ interface RpcResult {
 
 function thrownToApiError(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
-  // fetch() rejects with a TypeError when the network is down, DNS fails or CORS blocks the call.
-  if (e instanceof TypeError || (e instanceof Error && e.name === 'FetchError')) return new ApiError(NETWORK_MESSAGE, 'network');
+  const name = typeof e === 'object' && e !== null ? (e as { name?: unknown }).name : undefined;
+  // fetch() rejects with a TypeError when the network is down, DNS fails or CORS blocks the call,
+  // and with an AbortError when our timeout aborts it.
+  if (e instanceof TypeError || name === 'FetchError' || name === 'AbortError' || name === 'TimeoutError') {
+    return new ApiError(NETWORK_MESSAGE, 'network');
+  }
   return new ApiError(e instanceof Error && e.message ? e.message : 'Erro inesperado');
 }
 
-async function call<T>(fn: string, args?: Record<string, unknown>): Promise<T> {
+async function call<T>(fn: string, args?: Record<string, unknown>, timeoutMs = RPC_TIMEOUT_MS): Promise<T> {
+  // AbortController + setTimeout rather than AbortSignal.timeout(): the latter is missing on
+  // Safari < 16 (older timekeeper phones) and its timer cannot be cleared once the answer arrives.
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), timeoutMs);
   let res: RpcResult;
   try {
-    res = await (args === undefined ? supabase.rpc(fn) : supabase.rpc(fn, args));
+    const query = args === undefined ? supabase.rpc(fn) : supabase.rpc(fn, args);
+    res = await query.abortSignal(timeout.signal);
   } catch (e) {
     throw thrownToApiError(e);
+  } finally {
+    clearTimeout(timer);
   }
   if (res.error) {
-    // postgrest-js does not reject on a failed fetch: it resolves with HTTP status 0 instead.
+    // postgrest-js does not reject on a failed or aborted fetch: it resolves with HTTP status 0.
     if (res.status === 0) throw new ApiError(NETWORK_MESSAGE, 'network');
-    throw new ApiError(res.error.message || 'Erro inesperado', res.error.code || null);
+    throw new ApiError(res.error.message || 'Erro inesperado', res.error.code || null, res.status ?? null);
   }
   return res.data as T;
 }
@@ -106,7 +124,7 @@ interface Api {
 export const api: Api = {
   serverTime: async () => {
     // bigint arrives as a JSON number from PostgREST; Number() also accepts a numeric string.
-    const ms = Number(await call<number | string | null>('server_time'));
+    const ms = Number(await call<number | string | null>('server_time', undefined, SERVER_TIME_TIMEOUT_MS));
     // Never hand a bogus value (null → 0) to the clock sync: every mark's time depends on it.
     if (!Number.isFinite(ms) || ms <= 0) throw new ApiError('Resposta inválida do servidor');
     return ms;
