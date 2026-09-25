@@ -8,7 +8,31 @@ language sql stable security definer set search_path = public, extensions, pg_te
   from public.entries where event_id = p_event_id
 $$;
 
--- 2. admin_list_athletes: every athlete plus participations/wins/podiums tallied from results.
+-- 2. create_individual_entry: shared internal helper for a simple team_size=1 entry — the race's
+--    first wave (by position), every leg 0..N-1, next sequential bib. Used by admin_import_athletes
+--    and admin_bulk_create_entries so bib/wave/leg rules can't drift between the two call sites.
+--    No admin_/tk_/pub_ prefix: not a client-facing RPC, kept non-callable by the least-privilege
+--    grants added later.
+create or replace function public.create_individual_entry(p_race public.races, p_athlete_id uuid) returns uuid
+language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+declare
+  v_wave_id uuid;
+  v_legs int[];
+  v_bib text;
+  v_entry_id uuid;
+begin
+  select w.id into v_wave_id from public.waves w where w.race_id = p_race.id order by w.position limit 1;
+  select array_agg(g) into v_legs from generate_series(0, jsonb_array_length(p_race.legs) - 1) as g;
+  v_bib := public.next_bib(p_race.event_id);
+  v_entry_id := gen_random_uuid();
+  insert into public.entries (id, event_id, race_id, wave_id, bib)
+  values (v_entry_id, p_race.event_id, p_race.id, v_wave_id, v_bib);
+  insert into public.entry_members (entry_id, athlete_id, position, legs)
+  values (v_entry_id, p_athlete_id, 0, v_legs);
+  return v_entry_id;
+end $$;
+
+-- 3. admin_list_athletes: every athlete plus participations/wins/podiums tallied from results.
 create or replace function public.admin_list_athletes() returns jsonb
 language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
 begin
@@ -36,7 +60,7 @@ begin
   ), '[]'::jsonb);
 end $$;
 
--- 3. admin_save_athlete: create/update; trims strings (empty -> null), lowercases email,
+-- 4. admin_save_athlete: create/update; trims strings (empty -> null), lowercases email,
 --    validates sex and birth_date.
 create or replace function public.admin_save_athlete(p_athlete jsonb) returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
@@ -160,7 +184,7 @@ begin
   return to_jsonb(a);
 end $$;
 
--- 4. admin_delete_athlete: refuses while the athlete still has entries.
+-- 5. admin_delete_athlete: refuses while the athlete still has entries.
 create or replace function public.admin_delete_athlete(p_athlete_id uuid) returns void
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 begin
@@ -171,7 +195,7 @@ begin
   delete from public.athletes where id = p_athlete_id;
 end $$;
 
--- 5. admin_import_athletes: per row (1-based), soft-validate name/sex (bad rows become error
+-- 6. admin_import_athletes: per row (1-based), soft-validate name/sex (bad rows become error
 --    entries and processing continues); match existing athlete by email or by name+birth_date;
 --    update non-null incoming fields or insert; optionally enter the athlete in a matching
 --    individual race of p_event_id. A row's own unexpected error is also reported, not raised.
@@ -195,10 +219,6 @@ declare
   v_race_name text;
   v_athlete_id uuid;
   v_race public.races;
-  v_entry_id uuid;
-  v_bib text;
-  v_wave_id uuid;
-  v_legs int[];
 begin
   perform public.assert_organizer();
 
@@ -264,14 +284,7 @@ begin
           select 1 from public.entry_members m join public.entries e on e.id = m.entry_id
           where m.athlete_id = v_athlete_id and e.race_id = v_race.id
         ) then
-          select w.id into v_wave_id from public.waves w where w.race_id = v_race.id order by w.position limit 1;
-          select array_agg(g) into v_legs from generate_series(0, jsonb_array_length(v_race.legs) - 1) as g;
-          v_bib := public.next_bib(p_event_id);
-          v_entry_id := gen_random_uuid();
-          insert into public.entries (id, event_id, race_id, wave_id, bib)
-          values (v_entry_id, p_event_id, v_race.id, v_wave_id, v_bib);
-          insert into public.entry_members (entry_id, athlete_id, position, legs)
-          values (v_entry_id, v_athlete_id, 0, v_legs);
+          perform public.create_individual_entry(v_race, v_athlete_id);
           v_entries_created := v_entries_created + 1;
         end if;
       end if;
@@ -283,7 +296,7 @@ begin
   return jsonb_build_object('inserted', v_inserted, 'updated', v_updated, 'entries_created', v_entries_created, 'errors', v_errors);
 end $$;
 
--- 6. admin_athlete_profile: the athlete plus every result they were part of, newest event first.
+-- 7. admin_athlete_profile: the athlete plus every result they were part of, newest event first.
 create or replace function public.admin_athlete_profile(p_athlete_id uuid) returns jsonb
 language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
 declare a public.athletes;
@@ -300,7 +313,7 @@ begin
   );
 end $$;
 
--- 7. admin_save_entry: create/update an entry. See spec §6 for the full rule list; order below
+-- 8. admin_save_entry: create/update an entry. See spec §6 for the full rule list; order below
 --    matches it: race -> bib -> members/legs -> athlete dedup -> level/team_name -> wave -> persist.
 create or replace function public.admin_save_entry(p_entry jsonb) returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
@@ -493,16 +506,13 @@ begin
   return public.entry_json(v_entry_id, true);
 end $$;
 
--- 8. admin_bulk_create_entries: individual races only; sequential bibs; skips already-entered athletes.
+-- 9. admin_bulk_create_entries: individual races only; sequential bibs; skips already-entered athletes.
 create or replace function public.admin_bulk_create_entries(p_race_id uuid, p_athlete_ids uuid[]) returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare
   v_race public.races;
-  v_wave_id uuid;
-  v_legs int[];
   v_athlete_id uuid;
   v_entry_id uuid;
-  v_bib text;
   v_created uuid[] := '{}';
 begin
   perform public.assert_organizer();
@@ -512,9 +522,6 @@ begin
     raise exception 'Inscrição em lote só para provas individuais' using errcode = 'P0001';
   end if;
 
-  select w.id into v_wave_id from public.waves w where w.race_id = p_race_id order by w.position limit 1;
-  select array_agg(g) into v_legs from generate_series(0, jsonb_array_length(v_race.legs) - 1) as g;
-
   foreach v_athlete_id in array coalesce(p_athlete_ids, '{}'::uuid[]) loop
     if exists (
       select 1 from public.entry_members m join public.entries e on e.id = m.entry_id
@@ -523,12 +530,7 @@ begin
       continue;
     end if;
 
-    v_bib := public.next_bib(v_race.event_id);
-    v_entry_id := gen_random_uuid();
-    insert into public.entries (id, event_id, race_id, wave_id, bib)
-    values (v_entry_id, v_race.event_id, p_race_id, v_wave_id, v_bib);
-    insert into public.entry_members (entry_id, athlete_id, position, legs)
-    values (v_entry_id, v_athlete_id, 0, v_legs);
+    v_entry_id := public.create_individual_entry(v_race, v_athlete_id);
     v_created := v_created || v_entry_id;
   end loop;
 
@@ -538,7 +540,7 @@ begin
   ), '[]'::jsonb);
 end $$;
 
--- 9. admin_update_entry_status
+-- 10. admin_update_entry_status
 create or replace function public.admin_update_entry_status(p_entry_id uuid, p_status text, p_penalty_ms int, p_notes text) returns jsonb
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 begin
@@ -555,7 +557,7 @@ begin
   return public.entry_json(p_entry_id, true);
 end $$;
 
--- 10. admin_delete_entry: marks referencing the entry become unassigned via FK (on delete set null).
+-- 11. admin_delete_entry: marks referencing the entry become unassigned via FK (on delete set null).
 create or replace function public.admin_delete_entry(p_entry_id uuid) returns void
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 begin

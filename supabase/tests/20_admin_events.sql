@@ -48,9 +48,46 @@ do $$ declare ev jsonb; ev2 jsonb; r jsonb; agg jsonb; agg2 jsonb; dup uuid; wst
   assert jsonb_array_length(agg2 -> 'waves') = 1 and (agg2 -> 'waves' -> 0 ->> 'start_at') is null;
   assert public.admin_rotate_tk_token((ev ->> 'id')::uuid) <> ev ->> 'tk_token';
 end $$;
+
+-- Ruling 14: on UPDATE, config = default_race_config(new team_size) || existing.config ||
+-- coalesce(payload.config, '{}') -- an absent config key must keep the organizer's
+-- customizations, and a later partial config must merge onto that customization instead of
+-- resetting it to bare defaults.
+do $$ declare rc1 jsonb; rc2 jsonb; rc3 jsonb; begin
+  -- customize divergence_threshold_s away from the default (3)
+  rc1 := public.admin_save_race(jsonb_build_object(
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'config', '{"divergence_threshold_s": 5}'::jsonb
+  ));
+  assert (rc1 -> 'race' -> 'config' ->> 'divergence_threshold_s')::numeric = 5;
+
+  -- save without a config key at all -> the customization must survive
+  rc2 := public.admin_save_race(jsonb_build_object(
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (v2)', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb
+  ));
+  assert (rc2 -> 'race' -> 'config' ->> 'divergence_threshold_s')::numeric = 5,
+    'omitting config on UPDATE must keep the existing customization (Ruling 14), got ' ||
+    coalesce(rc2 -> 'race' -> 'config' ->> 'divergence_threshold_s', '<null>');
+
+  -- save with a different partial config -> merges onto the existing customization
+  rc3 := public.admin_save_race(jsonb_build_object(
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (v2)', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'config', '{"same_crossing_window_s": 45}'::jsonb
+  ));
+  assert (rc3 -> 'race' -> 'config' ->> 'same_crossing_window_s')::numeric = 45;
+  assert (rc3 -> 'race' -> 'config' ->> 'divergence_threshold_s')::numeric = 5,
+    'a partial config update must merge onto the existing customization, not replace it (Ruling 14)';
+end $$;
+
 select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[]'::jsonb))$$, 'P0001');
 select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[{"modality":"fly","label":"?","distance_m":1}]'::jsonb))$$, 'P0001');
 select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[{"modality":"run","label":"C","distance_m":1000}]'::jsonb, 'config', '{"age_groups":[{"label":"a","min":20,"max":29},{"label":"b","min":25,"max":34}]}'::jsonb))$$, 'P0001');
+-- NULL bypass (Minor finding): an explicit JSON null for a validated config field must be
+-- rejected, not silently treated as "unset" (plpgsql `IF NULL` is otherwise false).
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[{"modality":"run","label":"C","distance_m":1000}]'::jsonb, 'config', '{"same_crossing_window_s": null}'::jsonb))$$, 'P0001');
 
 -- extra: changing the number of legs of a race after a non-discarded mark exists on one of its
 -- entries -> P0001 ("Não é possível alterar pernas ou tamanho da equipe depois que há marcações").
@@ -67,29 +104,68 @@ select tests.assert_raises($$select public.admin_save_race(jsonb_build_object(
   'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento', 'team_size', 2,
   'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000},{"modality":"bike","label":"Ciclismo","distance_m":20000}]'::jsonb
 ))$$, 'P0001');
--- same leg count/order/team_size still succeeds despite the mark (only structural changes are blocked);
--- resending the existing wave (by id, from tests.set('wave', ...) above) keeps updating that same
--- row instead of creating a duplicate.
+-- same leg count/order/team_size still succeeds despite the mark (only structural changes are blocked).
+-- Ruling 16: admin_save_race must NEVER take start_at from the payload for an existing wave --
+-- resending the existing wave (by id, from tests.set('wave', ...) above) with an explicit
+-- "start_at": null must not clear the start recorded earlier by admin_set_wave_start, and must
+-- keep updating that same row instead of creating a duplicate.
 do $$ declare r2 jsonb; begin
   r2 := public.admin_save_race(jsonb_build_object(
     'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (ajustada)', 'team_size', 2,
     'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
-    'waves', jsonb_build_array(jsonb_build_object('id', tests.get('wave'), 'name', 'Largada geral', 'position', 0, 'start_at', '2026-10-11T11:00:00Z'))
+    'waves', jsonb_build_array(jsonb_build_object('id', tests.get('wave'), 'name', 'Largada geral', 'position', 0, 'start_at', null))
   ));
   assert r2 -> 'race' ->> 'name' = 'Revezamento (ajustada)';
   assert jsonb_array_length(r2 -> 'waves') = 1, 'resending the same wave id should not duplicate it';
   assert (r2 -> 'waves' -> 0 ->> 'id') = tests.get('wave');
-  assert (r2 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz;
+  assert (r2 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz,
+    'admin_save_race must never take start_at from the payload (Ruling 16) -- the recorded start ' ||
+    'must survive a "start_at": null in the wave payload, got ' || coalesce(r2 -> 'waves' -> 0 ->> 'start_at', '<null>');
 end $$;
--- omitting waves entirely resets the race to a single fresh "Largada geral" wave (spec: "if the
--- payload has no waves, ensure one Largada geral exists") -- pinning this documented behavior.
+
+-- Ruling 12: an ABSENT "waves" key on UPDATE must leave existing waves -- and their start_at --
+-- completely untouched. A race-details-only save (e.g. renaming the race) must not wipe a
+-- recorded wave start.
 do $$ declare r3 jsonb; begin
   r3 := public.admin_save_race(jsonb_build_object(
-    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (ajustada)', 'team_size', 2,
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada)', 'team_size', 2,
     'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb
   ));
-  assert jsonb_array_length(r3 -> 'waves') = 1 and (r3 -> 'waves' -> 0 ->> 'start_at') is null,
-    'omitting waves resets to a single default wave';
+  assert r3 -> 'race' ->> 'name' = 'Revezamento (renomeada)';
+  assert jsonb_array_length(r3 -> 'waves') = 1,
+    'an absent waves key must leave the existing wave(s) untouched, not reset to a fresh default';
+  assert (r3 -> 'waves' -> 0 ->> 'id') = tests.get('wave'),
+    'the surviving wave must be the SAME row (same id), not a freshly created default';
+  assert (r3 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz,
+    'omitting waves must not clear the recorded start_at (Ruling 12), got ' ||
+    coalesce(r3 -> 'waves' -> 0 ->> 'start_at', '<null>');
+end $$;
+
+-- Ruling 12: an explicit JSON null for "waves" must behave exactly like an absent key.
+do $$ declare r4 jsonb; begin
+  r4 := public.admin_save_race(jsonb_build_object(
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'waves', null
+  ));
+  assert jsonb_array_length(r4 -> 'waves') = 1
+    and (r4 -> 'waves' -> 0 ->> 'id') = tests.get('wave')
+    and (r4 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz,
+    'an explicit "waves": null must behave exactly like an absent key (Ruling 12)';
+end $$;
+
+-- A present, non-empty waves array still upserts by id and deletes waves missing from it; when
+-- it ends with zero waves, a fresh "Largada geral" is created (unlike the absent/null cases above).
+do $$ declare r5 jsonb; begin
+  r5 := public.admin_save_race(jsonb_build_object(
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'waves', '[]'::jsonb
+  ));
+  assert jsonb_array_length(r5 -> 'waves') = 1
+    and (r5 -> 'waves' -> 0 ->> 'name') = 'Largada geral'
+    and (r5 -> 'waves' -> 0 ->> 'start_at') is null,
+    'a present empty waves array must delete existing waves and create a fresh default, unlike an absent/null key';
 end $$;
 
 -- organizers

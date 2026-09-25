@@ -1,0 +1,1413 @@
+# Review package: bae2379..3c55071 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+3c55071 feat(events): events dashboard, general tab, settings and help
+
+## Files changed
+ src/features/events/EventGeneralTab.tsx | 195 +++++++++++++++-
+ src/features/events/EventsPage.tsx      | 344 ++++++++++++++++++++++++++-
+ src/features/events/events.test.tsx     | 395 ++++++++++++++++++++++++++++++++
+ src/features/help/HelpPage.tsx          | 111 ++++++++-
+ src/features/settings/SettingsPage.tsx  | 328 +++++++++++++++++++++++++-
+ 5 files changed, 1369 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/src/features/events/EventGeneralTab.tsx b/src/features/events/EventGeneralTab.tsx
+index d3d6d26..7ce694c 100644
+--- a/src/features/events/EventGeneralTab.tsx
++++ b/src/features/events/EventGeneralTab.tsx
+@@ -1 +1,194 @@
+-export default function EventGeneralTab() { return <h1 className="p-6 brand-title">EventGeneralTab</h1>; }
++import { useEffect, useState } from 'react';
++import type { FormEvent } from 'react';
++import { useNavigate } from 'react-router';
++import { Button, Card, Checkbox, Input, Select, Textarea, useConfirm, useToast } from '../../components/ui';
++import { api } from '../../lib/api';
++import type { EventStatus } from '../../lib/types';
++import { useEventContext } from './EventContext';
++
++const STATUS_OPTIONS: { value: EventStatus; label: string }[] = [
++  { value: 'planejado', label: 'Planejado' },
++  { value: 'ao_vivo', label: 'Ao vivo' },
++  { value: 'encerrado', label: 'Encerrado' },
++];
++
++/** Comma-separated free text ("Elite, Base, Elite") into a trimmed, order-preserving unique list. */
++function parseLevels(text: string): string[] {
++  const out: string[] = [];
++  for (const raw of text.split(',')) {
++    const v = raw.trim();
++    if (v && !out.includes(v)) out.push(v);
++  }
++  return out;
++}
++
++function errorMessage(err: unknown, fallback: string): string {
++  return err instanceof Error && err.message ? err.message : fallback;
++}
++
++async function copyToClipboard(text: string): Promise<boolean> {
++  try {
++    if (!navigator.clipboard?.writeText) return false;
++    await navigator.clipboard.writeText(text);
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++export default function EventGeneralTab() {
++  const { agg, refresh } = useEventContext();
++  const { event } = agg;
++  const navigate = useNavigate();
++  const toast = useToast();
++  const confirm = useConfirm();
++
++  const [name, setName] = useState(event.name);
++  const [date, setDate] = useState(event.date);
++  const [location, setLocation] = useState(event.location);
++  const [description, setDescription] = useState(event.description);
++  const [levels, setLevels] = useState(event.levels.join(', '));
++  const [status, setStatus] = useState<EventStatus>(event.status);
++  const [isPublic, setIsPublic] = useState(event.is_public);
++  const [slug, setSlug] = useState(event.public_slug ?? '');
++  const [busy, setBusy] = useState(false);
++  const [deleting, setDeleting] = useState(false);
++
++  // A save (or a poll bringing a newer version) replaces `event`: pick up its fields again.
++  useEffect(() => {
++    setName(event.name);
++    setDate(event.date);
++    setLocation(event.location);
++    setDescription(event.description);
++    setLevels(event.levels.join(', '));
++    setStatus(event.status);
++    setIsPublic(event.is_public);
++    setSlug(event.public_slug ?? '');
++  }, [event]);
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    setBusy(true);
++    try {
++      await api.admin.saveEvent({
++        id: event.id,
++        name: name.trim(),
++        date,
++        location: location.trim(),
++        description,
++        levels: parseLevels(levels),
++        status,
++        is_public: isPublic,
++        public_slug: isPublic ? slug.trim() || null : event.public_slug,
++      });
++      await refresh();
++      toast.show({ message: 'Evento salvo', tone: 'success' });
++    } catch (err) {
++      toast.show({ message: errorMessage(err, 'Não foi possível salvar o evento'), tone: 'danger' });
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function onDelete() {
++    const ok = await confirm({
++      title: `Excluir "${event.name}"?`,
++      message: 'Provas, inscrições e marcações desse evento serão apagadas. Essa ação não pode ser desfeita.',
++      confirmLabel: 'Excluir evento',
++      danger: true,
++    });
++    if (!ok) return;
++    setDeleting(true);
++    try {
++      await api.admin.deleteEvent(event.id);
++      toast.show({ message: 'Evento excluído', tone: 'success' });
++      navigate('/eventos');
++    } catch (err) {
++      toast.show({ message: errorMessage(err, 'Não foi possível excluir o evento'), tone: 'danger' });
++      setDeleting(false);
++    }
++  }
++
++  const publicUrl = `${window.location.origin}/#/p/${slug}`;
++
++  async function onCopyLink() {
++    const ok = await copyToClipboard(publicUrl);
++    toast.show({ message: ok ? 'Link copiado' : 'Não foi possível copiar o link', tone: ok ? 'success' : 'danger' });
++  }
++
++  return (
++    <form onSubmit={(e) => void onSubmit(e)} noValidate className="flex flex-col gap-6">
++      <Card className="flex flex-col gap-4">
++        <h2 className="font-semibold">Dados do evento</h2>
++        <Input label="Nome do evento" required value={name} onChange={(e) => setName(e.target.value)} data-testid="event-name" />
++        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
++          <Input
++            label="Data"
++            type="date"
++            required
++            value={date}
++            onChange={(e) => setDate(e.target.value)}
++            data-testid="event-date"
++          />
++          <Input
++            label="Local"
++            value={location}
++            onChange={(e) => setLocation(e.target.value)}
++            data-testid="event-location"
++          />
++        </div>
++        <Textarea label="Descrição" value={description} onChange={(e) => setDescription(e.target.value)} />
++        <Input
++          label="Níveis"
++          hint="Ex.: Elite, Base"
++          value={levels}
++          onChange={(e) => setLevels(e.target.value)}
++          data-testid="event-levels"
++        />
++        <Select
++          label="Status"
++          value={status}
++          onChange={(e) => setStatus(e.target.value as EventStatus)}
++          options={STATUS_OPTIONS}
++        />
++      </Card>
++
++      <Card className="flex flex-col gap-4">
++        <h2 className="font-semibold">Público</h2>
++        <Checkbox
++          label="Resultados públicos"
++          checked={isPublic}
++          onChange={(e) => setIsPublic(e.target.checked)}
++          data-testid="event-public"
++        />
++        {isPublic && (
++          <div className="flex flex-col gap-2">
++            <Input label="Endereço público (slug)" value={slug} onChange={(e) => setSlug(e.target.value)} />
++            <div className="flex flex-wrap items-center gap-3">
++              <p className="break-all text-sm text-muted tabular">…/#/p/{slug || '—'}</p>
++              <Button type="button" size="sm" variant="secondary" onClick={() => void onCopyLink()}>
++                Copiar link
++              </Button>
++            </div>
++          </div>
++        )}
++      </Card>
++
++      <div>
++        <Button type="submit" loading={busy} data-testid="event-save">
++          Salvar alterações
++        </Button>
++      </div>
++
++      <Card className="flex flex-col gap-3 border-danger/40">
++        <h2 className="font-semibold text-danger">Excluir evento</h2>
++        <p className="text-sm text-muted">Remove o evento e tudo o que está registrado nele.</p>
++        <div>
++          <Button type="button" variant="danger" loading={deleting} onClick={() => void onDelete()}>
++            Excluir evento
++          </Button>
++        </div>
++      </Card>
++    </form>
++  );
++}
+diff --git a/src/features/events/EventsPage.tsx b/src/features/events/EventsPage.tsx
+index 0659745..4d84a02 100644
+--- a/src/features/events/EventsPage.tsx
++++ b/src/features/events/EventsPage.tsx
+@@ -1 +1,343 @@
+-export default function EventsPage() { return <h1 className="p-6 brand-title">EventsPage</h1>; }
++import { useMemo, useState } from 'react';
++import type { FormEvent } from 'react';
++import { Link, useNavigate } from 'react-router';
++import { useQuery, useQueryClient } from '@tanstack/react-query';
++import { Badge, Button, Card, EmptyState, Input, Modal, Spinner, useConfirm, useToast } from '../../components/ui';
++import type { BadgeTone } from '../../components/ui';
++import { api } from '../../lib/api';
++import { formatDateBR } from '../../lib/format';
++import type { EventStatus, EventSummary } from '../../lib/types';
++
++const STATUS: Record<EventStatus, { label: string; tone: BadgeTone }> = {
++  planejado: { label: 'Planejado', tone: 'neutral' },
++  ao_vivo: { label: 'Ao vivo', tone: 'success' },
++  encerrado: { label: 'Encerrado', tone: 'info' },
++};
++
++/** Comma-separated free text ("Elite, Base, Elite") into a trimmed, order-preserving unique list. */
++export function parseLevels(text: string): string[] {
++  const out: string[] = [];
++  for (const raw of text.split(',')) {
++    const v = raw.trim();
++    if (v && !out.includes(v)) out.push(v);
++  }
++  return out;
++}
++
++function errorMessage(err: unknown, fallback: string): string {
++  return err instanceof Error && err.message ? err.message : fallback;
++}
++
++export default function EventsPage() {
++  const navigate = useNavigate();
++  const toast = useToast();
++  const confirm = useConfirm();
++  const queryClient = useQueryClient();
++  const { data: events, isLoading, error } = useQuery({
++    queryKey: ['events'],
++    queryFn: () => api.admin.listEvents(),
++  });
++
++  const sorted = useMemo(
++    () => [...(events ?? [])].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)),
++    [events],
++  );
++
++  const [showCreate, setShowCreate] = useState(false);
++  const [duplicateOf, setDuplicateOf] = useState<EventSummary | null>(null);
++
++  async function refresh() {
++    await queryClient.invalidateQueries({ queryKey: ['events'] });
++  }
++
++  async function handleDelete(ev: EventSummary) {
++    const ok = await confirm({
++      title: `Excluir "${ev.name}"?`,
++      message: 'Provas, inscrições e marcações desse evento serão apagadas. Essa ação não pode ser desfeita.',
++      confirmLabel: 'Excluir',
++      danger: true,
++    });
++    if (!ok) return;
++    try {
++      await api.admin.deleteEvent(ev.id);
++      await refresh();
++      toast.show({ message: 'Evento excluído', tone: 'success' });
++    } catch (err) {
++      toast.show({ message: errorMessage(err, 'Não foi possível excluir o evento'), tone: 'danger' });
++    }
++  }
++
++  return (
++    <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <h1 className="brand-title text-xl font-semibold">Eventos</h1>
++        <Button data-testid="new-event" onClick={() => setShowCreate(true)}>
++          Novo evento
++        </Button>
++      </div>
++
++      <div className="mt-6">
++        {isLoading && (
++          <div className="flex justify-center py-16">
++            <Spinner size={32} />
++          </div>
++        )}
++        {error && (
++          <p role="alert" className="text-sm text-danger">
++            {errorMessage(error, 'Não foi possível carregar os eventos')}
++          </p>
++        )}
++        {!isLoading && !error && sorted.length === 0 && (
++          <EmptyState title="Nenhum evento ainda">Crie o primeiro evento para começar a cronometrar.</EmptyState>
++        )}
++        {!isLoading && sorted.length > 0 && (
++          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
++            {sorted.map((ev) => (
++              <EventCard
++                key={ev.id}
++                event={ev}
++                onDuplicate={() => setDuplicateOf(ev)}
++                onDelete={() => void handleDelete(ev)}
++              />
++            ))}
++          </div>
++        )}
++      </div>
++
++      <CreateEventModal
++        open={showCreate}
++        onClose={() => setShowCreate(false)}
++        onCreated={(id) => {
++          setShowCreate(false);
++          void refresh();
++          navigate(`/eventos/${id}/provas`);
++        }}
++      />
++
++      {duplicateOf && (
++        <DuplicateEventModal
++          event={duplicateOf}
++          onClose={() => setDuplicateOf(null)}
++          onDuplicated={(id) => {
++            setDuplicateOf(null);
++            void refresh();
++            navigate(`/eventos/${id}`);
++          }}
++        />
++      )}
++    </div>
++  );
++}
++
++function EventCard({
++  event,
++  onDuplicate,
++  onDelete,
++}: {
++  event: EventSummary;
++  onDuplicate(): void;
++  onDelete(): void;
++}) {
++  const status = STATUS[event.status];
++  return (
++    <Card className="flex flex-col gap-3">
++      <div className="flex items-start justify-between gap-2">
++        <Link
++          to={`/eventos/${event.id}`}
++          className="font-semibold break-words hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++        >
++          {event.name}
++        </Link>
++        <Badge tone={status.tone}>{status.label}</Badge>
++      </div>
++      <p className="text-sm text-muted tabular">
++        {formatDateBR(event.date)}
++        {event.location ? ` · ${event.location}` : ''}
++      </p>
++      <p className="text-sm text-muted tabular">
++        {event.races_count} {event.races_count === 1 ? 'prova' : 'provas'} · {event.entries_count}{' '}
++        {event.entries_count === 1 ? 'inscrição' : 'inscrições'}
++      </p>
++      <div className="mt-auto flex flex-wrap gap-2 pt-2">
++        <Button size="sm" variant="secondary" onClick={onDuplicate}>
++          Duplicar
++        </Button>
++        <Button size="sm" variant="danger" onClick={onDelete}>
++          Excluir
++        </Button>
++      </div>
++    </Card>
++  );
++}
++
++function CreateEventModal({
++  open,
++  onClose,
++  onCreated,
++}: {
++  open: boolean;
++  onClose(): void;
++  onCreated(id: string): void;
++}) {
++  const [name, setName] = useState('');
++  const [date, setDate] = useState('');
++  const [location, setLocation] = useState('');
++  const [levels, setLevels] = useState('');
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  function reset() {
++    setName('');
++    setDate('');
++    setLocation('');
++    setLevels('');
++    setError(null);
++  }
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    setBusy(true);
++    setError(null);
++    try {
++      const created = await api.admin.saveEvent({
++        name: name.trim(),
++        date,
++        location: location.trim(),
++        levels: parseLevels(levels),
++      });
++      reset();
++      onCreated(created.id);
++    } catch (err) {
++      setError(errorMessage(err, 'Não foi possível criar o evento'));
++      setBusy(false);
++    }
++  }
++
++  function handleClose() {
++    reset();
++    onClose();
++  }
++
++  return (
++    <Modal
++      open={open}
++      onClose={handleClose}
++      title="Novo evento"
++      footer={
++        <>
++          <Button variant="secondary" onClick={handleClose} disabled={busy}>
++            Cancelar
++          </Button>
++          <Button type="submit" form="create-event-form" loading={busy} data-testid="event-create-submit">
++            Criar evento
++          </Button>
++        </>
++      }
++    >
++      <form id="create-event-form" className="flex flex-col gap-4" onSubmit={onSubmit} noValidate>
++        <Input
++          label="Nome do evento"
++          required
++          value={name}
++          onChange={(e) => setName(e.target.value)}
++          data-testid="event-name"
++        />
++        <Input
++          label="Data"
++          type="date"
++          required
++          value={date}
++          onChange={(e) => setDate(e.target.value)}
++          data-testid="event-date"
++        />
++        <Input
++          label="Local"
++          value={location}
++          onChange={(e) => setLocation(e.target.value)}
++          data-testid="event-location"
++        />
++        <Input
++          label="Níveis"
++          hint="Ex.: Elite, Base"
++          value={levels}
++          onChange={(e) => setLevels(e.target.value)}
++          data-testid="event-levels"
++        />
++        {error && (
++          <p role="alert" className="text-sm text-danger">
++            {error}
++          </p>
++        )}
++      </form>
++    </Modal>
++  );
++}
++
++function DuplicateEventModal({
++  event,
++  onClose,
++  onDuplicated,
++}: {
++  event: EventSummary;
++  onClose(): void;
++  onDuplicated(id: string): void;
++}) {
++  const [name, setName] = useState(`${event.name} (cópia)`);
++  const [date, setDate] = useState(event.date);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    setBusy(true);
++    setError(null);
++    try {
++      const id = await api.admin.duplicateEvent(event.id, name.trim(), date);
++      onDuplicated(id);
++    } catch (err) {
++      setError(errorMessage(err, 'Não foi possível duplicar o evento'));
++      setBusy(false);
++    }
++  }
++
++  return (
++    <Modal
++      open
++      onClose={onClose}
++      title={`Duplicar "${event.name}"`}
++      footer={
++        <>
++          <Button variant="secondary" onClick={onClose} disabled={busy}>
++            Cancelar
++          </Button>
++          <Button type="submit" form="duplicate-event-form" loading={busy} data-testid="event-duplicate-submit">
++            Duplicar
++          </Button>
++        </>
++      }
++    >
++      <form id="duplicate-event-form" className="flex flex-col gap-4" onSubmit={onSubmit} noValidate>
++        <Input
++          label="Nome do novo evento"
++          required
++          value={name}
++          onChange={(e) => setName(e.target.value)}
++          data-testid="duplicate-name"
++        />
++        <Input
++          label="Data"
++          type="date"
++          required
++          value={date}
++          onChange={(e) => setDate(e.target.value)}
++          data-testid="duplicate-date"
++        />
++        {error && (
++          <p role="alert" className="text-sm text-danger">
++            {error}
++          </p>
++        )}
++      </form>
++    </Modal>
++  );
++}
+diff --git a/src/features/events/events.test.tsx b/src/features/events/events.test.tsx
+new file mode 100644
+index 0000000..fad9e04
+--- /dev/null
++++ b/src/features/events/events.test.tsx
+@@ -0,0 +1,395 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { render, screen, waitFor } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { createMemoryRouter, RouterProvider } from 'react-router';
++import type { RouteObject } from 'react-router';
++
++import { ConfirmProvider, ToastProvider } from '../../components/ui';
++import { ApiError } from '../../lib/api';
++import type { AdminMe, EventAggregate, EventSummary, OrganizerRow } from '../../lib/types';
++import { makeEvent } from '../../domain/testing/fixtures';
++import { SessionContext } from '../auth/session';
++import type { SessionValue } from '../auth/session';
++import { EventContext } from './EventContext';
++import type { EventContextValue } from './EventContext';
++import EventsPage from './EventsPage';
++import EventGeneralTab from './EventGeneralTab';
++import SettingsPage from '../settings/SettingsPage';
++import HelpPage from '../help/HelpPage';
++
++// This task only reaches lib/supabase transitively (through session.tsx and lib/api's own
++// import), and importing the real client throws outside a browser env with no VITE_SUPABASE_URL.
++// Keep every test isolated from it: supabase is a bare stub, and `api` is fully replaced.
++vi.mock('../../lib/supabase', () => ({
++  supabase: {
++    rpc: vi.fn(),
++    auth: {
++      getSession: vi.fn(),
++      onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe() {} } } })),
++    },
++  },
++}));
++
++const mocks = vi.hoisted(() => ({
++  listEvents: vi.fn(),
++  saveEvent: vi.fn(),
++  deleteEvent: vi.fn(),
++  duplicateEvent: vi.fn(),
++  listOrganizers: vi.fn(),
++  createOrganizer: vi.fn(),
++  deleteOrganizer: vi.fn(),
++}));
++vi.mock('../../lib/api', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('../../lib/api')>()),
++  api: {
++    admin: {
++      listEvents: mocks.listEvents,
++      saveEvent: mocks.saveEvent,
++      deleteEvent: mocks.deleteEvent,
++      duplicateEvent: mocks.duplicateEvent,
++      listOrganizers: mocks.listOrganizers,
++      createOrganizer: mocks.createOrganizer,
++      deleteOrganizer: mocks.deleteOrganizer,
++    },
++  },
++}));
++
++function makeSummary(p: Partial<EventSummary> = {}): EventSummary {
++  return { ...makeEvent(), races_count: 0, entries_count: 0, ...p };
++}
++
++function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
++  return {
++    event: makeEvent(), races: [], waves: [], entries: [], athletes: [], timekeepers: [],
++    marks: [], resolutions: [], results: [], version: 1, server_now: new Date().toISOString(),
++    ...p,
++  };
++}
++
++function fakeContext(agg: EventAggregate, overrides: Partial<EventContextValue> = {}): EventContextValue {
++  return {
++    eventId: agg.event.id,
++    agg,
++    index: {
++      racesById: new Map(), wavesById: new Map(), wavesByRace: new Map(),
++      entriesById: new Map(), entriesByRace: new Map(), athletesById: new Map(), timekeepersById: new Map(),
++    },
++    timing: { byEntry: new Map(), issues: [] },
++    classifications: new Map(),
++    nowMs: Date.now(),
++    refresh: vi.fn().mockResolvedValue(undefined),
++    patchAgg: vi.fn(),
++    clock: {} as EventContextValue['clock'],
++    ...overrides,
++  };
++}
++
++function fakeSession(me: AdminMe | null, overrides: Partial<SessionValue> = {}): SessionValue {
++  return {
++    status: me ? 'organizer' : 'anon', me,
++    signIn: vi.fn(), signOut: vi.fn().mockResolvedValue(undefined),
++    changePassword: vi.fn().mockResolvedValue(undefined), refreshMe: vi.fn().mockResolvedValue(undefined),
++    ...overrides,
++  };
++}
++
++const OWNER: AdminMe = { user_id: 'u1', email: 'ana@ebc.test', name: 'Ana', role: 'owner', must_change_password: false };
++const NON_OWNER: AdminMe = { user_id: 'u2', email: 'bea@ebc.test', name: 'Bea', role: 'admin', must_change_password: false };
++
++function renderRoutes(initialPath: string, routes: RouteObject[], session: SessionValue = fakeSession(OWNER)) {
++  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
++  const router = createMemoryRouter(routes, { initialEntries: [initialPath] });
++  const result = render(
++    <SessionContext.Provider value={session}>
++      <QueryClientProvider client={queryClient}>
++        <ToastProvider>
++          <ConfirmProvider>
++            <RouterProvider router={router} />
++          </ConfirmProvider>
++        </ToastProvider>
++      </QueryClientProvider>
++    </SessionContext.Provider>,
++  );
++  return { ...result, router };
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++});
++afterEach(() => {
++  vi.unstubAllGlobals();
++  // jsdom has no Clipboard API; tests that stub `navigator.clipboard` must not leak it further.
++  Reflect.deleteProperty(window.navigator, 'clipboard');
++});
++
++describe('EventsPage', () => {
++  const ROUTES: RouteObject[] = [
++    { path: '/eventos', element: <EventsPage /> },
++    { path: '/eventos/:id', element: <p>Detalhe do evento</p> },
++    { path: '/eventos/:id/provas', element: <p>Provas do evento</p> },
++  ];
++
++  it('lists events sorted by date desc, with name, date, location, status and counts', async () => {
++    mocks.listEvents.mockResolvedValue([
++      makeSummary({ id: 'e1', name: 'Corrida de Janeiro', date: '2026-01-10', location: 'Vitória', status: 'encerrado', races_count: 1, entries_count: 20 }),
++      makeSummary({ id: 'e2', name: 'Corrida de Março', date: '2026-03-05', location: 'Vila Velha', status: 'planejado', races_count: 2, entries_count: 5 }),
++    ]);
++    renderRoutes('/eventos', ROUTES);
++
++    const headings = await screen.findAllByRole('link', { name: /Corrida de/ });
++    expect(headings.map((h) => h.textContent)).toEqual(['Corrida de Março', 'Corrida de Janeiro']);
++    expect(screen.getByText('05/03/2026 · Vila Velha')).toBeInTheDocument();
++    expect(screen.getByText('2 provas · 5 inscrições')).toBeInTheDocument();
++    expect(screen.getByText('1 prova · 20 inscrições')).toBeInTheDocument();
++    expect(screen.getByText('Planejado')).toBeInTheDocument();
++    expect(screen.getByText('Encerrado')).toBeInTheDocument();
++  });
++
++  it('creates an event from the modal and navigates to its provas tab', async () => {
++    const user = userEvent.setup();
++    mocks.listEvents.mockResolvedValue([]);
++    mocks.saveEvent.mockResolvedValue({ ...makeEvent(), id: 'new1' });
++    const { router } = renderRoutes('/eventos', ROUTES);
++
++    await user.click(await screen.findByTestId('new-event'));
++    await user.type(screen.getByTestId('event-name'), 'Aquathlon de Verão');
++    await user.type(screen.getByTestId('event-date'), '2027-02-20');
++    await user.type(screen.getByTestId('event-location'), 'Praia da Costa');
++    await user.type(screen.getByTestId('event-levels'), 'Elite, Base, Elite');
++    await user.click(screen.getByTestId('event-create-submit'));
++
++    await waitFor(() =>
++      expect(mocks.saveEvent).toHaveBeenCalledWith({
++        name: 'Aquathlon de Verão', date: '2027-02-20', location: 'Praia da Costa', levels: ['Elite', 'Base'],
++      }),
++    );
++    expect(await screen.findByText('Provas do evento')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/eventos/new1/provas');
++  });
++
++  it('duplicates an event and navigates to it', async () => {
++    const user = userEvent.setup();
++    mocks.listEvents.mockResolvedValue([makeSummary({ id: 'e1', name: 'Copa EBC', date: '2026-10-11' })]);
++    mocks.duplicateEvent.mockResolvedValue('copy1');
++    const { router } = renderRoutes('/eventos', ROUTES);
++
++    await user.click(await screen.findByRole('button', { name: 'Duplicar' }));
++    await user.clear(screen.getByTestId('duplicate-date'));
++    await user.type(screen.getByTestId('duplicate-date'), '2026-11-01');
++    await user.click(screen.getByTestId('event-duplicate-submit'));
++
++    await waitFor(() =>
++      expect(mocks.duplicateEvent).toHaveBeenCalledWith('e1', 'Copa EBC (cópia)', '2026-11-01'),
++    );
++    expect(await screen.findByText('Detalhe do evento')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/eventos/copy1');
++  });
++
++  it('deletes an event after the danger confirmation', async () => {
++    const user = userEvent.setup();
++    mocks.listEvents.mockResolvedValue([makeSummary({ id: 'e1', name: 'Copa EBC' })]);
++    mocks.deleteEvent.mockResolvedValue(undefined);
++    renderRoutes('/eventos', ROUTES);
++
++    await user.click(await screen.findByRole('button', { name: 'Excluir' }));
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
++  });
++});
++
++describe('EventGeneralTab', () => {
++  function renderTab(ctx: EventContextValue) {
++    const routes: RouteObject[] = [
++      { path: '/eventos/:id/geral', element: <EventContext.Provider value={ctx}><EventGeneralTab /></EventContext.Provider> },
++      { path: '/eventos', element: <p>Lista de eventos</p> },
++    ];
++    return renderRoutes(`/eventos/${ctx.eventId}/geral`, routes);
++  }
++
++  it("shows the event's current data, including the public link preview", () => {
++    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC', date: '2026-10-11', location: 'Vila Velha', levels: ['Elite', 'Base'], is_public: true, public_slug: 'copa-ebc' }) });
++    renderTab(fakeContext(agg));
++
++    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC');
++    expect(screen.getByTestId('event-date')).toHaveValue('2026-10-11');
++    expect(screen.getByTestId('event-location')).toHaveValue('Vila Velha');
++    expect(screen.getByTestId('event-levels')).toHaveValue('Elite, Base');
++    expect(screen.getByTestId('event-public')).toBeChecked();
++    expect(screen.getByText('…/#/p/copa-ebc')).toBeInTheDocument();
++  });
++
++  it('saves the edited fields and refreshes the event data', async () => {
++    const user = userEvent.setup();
++    mocks.saveEvent.mockResolvedValue(makeEvent());
++    const agg = makeAgg({ event: makeEvent({ id: 'e1', status: 'planejado' }) });
++    const ctx = fakeContext(agg);
++    renderTab(ctx);
++
++    await user.clear(screen.getByTestId('event-name'));
++    await user.type(screen.getByTestId('event-name'), 'Copa EBC 2027');
++    await user.click(screen.getByTestId('event-save'));
++
++    await waitFor(() =>
++      expect(mocks.saveEvent).toHaveBeenCalledWith(
++        expect.objectContaining({ id: 'e1', name: 'Copa EBC 2027', status: 'planejado' }),
++      ),
++    );
++    expect(ctx.refresh).toHaveBeenCalledTimes(1);
++    expect(await screen.findByText('Evento salvo')).toBeInTheDocument();
++  });
++
++  it('copies the public link once "Resultados públicos" reveals it', async () => {
++    const user = userEvent.setup();
++    const writeText = vi.fn().mockResolvedValue(undefined);
++    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
++    const agg = makeAgg({ event: makeEvent({ is_public: true, public_slug: 'copa-ebc' }) });
++    renderTab(fakeContext(agg));
++
++    await user.click(screen.getByRole('button', { name: 'Copiar link' }));
++
++    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('/#/p/copa-ebc'));
++    expect(await screen.findByText('Link copiado')).toBeInTheDocument();
++  });
++
++  it('deletes the event after confirmation and returns to the events list', async () => {
++    const user = userEvent.setup();
++    mocks.deleteEvent.mockResolvedValue(undefined);
++    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
++    const { router } = renderTab(fakeContext(agg));
++
++    await user.click(screen.getByRole('button', { name: 'Excluir evento' }));
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
++    expect(await screen.findByText('Lista de eventos')).toBeInTheDocument();
++    expect(router.state.location.pathname).toBe('/eventos');
++  });
++});
++
++describe('SettingsPage', () => {
++  function renderSettings(session: SessionValue) {
++    return renderRoutes('/config', [{ path: '/config', element: <SettingsPage /> }], session);
++  }
++
++  it('shows "Adicionar organizador" for the owner', async () => {
++    mocks.listOrganizers.mockResolvedValue([]);
++    renderSettings(fakeSession(OWNER));
++    expect(await screen.findByTestId('add-organizer')).toBeInTheDocument();
++  });
++
++  it('hides "Adicionar organizador" for a non-owner organizer', async () => {
++    mocks.listOrganizers.mockResolvedValue([]);
++    renderSettings(fakeSession(NON_OWNER));
++    await screen.findByText('Organizadores');
++    expect(screen.queryByTestId('add-organizer')).not.toBeInTheDocument();
++  });
++
++  it('generates a 12-char password from the unambiguous alphabet via crypto.getRandomValues, then creates the organizer and shows the credentials once', async () => {
++    const user = userEvent.setup();
++    const spy = vi.spyOn(crypto, 'getRandomValues');
++    const writeText = vi.fn().mockResolvedValue(undefined);
++    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
++    mocks.listOrganizers.mockResolvedValue([]);
++    const createdOrganizer: OrganizerRow = { user_id: 'u3', email: 'nova@ebc.test', name: 'Nova', role: 'admin', created_at: new Date().toISOString() };
++    mocks.createOrganizer.mockResolvedValue(createdOrganizer);
++    renderSettings(fakeSession(OWNER));
++
++    await user.click(await screen.findByTestId('add-organizer'));
++    await user.type(screen.getByTestId('organizer-name'), 'Nova');
++    await user.type(screen.getByTestId('organizer-email'), 'nova@ebc.test');
++    await user.click(screen.getByTestId('organizer-generate-password'));
++
++    expect(spy).toHaveBeenCalled();
++    const password = (screen.getByTestId('organizer-password') as HTMLInputElement).value;
++    expect(password).toHaveLength(12);
++    expect(password).toMatch(/^[A-HJ-NP-Za-km-z2-9]{12}$/);
++
++    await user.click(screen.getByTestId('organizer-save'));
++
++    await waitFor(() => expect(mocks.createOrganizer).toHaveBeenCalledWith('nova@ebc.test', password, 'Nova'));
++    expect(await screen.findByTestId('organizer-credentials')).toBeInTheDocument();
++    expect(screen.getByText(password)).toBeInTheDocument();
++
++    await user.click(screen.getByTestId('organizer-copy-credentials'));
++    expect(writeText).toHaveBeenCalledWith(expect.stringContaining(password));
++    expect(await screen.findByText('Credenciais copiadas')).toBeInTheDocument();
++  });
++
++  it('removes an organizer after confirmation', async () => {
++    const user = userEvent.setup();
++    mocks.listOrganizers.mockResolvedValue([
++      { user_id: 'u2', email: 'bea@ebc.test', name: 'Bea', role: 'admin', created_at: new Date().toISOString() },
++    ]);
++    mocks.deleteOrganizer.mockResolvedValue(undefined);
++    renderSettings(fakeSession(OWNER));
++
++    await user.click(await screen.findByTestId('organizer-remove-u2'));
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    await waitFor(() => expect(mocks.deleteOrganizer).toHaveBeenCalledWith('u2'));
++    expect(await screen.findByText('Organizador removido')).toBeInTheDocument();
++  });
++
++  it("shows the server's pt-BR message in a toast when an owner-only action is refused (42501)", async () => {
++    const user = userEvent.setup();
++    mocks.listOrganizers.mockResolvedValue([]);
++    mocks.createOrganizer.mockRejectedValue(new ApiError('Somente o dono pode criar organizadores', '42501'));
++    renderSettings(fakeSession(OWNER));
++
++    await user.click(await screen.findByTestId('add-organizer'));
++    await user.type(screen.getByTestId('organizer-name'), 'Nova');
++    await user.type(screen.getByTestId('organizer-email'), 'nova@ebc.test');
++    await user.click(screen.getByTestId('organizer-generate-password'));
++    await user.click(screen.getByTestId('organizer-save'));
++
++    expect(await screen.findByText('Somente o dono pode criar organizadores')).toBeInTheDocument();
++    expect(screen.queryByTestId('organizer-credentials')).not.toBeInTheDocument();
++  });
++
++  it('changes the account password through useSession().changePassword', async () => {
++    const user = userEvent.setup();
++    mocks.listOrganizers.mockResolvedValue([]);
++    const session = fakeSession(OWNER);
++    renderSettings(session);
++
++    await screen.findByText('ana@ebc.test');
++    await user.type(screen.getByTestId('newpass-1'), 'nova-senha-123');
++    await user.type(screen.getByTestId('newpass-2'), 'nova-senha-123');
++    await user.click(screen.getByTestId('newpass-submit'));
++
++    await waitFor(() => expect(session.changePassword).toHaveBeenCalledWith('nova-senha-123'));
++    expect(await screen.findByText('Senha alterada')).toBeInTheDocument();
++  });
++});
++
++describe('HelpPage', () => {
++  function renderHelp() {
++    return renderRoutes('/ajuda', [{ path: '/ajuda', element: <HelpPage /> }]);
++  }
++
++  it('renders the before/during/after sections and the closing checklist', () => {
++    renderHelp();
++
++    expect(screen.getByRole('heading', { name: 'Antes do evento' })).toBeInTheDocument();
++    expect(screen.getByRole('heading', { name: 'Durante o evento' })).toBeInTheDocument();
++    expect(screen.getByRole('heading', { name: 'Depois do evento' })).toBeInTheDocument();
++    expect(screen.getByRole('heading', { name: 'Como o tempo oficial é escolhido' })).toBeInTheDocument();
++    expect(screen.getByRole('heading', { name: 'Checklist do dia do evento' })).toBeInTheDocument();
++
++    expect(screen.getByText(/reative o projeto se ele estiver/)).toBeInTheDocument();
++    expect(screen.getByText(/cerca de 7 dias sem uso/)).toBeInTheDocument();
++    expect(screen.getByText(/Teste o link do cronometrista no local da prova/)).toBeInTheDocument();
++    expect(screen.getByText(/Confira que as largadas estão sem horário/)).toBeInTheDocument();
++    expect(screen.getByText(/exporte a planilha e desative o link/)).toBeInTheDocument();
++  });
++
++  it('explains the median with the worked example', () => {
++    renderHelp();
++    expect(screen.getByText(/10:00:05/)).toBeInTheDocument();
++    expect(screen.getAllByText(/10:00:06/).length).toBeGreaterThan(0);
++    expect(screen.getByText(/10:00:19/)).toBeInTheDocument();
++    expect(screen.getByText(/10:00:10/)).toBeInTheDocument();
++  });
++});
+diff --git a/src/features/help/HelpPage.tsx b/src/features/help/HelpPage.tsx
+index 6cda76b..290f592 100644
+--- a/src/features/help/HelpPage.tsx
++++ b/src/features/help/HelpPage.tsx
+@@ -1 +1,110 @@
+-export default function HelpPage() { return <h1 className="p-6 brand-title">HelpPage</h1>; }
++import { Card } from '../../components/ui';
++
++/**
++ * Static field manual for the organizer: what to do before, during and after an event, plus
++ * why the official time comes from a median (not an average) of the timekeepers' marks.
++ */
++export default function HelpPage() {
++  return (
++    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6 sm:px-6">
++      <div>
++        <h1 className="brand-title text-xl font-semibold">Ajuda</h1>
++        <p className="mt-1 text-sm text-muted">Guia rápido para organizar e cronometrar um evento.</p>
++      </div>
++
++      <Card className="flex flex-col gap-3">
++        <h2 className="font-semibold">Antes do evento</h2>
++        <ol className="list-decimal space-y-1 pl-5 text-sm">
++          <li>Crie o evento (nome, data, local).</li>
++          <li>Configure as provas: pernas (modalidade, rótulo, distância), ondas e, se precisar, níveis.</li>
++          <li>Cadastre os atletas, um a um ou importando uma planilha.</li>
++          <li>Faça as inscrições nas provas, atribuindo cada perna a um atleta.</li>
++          <li>
++            Teste o link do cronometrista <strong>no local da prova</strong>, com os celulares que vão ser
++            usados de verdade.
++          </li>
++        </ol>
++        <p className="text-sm text-muted">
++          Se o projeto no Supabase estiver há dias sem uso, ele pode ter pausado sozinho — reative-o antes
++          de precisar dele (veja o checklist no fim desta página).
++        </p>
++      </Card>
++
++      <Card className="flex flex-col gap-3">
++        <h2 className="font-semibold">Durante o evento</h2>
++        <ul className="list-disc space-y-1 pl-5 text-sm">
++          <li>
++            Na aba Cronometragem, toque <strong>Largar agora</strong> para cada onda no momento da largada.
++          </li>
++          <li>
++            Cada cronometrista abre o link no celular, toca <strong>MARCAR</strong> na hora da passagem e
++            informa o número do atleta (ou deixa para atribuir depois, na lista "Sem atleta").
++          </li>
++          <li>
++            O revezamento é automático: o app já sabe qual é a próxima perna de cada equipe, ninguém
++            escolhe nome no meio da prova.
++          </li>
++          <li>
++            Acompanhe a aba <strong>Revisão</strong> de vez em quando: é lá que aparecem divergências e
++            marcações sem atleta.
++          </li>
++        </ul>
++      </Card>
++
++      <Card className="flex flex-col gap-3">
++        <h2 className="font-semibold">Depois do evento</h2>
++        <ol className="list-decimal space-y-1 pl-5 text-sm">
++          <li>Resolva as pendências que sobraram na aba Revisão.</li>
++          <li>Finalize cada prova em Resultados (isso trava a classificação e os pódios).</li>
++          <li>Exporte a planilha de conferência (XLSX).</li>
++          <li>Desative o link do cronometrista.</li>
++        </ol>
++      </Card>
++
++      <Card className="flex flex-col gap-3">
++        <h2 className="font-semibold">Como o tempo oficial é escolhido</h2>
++        <p className="text-sm">
++          Cada passagem pode ter mais de uma marcação — vários cronometristas apertando MARCAR para a
++          mesma chegada. O tempo do sistema é a <strong>mediana</strong> delas, nunca a média: um toque
++          atrasado por distração puxa a média para longe, mas não muda a mediana.
++        </p>
++        <p className="text-sm">
++          Exemplo: três cronometristas marcam a mesma chegada em <span className="tabular">10:00:05</span>,{' '}
++          <span className="tabular">10:00:06</span> e <span className="tabular">10:00:19</span>. A mediana
++          fica em <span className="tabular">10:00:06</span> — o valor do meio. A média seria{' '}
++          <span className="tabular">10:00:10</span>, puxada pelo toque atrasado do terceiro cronometrista.
++        </p>
++        <p className="text-sm">
++          Quando as marcações estão muito espalhadas, o app avisa como <strong>divergência</strong> na aba
++          Revisão. Lá você escolhe o tempo oficial: manter o <strong>Sistema</strong> (a mediana), escolher
++          uma <strong>marcação</strong> específica, ou digitar um <strong>tempo manual</strong>.
++        </p>
++      </Card>
++
++      <Card className="flex flex-col gap-3 border-accent/40">
++        <h2 className="font-semibold">Checklist do dia do evento</h2>
++        <ul className="flex flex-col gap-2 text-sm">
++          <li className="flex gap-2">
++            <span aria-hidden="true">☐</span>
++            <span>
++              <strong>1 dia antes</strong>: abra o painel do Supabase e reative o projeto se ele estiver
++              pausado (projetos grátis pausam sozinhos depois de cerca de 7 dias sem uso).
++            </span>
++          </li>
++          <li className="flex gap-2">
++            <span aria-hidden="true">☐</span>
++            <span>Teste o link do cronometrista no local da prova, com os celulares que serão usados.</span>
++          </li>
++          <li className="flex gap-2">
++            <span aria-hidden="true">☐</span>
++            <span>Confira que as largadas estão sem horário — ninguém apertou "Largar agora" antes da hora.</span>
++          </li>
++          <li className="flex gap-2">
++            <span aria-hidden="true">☐</span>
++            <span>Ao final, exporte a planilha e desative o link do cronometrista.</span>
++          </li>
++        </ul>
++      </Card>
++    </div>
++  );
++}
+diff --git a/src/features/settings/SettingsPage.tsx b/src/features/settings/SettingsPage.tsx
+index e87e967..6c1bdca 100644
+--- a/src/features/settings/SettingsPage.tsx
++++ b/src/features/settings/SettingsPage.tsx
+@@ -1 +1,327 @@
+-export default function SettingsPage() { return <h1 className="p-6 brand-title">SettingsPage</h1>; }
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import { useQuery, useQueryClient } from '@tanstack/react-query';
++import { Badge, Button, Card, Input, Spinner, useConfirm, useToast } from '../../components/ui';
++import { api } from '../../lib/api';
++import { useSession } from '../auth/session';
++import type { OrganizerRow } from '../../lib/types';
++
++const MIN_LENGTH = 8;
++// No 0/O, 1/l/I: every character the generator can produce reads unambiguously out loud or on paper.
++const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
++const PASSWORD_LENGTH = 12;
++
++function generateTempPassword(): string {
++  const bytes = new Uint32Array(PASSWORD_LENGTH);
++  crypto.getRandomValues(bytes);
++  let out = '';
++  for (let i = 0; i < PASSWORD_LENGTH; i++) out += PASSWORD_ALPHABET[bytes[i] % PASSWORD_ALPHABET.length];
++  return out;
++}
++
++function errorMessage(err: unknown, fallback: string): string {
++  return err instanceof Error && err.message ? err.message : fallback;
++}
++
++async function copyToClipboard(text: string): Promise<boolean> {
++  try {
++    if (!navigator.clipboard?.writeText) return false;
++    await navigator.clipboard.writeText(text);
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++export default function SettingsPage() {
++  const { me } = useSession();
++  const toast = useToast();
++  const confirm = useConfirm();
++  const queryClient = useQueryClient();
++  const isOwner = me?.role === 'owner';
++
++  const { data: organizers, isLoading, error } = useQuery({
++    queryKey: ['organizers'],
++    queryFn: () => api.admin.listOrganizers(),
++  });
++
++  async function refreshOrganizers() {
++    await queryClient.invalidateQueries({ queryKey: ['organizers'] });
++  }
++
++  async function handleRemove(o: OrganizerRow) {
++    const ok = await confirm({
++      title: `Remover ${o.name}?`,
++      message: 'A pessoa perde o acesso ao painel imediatamente.',
++      confirmLabel: 'Remover',
++      danger: true,
++    });
++    if (!ok) return;
++    try {
++      await api.admin.deleteOrganizer(o.user_id);
++      await refreshOrganizers();
++      toast.show({ message: 'Organizador removido', tone: 'success' });
++    } catch (err) {
++      toast.show({ message: errorMessage(err, 'Não foi possível remover o organizador'), tone: 'danger' });
++    }
++  }
++
++  return (
++    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6 sm:px-6">
++      <h1 className="brand-title text-xl font-semibold">Configurações</h1>
++
++      <MyAccountCard />
++
++      <Card className="flex flex-col gap-4">
++        <h2 className="font-semibold">Organizadores</h2>
++        {isLoading && (
++          <div className="flex justify-center py-6">
++            <Spinner size={28} />
++          </div>
++        )}
++        {error && (
++          <p role="alert" className="text-sm text-danger">
++            {errorMessage(error, 'Não foi possível carregar os organizadores')}
++          </p>
++        )}
++        {organizers && organizers.length > 0 && (
++          <ul className="flex flex-col gap-2">
++            {organizers.map((o) => (
++              <li
++                key={o.user_id}
++                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-3"
++              >
++                <div>
++                  <p className="font-medium">{o.name}</p>
++                  <p className="text-sm text-muted">{o.email}</p>
++                </div>
++                <div className="flex items-center gap-2">
++                  <Badge tone={o.role === 'owner' ? 'info' : 'neutral'}>{o.role === 'owner' ? 'Dono' : 'Organizador'}</Badge>
++                  {isOwner && o.user_id !== me?.user_id && (
++                    <Button
++                      size="sm"
++                      variant="danger"
++                      onClick={() => void handleRemove(o)}
++                      data-testid={`organizer-remove-${o.user_id}`}
++                    >
++                      Remover
++                    </Button>
++                  )}
++                </div>
++              </li>
++            ))}
++          </ul>
++        )}
++        {isOwner && <AddOrganizer onAdded={refreshOrganizers} />}
++      </Card>
++    </div>
++  );
++}
++
++function MyAccountCard() {
++  const { me, changePassword } = useSession();
++  const toast = useToast();
++  const [pw1, setPw1] = useState('');
++  const [pw2, setPw2] = useState('');
++  const [errors, setErrors] = useState<{ pw1?: string; pw2?: string; form?: string }>({});
++  const [busy, setBusy] = useState(false);
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const next = {
++      pw1: pw1.length < MIN_LENGTH ? `A senha precisa ter pelo menos ${MIN_LENGTH} caracteres` : undefined,
++      pw2: pw1 !== pw2 ? 'As senhas não conferem' : undefined,
++    };
++    setErrors(next);
++    if (next.pw1 || next.pw2) return;
++
++    setBusy(true);
++    try {
++      await changePassword(pw1);
++      toast.show({ message: 'Senha alterada', tone: 'success' });
++      setPw1('');
++      setPw2('');
++      setErrors({});
++    } catch (err) {
++      setErrors({ form: errorMessage(err, 'Não foi possível alterar a senha') });
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <Card className="flex flex-col gap-4">
++      <h2 className="font-semibold">Minha conta</h2>
++      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
++        <dt className="text-muted">Nome</dt>
++        <dd>{me?.name}</dd>
++        <dt className="text-muted">E-mail</dt>
++        <dd>{me?.email}</dd>
++        <dt className="text-muted">Função</dt>
++        <dd>{me?.role === 'owner' ? 'Dono' : 'Organizador'}</dd>
++      </dl>
++      <form className="flex flex-col gap-3" onSubmit={(e) => void onSubmit(e)} noValidate>
++        <p className="text-sm font-medium">Trocar senha</p>
++        <Input
++          label="Nova senha"
++          type="password"
++          autoComplete="new-password"
++          hint={`Pelo menos ${MIN_LENGTH} caracteres`}
++          error={errors.pw1}
++          value={pw1}
++          onChange={(e) => setPw1(e.target.value)}
++          data-testid="newpass-1"
++        />
++        <Input
++          label="Repita a nova senha"
++          type="password"
++          autoComplete="new-password"
++          error={errors.pw2}
++          value={pw2}
++          onChange={(e) => setPw2(e.target.value)}
++          data-testid="newpass-2"
++        />
++        {errors.form && (
++          <p role="alert" className="text-sm text-danger">
++            {errors.form}
++          </p>
++        )}
++        <div>
++          <Button type="submit" loading={busy} data-testid="newpass-submit">
++            Salvar nova senha
++          </Button>
++        </div>
++      </form>
++    </Card>
++  );
++}
++
++function AddOrganizer({ onAdded }: { onAdded(): Promise<void> }) {
++  const toast = useToast();
++  const [open, setOpen] = useState(false);
++  const [email, setEmail] = useState('');
++  const [name, setName] = useState('');
++  const [password, setPassword] = useState('');
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [created, setCreated] = useState<{ email: string; password: string } | null>(null);
++
++  function reset() {
++    setEmail('');
++    setName('');
++    setPassword('');
++    setError(null);
++    setCreated(null);
++  }
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    if (!password) {
++      setError('Gere uma senha provisória antes de criar');
++      return;
++    }
++    setError(null);
++    setBusy(true);
++    try {
++      await api.admin.createOrganizer(email.trim(), password, name.trim());
++      setCreated({ email: email.trim(), password });
++      await onAdded();
++    } catch (err) {
++      // The server also enforces "only the owner creates organizers" (42501): show its pt-BR
++      // message as a toast rather than swallowing it, in case this UI is ever reachable by a
++      // non-owner (a stale session, a role change elsewhere).
++      toast.show({ message: errorMessage(err, 'Não foi possível criar o organizador'), tone: 'danger' });
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function onCopyCredentials() {
++    if (!created) return;
++    const text = `E-mail: ${created.email}\nSenha provisória: ${created.password}`;
++    const ok = await copyToClipboard(text);
++    toast.show({ message: ok ? 'Credenciais copiadas' : 'Não foi possível copiar', tone: ok ? 'success' : 'danger' });
++  }
++
++  if (!open) {
++    return (
++      <div className="mt-2">
++        <Button
++          variant="secondary"
++          onClick={() => {
++            reset();
++            setOpen(true);
++          }}
++          data-testid="add-organizer"
++        >
++          Adicionar organizador
++        </Button>
++      </div>
++    );
++  }
++
++  if (created) {
++    return (
++      <Card className="mt-2 flex flex-col gap-3 border-success/40" data-testid="organizer-credentials">
++        <p className="font-medium">Organizador criado</p>
++        <p className="text-sm text-muted">Anote agora: essa senha não será mostrada de novo.</p>
++        <p className="tabular text-sm">
++          <strong>E-mail:</strong> {created.email}
++        </p>
++        <p className="tabular text-sm">
++          <strong>Senha provisória:</strong> {created.password}
++        </p>
++        <div className="flex flex-wrap gap-2">
++          <Button size="sm" onClick={() => void onCopyCredentials()} data-testid="organizer-copy-credentials">
++            Copiar credenciais
++          </Button>
++          <Button
++            size="sm"
++            variant="secondary"
++            onClick={() => {
++              reset();
++              setOpen(false);
++            }}
++          >
++            Concluir
++          </Button>
++        </div>
++      </Card>
++    );
++  }
++
++  return (
++    <form className="mt-2 flex flex-col gap-3" onSubmit={(e) => void onSubmit(e)} noValidate>
++      <Input label="Nome" required value={name} onChange={(e) => setName(e.target.value)} data-testid="organizer-name" />
++      <Input
++        label="E-mail"
++        type="email"
++        required
++        value={email}
++        onChange={(e) => setEmail(e.target.value)}
++        data-testid="organizer-email"
++      />
++      <div className="flex flex-wrap items-end gap-2">
++        <div className="min-w-0 flex-1">
++          <Input label="Senha provisória" readOnly value={password} className="tabular" data-testid="organizer-password" />
++        </div>
++        <Button type="button" variant="secondary" onClick={() => setPassword(generateTempPassword())} data-testid="organizer-generate-password">
++          Gerar senha
++        </Button>
++      </div>
++      {error && (
++        <p role="alert" className="text-sm text-danger">
++          {error}
++        </p>
++      )}
++      <div className="flex flex-wrap gap-2">
++        <Button type="submit" loading={busy} data-testid="organizer-save">
++          Criar organizador
++        </Button>
++        <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
++          Cancelar
++        </Button>
++      </div>
++    </form>
++  );
++}

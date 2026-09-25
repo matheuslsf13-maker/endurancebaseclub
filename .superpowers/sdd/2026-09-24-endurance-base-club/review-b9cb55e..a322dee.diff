@@ -1,0 +1,404 @@
+# Review package: b9cb55e..a322dee (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+a322dee fix(db): keep waves, start times and config on race update
+
+## Files changed
+ supabase/migrations/0003_admin_events.sql | 97 ++++++++++++++++++++-----------
+ supabase/tests/20_admin_events.sql        | 96 ++++++++++++++++++++++++++----
+ 2 files changed, 150 insertions(+), 43 deletions(-)
+
+## Diff
+diff --git a/supabase/migrations/0003_admin_events.sql b/supabase/migrations/0003_admin_events.sql
+index de530c7..bef9a0d 100644
+--- a/supabase/migrations/0003_admin_events.sql
++++ b/supabase/migrations/0003_admin_events.sql
+@@ -30,36 +30,36 @@ end $$;
+ 
+ -- 3. validate_race_config: raises P0001 on the first invalid field of an already-merged RaceConfig.
+ create or replace function public.validate_race_config(p_config jsonb, p_event_id uuid) returns void
+ language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
+ declare
+   v_rk jsonb; v_ag jsonb;
+   v_ids text[] := '{}'; v_id text;
+   v_prev_max numeric; v_min numeric; v_max numeric; v_first boolean := true;
+   v_ref_tk uuid;
+ begin
+-  if (p_config->>'age_rule') not in ('year_end', 'event_date') then
++  if (p_config->>'age_rule') is null or (p_config->>'age_rule') not in ('year_end', 'event_date') then
+     raise exception 'Regra de idade inválida' using errcode = 'P0001';
+   end if;
+-  if (p_config->>'team_age_rule') not in ('sum', 'oldest', 'youngest') then
++  if (p_config->>'team_age_rule') is null or (p_config->>'team_age_rule') not in ('sum', 'oldest', 'youngest') then
+     raise exception 'Regra de idade da equipe inválida' using errcode = 'P0001';
+   end if;
+-  if (p_config->>'time_source') not in ('median', 'reference') then
++  if (p_config->>'time_source') is null or (p_config->>'time_source') not in ('median', 'reference') then
+     raise exception 'Fonte de tempo inválida' using errcode = 'P0001';
+   end if;
+   if jsonb_typeof(p_config->'cumulative') <> 'boolean' then
+     raise exception 'Premiação cumulativa inválida' using errcode = 'P0001';
+   end if;
+-  if (p_config->>'same_crossing_window_s')::numeric not between 1 and 600 then
++  if (p_config->>'same_crossing_window_s') is null or (p_config->>'same_crossing_window_s')::numeric not between 1 and 600 then
+     raise exception 'A janela de mesma passagem deve ser entre 1 e 600 segundos' using errcode = 'P0001';
+   end if;
+-  if (p_config->>'divergence_threshold_s')::numeric not between 0.1 and 600 then
++  if (p_config->>'divergence_threshold_s') is null or (p_config->>'divergence_threshold_s')::numeric not between 0.1 and 600 then
+     raise exception 'O limite de divergência deve ser entre 0,1 e 600 segundos' using errcode = 'P0001';
+   end if;
+ 
+   if jsonb_typeof(coalesce(p_config->'rankings', '[]'::jsonb)) <> 'array' then
+     raise exception 'Rankings inválidos' using errcode = 'P0001';
+   end if;
+   for v_rk in select el from jsonb_array_elements(coalesce(p_config->'rankings', '[]'::jsonb)) as t(el) loop
+     v_id := btrim(coalesce(v_rk->>'id', ''));
+     if length(v_id) = 0 then
+       raise exception 'Todo ranking precisa de um identificador' using errcode = 'P0001';
+@@ -74,21 +74,21 @@ begin
+     if jsonb_typeof(coalesce(v_rk->'dims', 'null'::jsonb)) <> 'array' or jsonb_array_length(v_rk->'dims') = 0 then
+       raise exception 'Todo ranking precisa de ao menos uma dimensão' using errcode = 'P0001';
+     end if;
+     if exists (select 1 from jsonb_array_elements_text(v_rk->'dims') as d(val) where d.val not in ('sex', 'age', 'level')) then
+       raise exception 'Dimensão de ranking inválida' using errcode = 'P0001';
+     end if;
+     if (select count(*) from jsonb_array_elements_text(v_rk->'dims') as d(val))
+        <> (select count(distinct d.val) from jsonb_array_elements_text(v_rk->'dims') as d(val)) then
+       raise exception 'Dimensões de ranking repetidas' using errcode = 'P0001';
+     end if;
+-    if not ((v_rk->>'size')::int between 1 and 10) then
++    if (v_rk->>'size') is null or not ((v_rk->>'size')::int between 1 and 10) then
+       raise exception 'O tamanho do pódio deve ser entre 1 e 10' using errcode = 'P0001';
+     end if;
+   end loop;
+ 
+   if jsonb_typeof(coalesce(p_config->'age_groups', '[]'::jsonb)) <> 'array' then
+     raise exception 'Faixas etárias inválidas' using errcode = 'P0001';
+   end if;
+   v_prev_max := null; v_first := true;
+   for v_ag in select el from jsonb_array_elements(coalesce(p_config->'age_groups', '[]'::jsonb)) as t(el)
+               order by (el->>'min')::numeric loop
+@@ -357,30 +357,41 @@ begin
+ 
+   if v_slug is not null then
+     if v_slug !~ '^[a-z0-9-]{3,80}$' then
+       raise exception 'Endereço público inválido' using errcode = 'P0001';
+     end if;
+     if exists (select 1 from public.events e where e.public_slug = v_slug and e.id <> v_id) then
+       raise exception 'Endereço público já em uso' using errcode = 'P0001';
+     end if;
+   end if;
+ 
++  -- The exists-check above closes the common case; this catch is only a backstop for a
++  -- concurrent insert/update racing between that check and this statement (TOCTOU), so the
++  -- unique constraint still surfaces as the pt-BR P0001 message, not a raw 23505.
+   if is_insert then
+-    insert into public.events (id, name, date, location, description, levels, status, is_public, public_slug, tk_enabled)
+-    values (v_id, v_name, v_date, v_location, v_description, v_levels, v_status, v_is_public, v_slug, v_tk_enabled)
+-    returning * into ev;
++    begin
++      insert into public.events (id, name, date, location, description, levels, status, is_public, public_slug, tk_enabled)
++      values (v_id, v_name, v_date, v_location, v_description, v_levels, v_status, v_is_public, v_slug, v_tk_enabled)
++      returning * into ev;
++    exception when unique_violation then
++      raise exception 'Endereço público já em uso' using errcode = 'P0001';
++    end;
+   else
+-    update public.events set
+-      name = v_name, date = v_date, location = v_location, description = v_description,
+-      levels = v_levels, status = v_status, is_public = v_is_public, public_slug = v_slug, tk_enabled = v_tk_enabled
+-    where id = v_id
+-    returning * into ev;
++    begin
++      update public.events set
++        name = v_name, date = v_date, location = v_location, description = v_description,
++        levels = v_levels, status = v_status, is_public = v_is_public, public_slug = v_slug, tk_enabled = v_tk_enabled
++      where id = v_id
++      returning * into ev;
++    exception when unique_violation then
++      raise exception 'Endereço público já em uso' using errcode = 'P0001';
++    end;
+   end if;
+ 
+   return to_jsonb(ev);
+ end $$;
+ 
+ create or replace function public.admin_delete_event(p_event_id uuid) returns void
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ begin
+   perform public.assert_organizer();
+   delete from public.events where id = p_event_id;
+@@ -447,20 +458,21 @@ declare
+   v_position int;
+   v_leg jsonb;
+   v_modality text;
+   v_dist_present boolean;
+   v_dist_val numeric;
+   v_locked boolean;
+   ev_race public.races;
+   v_wave jsonb;
+   v_wave_id uuid;
+   v_keep_ids uuid[] := '{}';
++  v_process_waves boolean;
+ begin
+   perform public.assert_organizer();
+ 
+   v_event_id := nullif(p_race->>'event_id', '')::uuid;
+   if v_event_id is null or not exists (select 1 from public.events e where e.id = v_event_id) then
+     raise exception 'Evento não encontrado' using errcode = 'P0001';
+   end if;
+ 
+   if is_insert then
+     v_race_id := gen_random_uuid();
+@@ -513,21 +525,28 @@ begin
+   end loop;
+ 
+   if p_race ? 'position' then
+     v_position := (p_race->>'position')::int;
+   elsif is_insert then
+     select coalesce(max(position) + 1, 0) into v_position from public.races where event_id = v_event_id;
+   else
+     v_position := v_existing.position;
+   end if;
+ 
+-  v_config := public.default_race_config(v_team_size) || coalesce(p_race->'config', '{}'::jsonb);
++  -- Ruling 14: on UPDATE, keep the organizer's stored customizations when the payload omits
++  -- config (or only sends a partial one) -- defaults fill gaps, existing config wins over
++  -- defaults, and an explicitly-sent field wins over the existing value.
++  if is_insert then
++    v_config := public.default_race_config(v_team_size) || coalesce(p_race->'config', '{}'::jsonb);
++  else
++    v_config := public.default_race_config(v_team_size) || v_existing.config || coalesce(p_race->'config', '{}'::jsonb);
++  end if;
+   perform public.validate_race_config(v_config, v_event_id);
+ 
+   if not is_insert then
+     v_locked := exists (
+       select 1 from public.marks m join public.entries en on en.id = m.entry_id
+       where en.race_id = v_race_id and not m.discarded
+     );
+     if v_locked and (
+       jsonb_array_length(v_legs) <> jsonb_array_length(v_existing.legs)
+       or v_team_size <> v_existing.team_size
+@@ -543,38 +562,50 @@ begin
+     values (v_race_id, v_event_id, v_name, v_position, v_team_size, v_legs, v_config, null)
+     returning * into ev_race;
+   else
+     update public.races set
+       event_id = v_event_id, name = v_name, position = v_position, team_size = v_team_size,
+       legs = v_legs, config = v_config
+     where id = v_race_id
+     returning * into ev_race;
+   end if;
+ 
+-  for v_wave in select el from jsonb_array_elements(coalesce(p_race->'waves', '[]'::jsonb)) as t(el) loop
+-    v_wave_id := coalesce(nullif(v_wave->>'id', '')::uuid, gen_random_uuid());
+-    insert into public.waves (id, race_id, name, position, start_at)
+-    values (
+-      v_wave_id, v_race_id,
+-      coalesce(nullif(btrim(v_wave->>'name'), ''), 'Largada geral'),
+-      coalesce((v_wave->>'position')::int, 0),
+-      (v_wave->>'start_at')::timestamptz
+-    )
+-    on conflict (id) do update set
+-      race_id = excluded.race_id, name = excluded.name, position = excluded.position, start_at = excluded.start_at;
+-    v_keep_ids := v_keep_ids || v_wave_id;
+-  end loop;
+-
+-  delete from public.waves where race_id = v_race_id and not (id = any(v_keep_ids));
+-
+-  if array_length(v_keep_ids, 1) is null then
+-    insert into public.waves (race_id) values (v_race_id);
++  -- Ruling 12: on UPDATE, an ABSENT "waves" key -- or an explicit JSON null -- leaves existing
++  -- waves (and their recorded start_at) completely untouched: skip the loop, the delete and the
++  -- default-wave insert entirely. On INSERT, waves are always processed (absent/null/empty all
++  -- fall through to the "no waves" -> default-wave case below). A present array upserts by id and
++  -- deletes waves missing from it; if the race ends with zero waves, a default wave is created.
++  v_process_waves := is_insert
++    or ((p_race ? 'waves') and coalesce(jsonb_typeof(p_race->'waves'), 'null') <> 'null');
++
++  if v_process_waves then
++    -- Ruling 16: admin_save_race never changes start_at of an existing wave -- the upsert sets
++    -- only race_id/name/position, and a newly inserted wave always starts with start_at null.
++    -- Start times change exclusively via admin_set_wave_start.
++    for v_wave in select el from jsonb_array_elements(coalesce(p_race->'waves', '[]'::jsonb)) as t(el) loop
++      v_wave_id := coalesce(nullif(v_wave->>'id', '')::uuid, gen_random_uuid());
++      insert into public.waves (id, race_id, name, position)
++      values (
++        v_wave_id, v_race_id,
++        coalesce(nullif(btrim(v_wave->>'name'), ''), 'Largada geral'),
++        coalesce((v_wave->>'position')::int, 0)
++      )
++      on conflict (id) do update set
++        race_id = excluded.race_id, name = excluded.name, position = excluded.position;
++      v_keep_ids := v_keep_ids || v_wave_id;
++    end loop;
++
++    delete from public.waves where race_id = v_race_id and not (id = any(v_keep_ids));
++
++    if array_length(v_keep_ids, 1) is null then
++      insert into public.waves (race_id) values (v_race_id);
++    end if;
+   end if;
+ 
+   return jsonb_build_object(
+     'race', to_jsonb(ev_race),
+     'waves', coalesce((select jsonb_agg(to_jsonb(w) order by w.position) from public.waves w where w.race_id = v_race_id), '[]'::jsonb)
+   );
+ end $$;
+ 
+ create or replace function public.admin_delete_race(p_race_id uuid) returns void
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+diff --git a/supabase/tests/20_admin_events.sql b/supabase/tests/20_admin_events.sql
+index 916685a..ac9d3ed 100644
+--- a/supabase/tests/20_admin_events.sql
++++ b/supabase/tests/20_admin_events.sql
+@@ -41,62 +41,138 @@ do $$ declare ev jsonb; ev2 jsonb; r jsonb; agg jsonb; agg2 jsonb; dup uuid; wst
+   -- 10_schema.sql's own anon/count=0 assertion -- would hide the row from a bare `select ... from
+   -- public.waves`, independently of whether admin_set_wave_start itself worked correctly.)
+   wstart := public.admin_set_wave_start((r -> 'waves' -> 0 ->> 'id')::uuid, '2026-10-11T11:00:00Z');
+   assert (wstart ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz;
+   dup := public.admin_duplicate_event((ev ->> 'id')::uuid, 'Desafio EBC 2027', '2027-10-10');
+   agg2 := public.admin_get_event(dup);
+   assert jsonb_array_length(agg2 -> 'races') = 1;
+   assert jsonb_array_length(agg2 -> 'waves') = 1 and (agg2 -> 'waves' -> 0 ->> 'start_at') is null;
+   assert public.admin_rotate_tk_token((ev ->> 'id')::uuid) <> ev ->> 'tk_token';
+ end $$;
++
++-- Ruling 14: on UPDATE, config = default_race_config(new team_size) || existing.config ||
++-- coalesce(payload.config, '{}') -- an absent config key must keep the organizer's
++-- customizations, and a later partial config must merge onto that customization instead of
++-- resetting it to bare defaults.
++do $$ declare rc1 jsonb; rc2 jsonb; rc3 jsonb; begin
++  -- customize divergence_threshold_s away from the default (3)
++  rc1 := public.admin_save_race(jsonb_build_object(
++    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento', 'team_size', 2,
++    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
++    'config', '{"divergence_threshold_s": 5}'::jsonb
++  ));
++  assert (rc1 -> 'race' -> 'config' ->> 'divergence_threshold_s')::numeric = 5;
++
++  -- save without a config key at all -> the customization must survive
++  rc2 := public.admin_save_race(jsonb_build_object(
++    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (v2)', 'team_size', 2,
++    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb
++  ));
++  assert (rc2 -> 'race' -> 'config' ->> 'divergence_threshold_s')::numeric = 5,
++    'omitting config on UPDATE must keep the existing customization (Ruling 14), got ' ||
++    coalesce(rc2 -> 'race' -> 'config' ->> 'divergence_threshold_s', '<null>');
++
++  -- save with a different partial config -> merges onto the existing customization
++  rc3 := public.admin_save_race(jsonb_build_object(
++    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (v2)', 'team_size', 2,
++    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
++    'config', '{"same_crossing_window_s": 45}'::jsonb
++  ));
++  assert (rc3 -> 'race' -> 'config' ->> 'same_crossing_window_s')::numeric = 45;
++  assert (rc3 -> 'race' -> 'config' ->> 'divergence_threshold_s')::numeric = 5,
++    'a partial config update must merge onto the existing customization, not replace it (Ruling 14)';
++end $$;
++
+ select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[]'::jsonb))$$, 'P0001');
+ select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[{"modality":"fly","label":"?","distance_m":1}]'::jsonb))$$, 'P0001');
+ select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[{"modality":"run","label":"C","distance_m":1000}]'::jsonb, 'config', '{"age_groups":[{"label":"a","min":20,"max":29},{"label":"b","min":25,"max":34}]}'::jsonb))$$, 'P0001');
++-- NULL bypass (Minor finding): an explicit JSON null for a validated config field must be
++-- rejected, not silently treated as "unset" (plpgsql `IF NULL` is otherwise false).
++select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'legs', '[{"modality":"run","label":"C","distance_m":1000}]'::jsonb, 'config', '{"same_crossing_window_s": null}'::jsonb))$$, 'P0001');
+ 
+ -- extra: changing the number of legs of a race after a non-discarded mark exists on one of its
+ -- entries -> P0001 ("Não é possível alterar pernas ou tamanho da equipe depois que há marcações").
+ -- Fixture rows are inserted directly (as the postgres superuser, bypassing RLS) since
+ -- admin_save_entry / tk_sync belong to later tasks.
+ reset role;
+ do $$ declare v_entry uuid := gen_random_uuid(); begin
+   insert into public.entries (id, event_id, race_id, bib) values (v_entry, tests.get('ev')::uuid, tests.get('race')::uuid, '1');
+   insert into public.marks (id, event_id, ts, entry_id, leg_index, discarded)
+     values (gen_random_uuid(), tests.get('ev')::uuid, now(), v_entry, 0, false);
+ end $$;
+ select tests.as_user(tests.get('owner')::uuid);
+ select tests.assert_raises($$select public.admin_save_race(jsonb_build_object(
+   'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento', 'team_size', 2,
+   'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000},{"modality":"bike","label":"Ciclismo","distance_m":20000}]'::jsonb
+ ))$$, 'P0001');
+--- same leg count/order/team_size still succeeds despite the mark (only structural changes are blocked);
+--- resending the existing wave (by id, from tests.set('wave', ...) above) keeps updating that same
+--- row instead of creating a duplicate.
++-- same leg count/order/team_size still succeeds despite the mark (only structural changes are blocked).
++-- Ruling 16: admin_save_race must NEVER take start_at from the payload for an existing wave --
++-- resending the existing wave (by id, from tests.set('wave', ...) above) with an explicit
++-- "start_at": null must not clear the start recorded earlier by admin_set_wave_start, and must
++-- keep updating that same row instead of creating a duplicate.
+ do $$ declare r2 jsonb; begin
+   r2 := public.admin_save_race(jsonb_build_object(
+     'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (ajustada)', 'team_size', 2,
+     'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+-    'waves', jsonb_build_array(jsonb_build_object('id', tests.get('wave'), 'name', 'Largada geral', 'position', 0, 'start_at', '2026-10-11T11:00:00Z'))
++    'waves', jsonb_build_array(jsonb_build_object('id', tests.get('wave'), 'name', 'Largada geral', 'position', 0, 'start_at', null))
+   ));
+   assert r2 -> 'race' ->> 'name' = 'Revezamento (ajustada)';
+   assert jsonb_array_length(r2 -> 'waves') = 1, 'resending the same wave id should not duplicate it';
+   assert (r2 -> 'waves' -> 0 ->> 'id') = tests.get('wave');
+-  assert (r2 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz;
++  assert (r2 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz,
++    'admin_save_race must never take start_at from the payload (Ruling 16) -- the recorded start ' ||
++    'must survive a "start_at": null in the wave payload, got ' || coalesce(r2 -> 'waves' -> 0 ->> 'start_at', '<null>');
+ end $$;
+--- omitting waves entirely resets the race to a single fresh "Largada geral" wave (spec: "if the
+--- payload has no waves, ensure one Largada geral exists") -- pinning this documented behavior.
++
++-- Ruling 12: an ABSENT "waves" key on UPDATE must leave existing waves -- and their start_at --
++-- completely untouched. A race-details-only save (e.g. renaming the race) must not wipe a
++-- recorded wave start.
+ do $$ declare r3 jsonb; begin
+   r3 := public.admin_save_race(jsonb_build_object(
+-    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (ajustada)', 'team_size', 2,
++    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada)', 'team_size', 2,
+     'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb
+   ));
+-  assert jsonb_array_length(r3 -> 'waves') = 1 and (r3 -> 'waves' -> 0 ->> 'start_at') is null,
+-    'omitting waves resets to a single default wave';
++  assert r3 -> 'race' ->> 'name' = 'Revezamento (renomeada)';
++  assert jsonb_array_length(r3 -> 'waves') = 1,
++    'an absent waves key must leave the existing wave(s) untouched, not reset to a fresh default';
++  assert (r3 -> 'waves' -> 0 ->> 'id') = tests.get('wave'),
++    'the surviving wave must be the SAME row (same id), not a freshly created default';
++  assert (r3 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz,
++    'omitting waves must not clear the recorded start_at (Ruling 12), got ' ||
++    coalesce(r3 -> 'waves' -> 0 ->> 'start_at', '<null>');
++end $$;
++
++-- Ruling 12: an explicit JSON null for "waves" must behave exactly like an absent key.
++do $$ declare r4 jsonb; begin
++  r4 := public.admin_save_race(jsonb_build_object(
++    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
++    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
++    'waves', null
++  ));
++  assert jsonb_array_length(r4 -> 'waves') = 1
++    and (r4 -> 'waves' -> 0 ->> 'id') = tests.get('wave')
++    and (r4 -> 'waves' -> 0 ->> 'start_at')::timestamptz = '2026-10-11T11:00:00Z'::timestamptz,
++    'an explicit "waves": null must behave exactly like an absent key (Ruling 12)';
++end $$;
++
++-- A present, non-empty waves array still upserts by id and deletes waves missing from it; when
++-- it ends with zero waves, a fresh "Largada geral" is created (unlike the absent/null cases above).
++do $$ declare r5 jsonb; begin
++  r5 := public.admin_save_race(jsonb_build_object(
++    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
++    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
++    'waves', '[]'::jsonb
++  ));
++  assert jsonb_array_length(r5 -> 'waves') = 1
++    and (r5 -> 'waves' -> 0 ->> 'name') = 'Largada geral'
++    and (r5 -> 'waves' -> 0 ->> 'start_at') is null,
++    'a present empty waves array must delete existing waves and create a fresh default, unlike an absent/null key';
+ end $$;
+ 
+ -- organizers
+ do $$ declare o jsonb; begin
+   o := public.admin_create_organizer('Ajudante@EBC.test', 'senha-forte-2', 'Ajudante');
+   assert o ->> 'role' = 'admin' and o ->> 'email' = 'ajudante@ebc.test';
+   assert jsonb_array_length(public.admin_list_organizers()) = 2;
+   perform tests.set('helper', o ->> 'user_id');
+ end $$;
+ -- extra: admin_create_organizer called by an admin (not owner) -> 42501
