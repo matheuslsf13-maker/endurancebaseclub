@@ -5,8 +5,9 @@ import { api } from '../../lib/api';
 import { indexEvent, mergeById } from '../../domain/eventModel';
 import { computeEventTiming } from '../../domain/consolidation';
 import type { Crossing, EntryTiming, LegTiming } from '../../domain/consolidation';
-import { classifyRace } from '../../domain/ranking';
+import { classifyRace, compareGroupOrder } from '../../domain/ranking';
 import type { PodiumGroup, PodiumPlace, RaceClassification, RankedEntry } from '../../domain/ranking';
+import type { EntryCategory } from '../../domain/categories';
 import { formatDateBR } from '../../lib/format';
 import { Badge, Card, EmptyState, Spinner } from '../../components/ui';
 import { ClassificationTable } from '../results/ClassificationTable';
@@ -72,9 +73,13 @@ function timingFromSnapshot(r: ResultRow): EntryTiming {
 /** Groups every entry's frozen `data.podiums` places by ranking + group label, resolving the full
  * `RankingDef` from the race's current config when it still has that ranking (falls back to a
  * name-only stub otherwise — the config could have changed since the race was finalized). Orders
- * groups by the race's ranking order so `PodiumView`'s "adjacent same ranking" grouping holds. */
-function reconstructPodiums(race: RaceRow, results: ResultRow[], rowsByEntry: Map<string, RankedEntry>): PodiumGroup[] {
+ * groups by the race's ranking order, then within a ranking by the same canonical group order
+ * (`compareGroupOrder`, spec §9: sex M, F, MISTO; age groups by `min`; levels in event order) that
+ * `domain/ranking.ts`'s `buildPodiums` uses for the live view — reused here instead of an ad-hoc
+ * alphabetical sort so a finalized race's podiums match the order shown before it was finalized. */
+function reconstructPodiums(race: RaceRow, results: ResultRow[], rowsByEntry: Map<string, RankedEntry>, levels: string[]): PodiumGroup[] {
   const groups = new Map<string, PodiumGroup>();
+  const groupCategory = new Map<string, EntryCategory>();
   for (const r of results) {
     const ranked = rowsByEntry.get(r.entry_id);
     if (!ranked) continue;
@@ -87,6 +92,7 @@ function reconstructPodiums(race: RaceRow, results: ResultRow[], rowsByEntry: Ma
         };
         group = { ranking: rankingDef, group_key: key, group_label: p.group_label, places: [] };
         groups.set(key, group);
+        groupCategory.set(key, r.data.category);
       }
       group.places.push({ podium_pos: p.podium_pos, ranked });
     }
@@ -96,14 +102,16 @@ function reconstructPodiums(race: RaceRow, results: ResultRow[], rowsByEntry: Ma
   return [...groups.values()].sort((a, b) => {
     const ai = order.indexOf(a.ranking.id);
     const bi = order.indexOf(b.ranking.id);
-    return (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi) || a.group_label.localeCompare(b.group_label, 'pt-BR');
+    const rankingOrder = (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi);
+    if (rankingOrder !== 0) return rankingOrder;
+    return compareGroupOrder(a.ranking.dims, groupCategory.get(a.group_key)!, groupCategory.get(b.group_key)!, race.config.age_groups, levels);
   });
 }
 
 /** Rebuilds the `RaceClassification` `ClassificationTable`/`PodiumView` expect from a finalized
  * race's stored `results`, ordering rows by their frozen `overall_pos` (spec: "ordenados por
  * overall_pos, a partir dos snapshots") instead of recomputing anything from live marks. */
-function classificationFromResults(race: RaceRow, results: ResultRow[], athletesById: Map<string, AthleteRow>): RaceClassification {
+function classificationFromResults(race: RaceRow, results: ResultRow[], athletesById: Map<string, AthleteRow>, levels: string[]): RaceClassification {
   const rowsByEntry = new Map<string, RankedEntry>();
   const built = results.map((r) => {
     const entry = entryFromSnapshot(r);
@@ -131,7 +139,7 @@ function classificationFromResults(race: RaceRow, results: ResultRow[], athletes
   }
 
   const rows = [...ranked, ...unranked];
-  return { race, rows, finishers: ranked.length, podiums: reconstructPodiums(race, results, rowsByEntry) };
+  return { race, rows, finishers: ranked.length, podiums: reconstructPodiums(race, results, rowsByEntry, levels) };
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +242,7 @@ export default function PublicEventPage() {
     if (!payload || !index || !race) return null;
     if (isOfficial) {
       const raceResults = payload.results.filter((r) => r.race_id === race.id);
-      return classificationFromResults(race, raceResults, index.athletesById);
+      return classificationFromResults(race, raceResults, index.athletesById, payload.event.levels);
     }
     if (!liveTiming) return null;
     const entries = payload.entries.filter((e) => e.race_id === race.id);

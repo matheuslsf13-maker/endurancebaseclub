@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { classifyRace } from './ranking';
+import { classifyRace, compareGroupOrder } from './ranking';
 import type { EntryTiming, TimingStatus } from './consolidation';
+import type { EntryCategory } from './categories';
 import type { AthleteRow, EntryRow } from '../lib/types';
 import { makeRace, makeEntry, makeAthlete, T0, MIN } from './testing/fixtures';
 
@@ -84,5 +85,29 @@ describe('classifyRace', () => {
     expect(ghostRow.overall_pos).toBeNull();
     expect(ghostRow.sex_pos).toBeNull();
     expect(withGhost.finishers).toBe(9);
+  });
+});
+
+describe('compareGroupOrder (exported for reuse by public.PublicEventPage\'s finalized-race podium reconstruction)', () => {
+  const cat = (p: Partial<EntryCategory>): EntryCategory => ({ sex: 'M', age: null, age_group: null, level: null, ...p });
+  const ageGroups = [{ label: 'até 19', min: 0, max: 19 }, { label: '20-29', min: 20, max: 29 }, { label: '60+', min: 60, max: null }];
+  const levels = ['Elite', 'Base'];
+
+  it('orders sex M, F, MISTO', () => {
+    const order: EntryCategory['sex'][] = ['MISTO', 'F', 'M'];
+    const sorted = [...order].sort((a, b) => compareGroupOrder(['sex'], cat({ sex: a }), cat({ sex: b }), ageGroups, levels));
+    expect(sorted).toEqual(['M', 'F', 'MISTO']);
+  });
+
+  it('orders age groups by min, with "até 19" first and "60+" last', () => {
+    const labels = ['60+', 'até 19', '20-29'];
+    const sorted = [...labels].sort((a, b) => compareGroupOrder(['age'], cat({ age_group: a }), cat({ age_group: b }), ageGroups, levels));
+    expect(sorted).toEqual(['até 19', '20-29', '60+']);
+  });
+
+  it('orders levels by their position in event.levels, "Sem nível" last', () => {
+    const vals: (string | null)[] = [null, 'Base', 'Elite'];
+    const sorted = [...vals].sort((a, b) => compareGroupOrder(['level'], cat({ level: a }), cat({ level: b }), ageGroups, levels));
+    expect(sorted).toEqual(['Elite', 'Base', null]);
   });
 });
