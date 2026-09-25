@@ -243,3 +243,5 @@ Task 8: review Approved (sonnet)
 - Ruling 43: pub_event keeps returning discarded marks too (brief/T7 text: "all, including discarded so clients can drop them") over spec §6's "não descartadas" — live deltas must be able to carry a discard so public clients remove a mark they already hold; payload already strips audit fields — cost if wrong: a few extra rows in the public payload.
 Task 8: minor (deferred): timekeeper named "Ana" collides with athlete "Ana" in the flow (brief-mandated names)
 Task 8: complete (commits 2427895..fc400e9, review clean; feat merged into task/8, integration green) — merged into feat/ebc-app as 8c46b43
+Task 23: fix round 1/5 (1 addressed, 0 open — timingHelpers.ts; commits 51a34e6..03af4bf) — scoped re-review clean
+Task 23: complete (commits bae2379..03af4bf, review clean; feat merged into task/23:       Tests  418 passed (418)) — merged into feat/ebc-app as 812d13f
