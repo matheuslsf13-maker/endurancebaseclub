@@ -317,6 +317,29 @@ describe('useToast', () => {
     expect(onUndo).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['neutral', 'success', 'warning', 'danger'] as const)(
+    'a %s toast is opaque: its tint is mixed into the surface, never see-through (Task 28 E2E)',
+    (tone) => {
+      function Show() {
+        const { show } = useToast();
+        return <button onClick={() => show({ message: 'Prova finalizada.', tone, testid: 't' })}>Mostrar</button>;
+      }
+      render(
+        <ToastProvider>
+          <Show />
+        </ToastProvider>,
+      );
+      fireEvent.click(screen.getByText('Mostrar'));
+      const classes = screen.getByTestId('t').className.split(/\s+/);
+      // The toast floats over whatever is under it (a QR code, a table): an alpha background such
+      // as `bg-success/15` let that content show through the message on a phone.
+      expect(classes.filter((c) => /^bg-[\w-]+\/\d+$/.test(c))).toEqual([]);
+      expect(
+        classes.some((c) => /^bg-(surface|surface-2|\[color-mix\(in_srgb,var\(--color-\w+\)_\d+%,var\(--color-surface\)\)\])$/.test(c)),
+      ).toBe(true);
+    },
+  );
+
   it('pauses the auto-dismiss timer while hovered and resumes with the remaining time on mouseleave', () => {
     vi.useFakeTimers();
     const onUndo = vi.fn();
