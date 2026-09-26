@@ -751,3 +751,130 @@ npm run build      →  dist/assets/index-DlxvqrsJ.js 814.50 kB │ gzip: 238.70
 
 - **Remaining limit, accepted in Ruling 53:** a mark forgotten less than 60 s before a pack stays the burst head, which is inherent to FIFO. The target is shown on screen ("Selecionada" and the "Em prova" header).
 - **Behaviour change in the `none` case:** after the timekeeper deselects, MARCAR returns to the automatic pick (the burst head) instead of selecting the new mark explicitly. It is FIFO-consistent: bibs typed in order land in order.
+
+## Fix round 3
+
+**Status: DONE.** This round fixes the round-2 re-review's new Important and implements Ruling 54, on top of `d1cff39`.
+
+- **Commit:** `755f0a7` fix(timekeeper): new mark selected after a deselection; selection origin (Ruling 54)
+- **Files changed:** only the Files block.
+
+```
+src/features/timekeeper/TimekeeperPage.tsx  | 46 +++++++++++----------
+src/features/timekeeper/timekeeper.test.tsx | 64 +++++++++++++++++++++++++++++
+src/features/timekeeper/tkStore.test.ts     | 43 +++++++++++++------
+src/features/timekeeper/tkStore.ts          | 42 +++++++++++++------
+4 files changed, 148 insertions(+), 47 deletions(-)
+```
+
+Line numbers below refer to `755f0a7`.
+
+### (1) MARCAR without a bib after a deselection selects the new mark
+
+**What changed**
+
+- `tkStore.ts:208-215` `selectionAfterMark(sel, unassigned, mark: { id, ts })`: `none` now returns `{ mode: 'id', id: <new mark>, origin: 'user' }`. Round 2 returned `auto`, which was the regression. The other branches are unchanged:
+  - A selection whose mark was tapped before the new mark's burst goes back to `auto`.
+  - Anything else stays as it is.
+- `TimekeeperPage.tsx:328` passes the new mark `{ id, ts }`.
+
+**How I read "while nothing is selected":** it means the timekeeper's deselection (`none`). In `auto` mode the new mark is already the automatic target whenever nothing else is:
+- With no live burst before the tap, the new mark starts its own burst and is its head.
+- It lapses with the burst, so the round-1 rule still holds: "an arrival tap marks now instead of using a mark left without athlete for 2 min" stays green.
+- Making it a permanent `user` selection in `auto` would have broken that test.
+
+**Covering tests**
+
+- `tkStore.test.ts` "MARCAR after a deselection selects the new mark for the timekeeper; a selection from before its burst goes back to auto (Ruling 54)". It replaces the round-2 test at :313 that encoded `none → auto`.
+- `timekeeper.test.tsx`:
+  - "MARCAR after a deselection selects the new mark, not an older one of its burst (Ruling 54)". This is the ruling's trace:
+    1. Mark A, then deselect A.
+    2. 20 s later, MARCAR records C, and C shows as selected.
+    3. `101` + Atribuir: C gets `en1`, and A stays in "Sem atleta".
+  - "after a deselection, an \"Em prova\" tap following MARCAR identifies the new mark (Ruling 54)". This is the re-review's other path, through a row tap.
+
+**RED** (`npx vitest run src/features/timekeeper`, new tests on `d1cff39`). The re-review's trace appears: the athlete was filed at A's instant, 20 s early.
+
+```
+FAIL … after a deselection, an "Em prova" tap following MARCAR identifies the new mark (Ruling 54)
+    [ "2026-10-11T11:10:01.500Z",  - null  + "en3" ],
+    [ "2026-10-11T11:10:21.500Z",  - "en3" + null  ]
+FAIL … MARCAR after a deselection selects the new mark, not an older one of its burst → Unable to find an accessible element with the role "button" (pressed: true)
+FAIL tkStore.test.ts … MARCAR after a deselection selects the new mark … → expected { mode: 'auto' } to deeply equal { mode: 'id', id: 'new', …(1) }
+```
+
+**Mutation check:** restoring `none → auto` makes these 3 tests fail.
+
+### (2) Selections carry their origin
+
+**What changed**
+
+- `tkStore.ts:177`: `Selection = auto | none | { mode: 'id'; id; origin: 'user' | 'app' }`.
+- **`user` selections**, set by the timekeeper's own actions:
+  - a tap in "Sem atleta" (`TimekeeperPage.tsx:435`)
+  - MARCAR's new mark after a deselection (above)
+  - Desfazer (:274) and Reatribuir (:450). The ruling does not list these two. I made them `user` because each is the timekeeper's own action on that one mark.
+- **`app` selections**, set by the screen:
+  - kept after a failed bib (:321)
+  - kept after a failed "Em prova" commit (:387)
+- **A typed bib** (`selectedMarkId`, :181, unchanged logic) honours both origins while the mark is in "Sem atleta", else the burst head. This mark is the one shown as "Selecionada".
+- **An "Em prova" tap** uses the new `tapTargetId` (:193):
+  - `none` → null, meaning a new mark now.
+  - A `user` selection → that mark, always.
+  - An `app` selection → that mark only while it is inside the live Ruling 53 burst.
+  - Otherwise `burstHead`: the head while the burst is fresh, else null, meaning a new mark now.
+- **The page** (:242-245) computes both targets:
+  - A row press captures `rowTargetId` on pointerdown (:422), and a keyboard or screen-reader click uses it too (:431).
+  - The "Em prova" header now names the mark a tap will identify (`targetMark`, :626/:651). When a failed-bib mark outside its burst is still "Selecionada" for a bib, the header correctly says "Toque na inscrição na hora da passagem: marca e atribui de uma vez."
+
+**Covering tests**
+
+- `tkStore.test.ts`:
+  - "an \"Em prova\" tap honours a user selection always, an app selection only inside the live burst (Ruling 54)". It covers stale `user` versus `app`, an `app` selection inside the burst, an `app` selection lapsing when its burst's newest turns 61 s old, and `auto`/`none`/gone.
+  - "a typed bib goes to the burst head, or to a selection of either origin while its mark waits". This is the round-2 bib test, now with origins.
+- `timekeeper.test.tsx`:
+  - "a failed-bib mark outside its burst does not capture a later arrival tap; the corrected bib still reaches it (Ruling 54)":
+    1. `999` + MARCAR records M; 70 s pass. M is still "Selecionada", and the header offers an arrival tap.
+    2. A tap on 303 records a **new** mark for `en3` at the tap instant; M is untouched.
+    3. `101` + Atribuir then files **M** on `en1`.
+  - "within its burst, an arrival tap still identifies the failed-bib mark, not the burst head (Ruling 54)":
+    1. W waits as the burst head.
+    2. 3 s later, M's bib `999` fails.
+    3. 5 s later a tap on 303 files M on `en3`, and W stays unassigned.
+    - My first version of this test had no W. With no W, the failed-bib mark was also the burst head, so the "never honour app" mutation went undetected at screen level. The earlier mark W fixes that.
+- Still green unchanged: "a corrected bib reaches the mark whose bib failed, even after 60 s (Ruling 53)", "after a mistyped bib, the corrected bib goes to that mark…", and every round-1/round-2 test.
+
+**RED**
+
+```
+FAIL … a failed-bib mark outside its burst does not capture a later arrival tap … → Unable to find an element with the text: Toque na inscrição na hora da passagem: marca e atribui de uma vez.   (the header offered M; the tap would file the athlete at M's instant, 70 s early)
+FAIL tkStore.test.ts … an "Em prova" tap honours a user selection always … → TypeError: tapTargetId is not a function
+```
+
+Overall RED: `Test Files 2 failed (2) · Tests 5 failed | 88 passed (93)`.
+
+**Mutation checks** (applied, run, restored):
+- Row taps honour `app` always: 2 tests fail.
+- Row taps never honour `app`: 2 fail (unit test + the strengthened within-burst test).
+- Row press targeting the bib selection (`selectedId`) instead of `rowTargetId`: 1 fails.
+
+### TDD summary and gates
+
+- **RED:** `npx vitest run src/features/timekeeper` on `d1cff39` + new tests: `Tests 5 failed | 88 passed (93)`.
+- **GREEN:** `npx vitest run src/domain/consolidation.test.ts src/features/timekeeper src/lib/outbox.test.ts src/lib/storage.test.ts` gives `Test Files 5 passed (5) · Tests 142 passed (142)`.
+
+**Gates**
+
+```
+npx vitest run     →  Test Files  36 passed (36)
+                      Tests  540 passed (540)          (round 2: 535; +5 this round)
+                      no warnings / act() / unhandled rejections in the output
+npm run typecheck  →  tsc --noEmit -p tsconfig.json    (exit 0, clean)
+npm run build      →  dist/assets/index-Cw396mv_.js 814.79 kB │ gzip: 238.77 kB · ✓ built in 360ms
+                      (only the existing >500 kB chunk warning)
+```
+
+### Notes
+
+- A `user` selection is honoured by row taps however old it is, as the ruling requires. A timekeeper who deselects, taps MARCAR and then abandons that mark keeps it as the row target until it is identified or discarded. The "Em prova" header shows its time.
+- Deferred items, not touched: the lock held in the invalid phase, and the tappable "✓ marcada por você" rows.
