@@ -433,6 +433,14 @@ describe('ThemeToggle', () => {
     expect(block(':root, [data-theme="dark"]')).toMatch(/color-scheme:\s*dark;/);
     expect(block('[data-theme="light"]')).toMatch(/color-scheme:\s*light;/);
   });
+
+  it('native radios and checkboxes use the brand accent, not the browser blue (Task 28 E2E)', () => {
+    // The Revisão decision radios (CrossingEditor) rendered browser-blue; only the kit Checkbox
+    // set accent-color itself. accent-color inherits, so the root declares it once.
+    const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8');
+    const start = css.indexOf(':root, [data-theme="dark"] {');
+    expect(css.slice(start, css.indexOf('}', start))).toMatch(/accent-color:\s*var\(--accent\);/);
+  });
 });
 
 describe('QrCode', () => {
