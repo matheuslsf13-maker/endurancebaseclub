@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { useState } from 'react';
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -407,6 +409,20 @@ describe('ThemeToggle', () => {
     await user.click(toggle);
     expect(document.documentElement.dataset.theme).toBe('dark');
     expect(window.localStorage.getItem('ebc.theme')).toBe('dark');
+  });
+
+  it('each theme declares its color-scheme, so native controls follow it (Task 28 E2E)', () => {
+    // Without it the dark theme kept light native widgets: white scrollbars and a dark calendar
+    // icon on the dark date field. jsdom does not apply stylesheets, so the rule is read from
+    // index.css itself.
+    const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8');
+    const block = (selector: string) => {
+      const start = css.indexOf(`${selector} {`);
+      expect(start, `${selector} block`).toBeGreaterThanOrEqual(0);
+      return css.slice(start, css.indexOf('}', start));
+    };
+    expect(block(':root, [data-theme="dark"]')).toMatch(/color-scheme:\s*dark;/);
+    expect(block('[data-theme="light"]')).toMatch(/color-scheme:\s*light;/);
   });
 });
 
