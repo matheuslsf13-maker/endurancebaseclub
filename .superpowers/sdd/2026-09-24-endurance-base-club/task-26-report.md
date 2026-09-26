@@ -192,3 +192,160 @@ touched).
 ## Status
 
 DONE.
+
+## Fix round 1
+
+Branch: `task/26` (worktree `C:\ENDURANCE\ebc-wt\t26`), base `cd06143` (T26 + feat/ebc-app merged).
+Commit: `ef3a9a3`.
+
+### Finding addressed
+
+Review **Important 1**: `reconstructPodiums` (`src/features/public/PublicEventPage.tsx`, was around
+line 76-101) sorted a finalized race's podium groups *within one ranking* alphabetically by
+`group_label` (`a.group_label.localeCompare(b.group_label, 'pt-BR')`), instead of the canonical
+spec §9 order (sex M, F, MISTO; age groups by `min`; levels in event order) that
+`domain/ranking.ts`'s `buildPodiums`/`compareGroupOrder` already use for the live view. Effects:
+Feminino rendered before Masculino on the official page while the live view/admin showed Masculino
+first; age labels misordered ("até 19" sorted after "60+", since digits collate before letters).
+Untested before because the fixture only ever had one populated group per ranking.
+
+### Changes
+
+- `src/domain/ranking.ts:99` — exported the existing `compareGroupOrder(dims, a, b, ageGroups,
+  levels)` (previously module-private). No behavior change: same implementation, same call sites
+  inside the file (`buildPodiums`), just made public so another module can reuse it. Added a
+  doc-comment note pointing at the new caller.
+- `src/features/public/PublicEventPage.tsx`:
+  - `reconstructPodiums` (line ~79) now takes an extra `levels: string[]` parameter, tracks each
+    group's representative `EntryCategory` (`groupCategory: Map<string, EntryCategory>`, captured
+    from `r.data.category` the first time a group is seen — every member of a `ranking_id::group_label`
+    key shares the same relevant category dimensions), and replaces the alphabetical tie-break with
+    `compareGroupOrder(a.ranking.dims, groupCategory.get(a.group_key)!, groupCategory.get(b.group_key)!, race.config.age_groups, levels)`
+    (line ~106). The primary sort key — ranking order from `race.config.rankings` — was already
+    correct and is unchanged.
+  - `classificationFromResults` (line ~106) now takes and forwards a `levels: string[]` parameter
+    to `reconstructPodiums`.
+  - The call site in `PublicEventPage`'s `cls` `useMemo` (line ~237) now passes
+    `payload.event.levels` (the same source `classifyRace`'s live path already uses via `event.levels`).
+  - New imports: `compareGroupOrder` from `../../domain/ranking`, `EntryCategory` from
+    `../../domain/categories` (both already-exported types/functions from files this task does not
+    own the *contents* of, but only imports from — no other change to either file besides the
+    controller-granted export).
+
+### Covering tests
+
+- `src/features/public/public.test.tsx` — new test in the `PublicEventPage` describe block:
+  `"orders a finalized race's podium groups per spec §9 (sex M, F; age by min) and matches the live
+  view's order for the same data"`. Fixture: 6 single-leg entries, 3 women / 3 men, crossed with
+  three age brackets from the default age-group ladder (`"até 19"`, `"20-29"`, `"60+"`), each
+  finishing at a distinct time, race config patched to `cumulative: true` (so every athlete
+  naturally podiums in both the `geral` and `faixa` rankings — the test targets group *order*, not
+  the separate cumulative/non-cumulative exclusion rule, which is already covered in
+  `ranking.test.ts`). Renders the same underlying data twice — once as a finalized race (`results`
+  populated, reconstructed via `classificationFromResults`) and once as a live race (`results: []`,
+  computed via `computeEventTiming` + `classifyRace`) — and asserts the DOM order of `<p>` group
+  labels inside `[data-testid="podiums"]` equals the canonical spec §9 sequence in *both* renders:
+  `['Masculino', 'Feminino', 'Masculino · até 19', 'Masculino · 20-29', 'Masculino · 60+', 'Feminino · até 19', 'Feminino · 20-29', 'Feminino · 60+']`.
+- `src/domain/ranking.test.ts` — new `describe('compareGroupOrder …')` block (3 tests) directly
+  exercising the newly-exported function: sex order M/F/MISTO, age-group order by `min` (`"até 19"`
+  first, `"60+"` last), and level order by position in `event.levels` (`"Sem nível"`/`null` last).
+  Locks down the exported contract independent of the reconstruction call site.
+
+### TDD evidence
+
+RED — added the new `public.test.tsx` test (and the fixture helpers it needs) against the
+still-buggy `PublicEventPage.tsx`:
+```
+$ npx vitest run src/features/public/public.test.tsx
+ ❯ src/features/public/public.test.tsx (9 tests | 1 failed) 333ms
+   ❯ PublicEventPage (5)
+     × orders a finalized race's podium groups per spec §9 (sex M, F; age by min) and matches the live view's order for the same data 31ms
+
+AssertionError: expected [ 'Feminino', 'Masculino', …(6) ] to deeply equal [ 'Masculino', 'Feminino', …(6) ]
+
+- Expected
++ Received
+
+  [
+-   "Masculino",
+    "Feminino",
+-   "Masculino · até 19",
+-   "Masculino · 20-29",
+-   "Masculino · 60+",
+-   "Feminino · até 19",
++   "Masculino",
+    "Feminino · 20-29",
+    "Feminino · 60+",
++   "Feminino · até 19",
++   "Masculino · 20-29",
++   "Masculino · 60+",
++   "Masculino · até 19",
+  ]
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 8 passed (9)
+```
+(Reproduces the review's exact finding: Feminino before Masculino, "até 19" sorting after "60+".)
+
+One intermediate iteration: the first fixture draft left the race at the default `cumulative: false`,
+which (correctly, per spec) excluded every athlete from the `faixa` ranking once `geral` had already
+awarded all 6 of them (3 per sex, `size: 3`) — the *live* render then showed only 2 podium groups
+(`geral`'s Masculino/Feminino) with `faixa` empty, failing the second half of the assertion for an
+unrelated reason (the exclusion rule, not the ordering bug). Patched the race's `config.cumulative`
+to `true` in the fixture so every athlete podiums in both rankings, keeping the test scoped to group
+*order* only.
+
+GREEN — after the `ranking.ts` export and the `PublicEventPage.tsx` fix:
+```
+$ npx vitest run src/features/public/public.test.tsx src/domain/ranking.test.ts
+ Test Files  2 passed (2)
+      Tests  18 passed (18)
+```
+
+### Gates
+
+Full suite:
+```
+$ npx vitest run
+ Test Files  35 passed (35)
+      Tests  455 passed (455)
+```
+(451 → 455: the 4 new tests — 1 in `public.test.tsx`, 3 in `ranking.test.ts`.)
+
+Typecheck:
+```
+$ npm run typecheck
+> tsc --noEmit -p tsconfig.json
+(no output — clean)
+```
+
+Build:
+```
+$ npm run build
+✓ 289 modules transformed.
+dist/index.html                   0.81 kB │ gzip:   0.44 kB
+dist/assets/index-*.css          27.88 kB │ gzip:   6.29 kB
+dist/assets/index-*.js          789.60 kB │ gzip: 230.50 kB
+✓ built in 641ms
+```
+(same pre-existing >500 kB chunk-size warning, unrelated to this fix — no code splitting touched.)
+
+### Files changed
+
+- `src/domain/ranking.ts` (export only, no behavior change)
+- `src/domain/ranking.test.ts` (+3 tests for the export)
+- `src/features/public/PublicEventPage.tsx` (the fix)
+- `src/features/public/public.test.tsx` (+1 test + fixtures)
+
+### Concerns
+
+- None new. The two Minor items from the review (PublicHome's `instanceof ApiError`, the
+  `usePublicLivePoll` `refetched` guard, and the duplicated `UNRANKED_STATUS_ORDER`/bib-collator
+  constants) were left untouched per the round's scope (deferred to the final review).
+- `reconstructPodiums`'s fallback `RankingDef` stub path (a finalized race whose `config.rankings`
+  no longer contains a ranking id a stored snapshot references) still has no direct test — same
+  known/accepted gap noted in the original report, unrelated to this fix.
+
+### Status
+
+DONE.
