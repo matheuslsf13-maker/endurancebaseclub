@@ -95,8 +95,12 @@ function levelIndex(levels: string[], level: string | null): number {
  * ("Sem faixa" last); then level in `event.levels` order ("Sem nível" last) — only for the
  * dimensions that ranking actually groups by (a dimension absent from `dims` never splits the
  * group, so it plays no part in ordering it).
+ *
+ * Exported so any other reconstruction of podium groups from frozen data (e.g. the public
+ * finalized-race view in `features/public/PublicEventPage.tsx`) can reuse the same canonical
+ * order instead of re-deriving or approximating it (e.g. alphabetically).
  */
-function compareGroupOrder(dims: RankingDim[], a: EntryCategory, b: EntryCategory, ageGroups: AgeGroup[], levels: string[]): number {
+export function compareGroupOrder(dims: RankingDim[], a: EntryCategory, b: EntryCategory, ageGroups: AgeGroup[], levels: string[]): number {
   if (dims.includes('sex')) {
     const c = SEX_ORDER[a.sex] - SEX_ORDER[b.sex];
     if (c !== 0) return c;
