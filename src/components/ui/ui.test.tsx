@@ -389,6 +389,15 @@ describe('Layout', () => {
     await user.click(screen.getByTestId('logout'));
     expect(onLogout).toHaveBeenCalledTimes(1);
   });
+
+  it('on phones the main nav gets a full-width row of its own (Task 28 E2E, 390 px)', () => {
+    // `flex-1` (flex-basis 0) overrode `w-full`: the nav squeezed in beside the theme/Sair buttons
+    // and hid "Ajuda" and "Configurações" off-screen. Only from `sm` up may it share the row.
+    renderWithProviders(<Layout onLogout={vi.fn()} />, { route: '/eventos' });
+    const nav = screen.getByRole('navigation', { name: 'Principal' });
+    expect(nav).toHaveClass('w-full', 'order-3', 'sm:flex-1');
+    expect(nav).not.toHaveClass('flex-1');
+  });
 });
 
 describe('ThemeToggle', () => {
