@@ -5,8 +5,8 @@ import {
   iso, makeEntry, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
 } from '../../domain/testing/fixtures';
 import {
-  applyWaveStarts, assignMark, assignmentMessage, burstHead, localToMarkRow, markToInput, mergedMarks, newMark, onCourse,
-  selectedMarkId, sessionIndex,
+  applyWaveStarts, assignMark, assignmentMessage, burstHead, currentBurst, localToMarkRow, markToInput, mergedMarks, newMark,
+  onCourse, selectedMarkId, selectionAfterMark, sessionIndex,
 } from './tkStore';
 
 const ME = 'tk-me';
@@ -267,32 +267,53 @@ describe('onCourse: crossings this timekeeper already marked (Ruling 44 M8)', ()
   });
 });
 
-describe('burst selection (review Important 1)', () => {
+describe('burst selection (Ruling 53)', () => {
   const now = T0 + 10 * MIN;
   const un = (id: string, agoMs: number) => makeMark({ id, at: now - agoMs, timekeeper_id: ME, entry_id: null, leg_index: null });
-  const stale = un('stale', 2 * MIN);
-  const a = un('a', 20 * SEC);
-  const b = un('b', 10 * SEC);
+  const stale = un('stale', 3 * MIN);
+  // A pack identified slowly: its head is already 70 s old, the newest only 10 s.
+  const p0 = un('p0', 70 * SEC);
+  const p1 = un('p1', 40 * SEC);
+  const p2 = un('p2', 10 * SEC);
+  const ids = (marks: { id: string }[]) => marks.map(m => m.id);
 
-  it('burstHead is the oldest mark younger than the 60 s unassigned threshold', () => {
-    expect(burstHead([stale, a, b], now)?.id).toBe('a');
-    expect(burstHead([b, a], now)?.id).toBe('a');
-    expect(burstHead([un('edge', 60 * SEC)], now)?.id).toBe('edge');
-    expect(burstHead([un('old', 60 * SEC + 1)], now)).toBeNull();
+  it('the burst is the marks tapped up to 60 s before the newest, while the newest is fresh', () => {
+    expect(ids(currentBurst([p2, stale, p0, p1], now))).toEqual(['p0', 'p1', 'p2']);
+    expect(ids(currentBurst([un('edge', 70 * SEC), un('out', 70 * SEC + 1), un('newest', 10 * SEC)], now))).toEqual(['edge', 'newest']);
+    // The newest decides: exactly 60 s old is still fresh, 1 ms more and nothing is picked on its own.
+    expect(ids(currentBurst([un('x', 90 * SEC), un('y', 60 * SEC)], now))).toEqual(['x', 'y']);
+    expect(currentBurst([un('x', 90 * SEC), un('y', 60 * SEC + 1)], now)).toEqual([]);
+    expect(currentBurst([stale], now)).toEqual([]);
+    expect(currentBurst([], now)).toEqual([]);
+    // Only marks still without an athlete count (a discarded or identified one does not keep a burst alive).
+    const discarded = { ...un('d', 5 * SEC), discarded: true };
+    const assigned = { ...un('e', 5 * SEC), entry_id: 'en1', leg_index: 0 };
+    expect(currentBurst([stale, discarded, assigned], now)).toEqual([]);
+  });
+
+  it('burstHead is the oldest mark of the burst, however old, and nothing once the burst went stale', () => {
+    expect(burstHead([stale, p0, p1, p2], now)?.id).toBe('p0');
     expect(burstHead([stale], now)).toBeNull();
   });
 
-  it('auto picks the burst head; a stale mark is only used when it was chosen explicitly', () => {
-    expect(selectedMarkId({ mode: 'auto' }, [stale, a, b], now)).toBe('a');
+  it('auto picks the burst head; an explicit selection holds until its mark is identified', () => {
+    expect(selectedMarkId({ mode: 'auto' }, [stale, p0, p1, p2], now)).toBe('p0');
     expect(selectedMarkId({ mode: 'auto' }, [stale], now)).toBeNull();
-    expect(selectedMarkId({ mode: 'none' }, [stale, a, b], now)).toBeNull();
-    expect(selectedMarkId({ mode: 'id', id: 'b', chosen: false }, [stale, a, b], now)).toBe('b');
-    expect(selectedMarkId({ mode: 'id', id: 'stale', chosen: true }, [stale, a, b], now)).toBe('stale');
-    // Selected by the app (not by the timekeeper): it leaves once stale, like the automatic pick.
-    expect(selectedMarkId({ mode: 'id', id: 'stale', chosen: false }, [stale, a, b], now)).toBe('a');
-    expect(selectedMarkId({ mode: 'id', id: 'stale', chosen: false }, [stale], now)).toBeNull();
+    expect(selectedMarkId({ mode: 'none' }, [stale, p0, p1, p2], now)).toBeNull();
+    expect(selectedMarkId({ mode: 'id', id: 'p1' }, [stale, p0, p1, p2], now)).toBe('p1');
+    expect(selectedMarkId({ mode: 'id', id: 'stale' }, [stale, p0, p1, p2], now)).toBe('stale');
+    expect(selectedMarkId({ mode: 'id', id: 'stale' }, [stale], now)).toBe('stale');
     // A selected mark that got an athlete (or was discarded) hands over to the automatic pick.
-    expect(selectedMarkId({ mode: 'id', id: 'gone', chosen: true }, [stale, a, b], now)).toBe('a');
+    expect(selectedMarkId({ mode: 'id', id: 'gone' }, [stale, p0, p1, p2], now)).toBe('p0');
+  });
+
+  it('a new mark resets a deselection and a selection from before its burst to the automatic pick', () => {
+    const tapped = now;
+    expect(selectionAfterMark({ mode: 'auto' }, [p0, p1, p2], tapped)).toEqual({ mode: 'auto' });
+    expect(selectionAfterMark({ mode: 'none' }, [p0, p1, p2], tapped)).toEqual({ mode: 'auto' });
+    expect(selectionAfterMark({ mode: 'id', id: 'stale' }, [stale, p2], tapped)).toEqual({ mode: 'auto' });
+    expect(selectionAfterMark({ mode: 'id', id: 'edge' }, [un('edge', 60 * SEC)], tapped)).toEqual({ mode: 'id', id: 'edge' });
+    expect(selectionAfterMark({ mode: 'id', id: 'p1' }, [p0, p1, p2], tapped)).toEqual({ mode: 'id', id: 'p1' });
   });
 });
 

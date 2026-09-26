@@ -13,7 +13,7 @@ import { formatClock, formatDateBR, formatDuration } from '../../lib/format';
 import { safeLocalStorage } from '../../lib/storage';
 import type { MarkRow } from '../../lib/types';
 import { legAthleteId } from '../../domain/eventModel';
-import { burstHead, isStale, legText, memberName, selectedMarkId } from './tkStore';
+import { burstHead, currentBurst, legText, memberName, selectedMarkId, selectionAfterMark } from './tkStore';
 import type { OnCourseItem, Selection } from './tkStore';
 import { useTimekeeper } from './useTimekeeper';
 import type { AssignResult, MyMark, TapStamp, Timekeeper } from './useTimekeeper';
@@ -229,9 +229,9 @@ interface RowPress extends RowTap { pointerId: number; x: number; y: number }
 function MainScreen({ tk }: { tk: Timekeeper }) {
   const toast = useToast();
   const [bib, setBib] = useState('');
-  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (see tkStore `selectedMarkId`):
-  // the oldest of the current burst unless one was chosen; `none` = deselected, so "Em prova"
-  // taps mark new arrivals.
+  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (see tkStore `selectedMarkId`,
+  // Ruling 53): the oldest of the current burst unless one was picked explicitly; `none` =
+  // deselected, so "Em prova" taps mark new arrivals.
   const [sel, setSel] = useState<Selection>({ mode: 'auto' });
   const [legSheet, setLegSheet] = useState<string | null>(null);
   const assignToastId = useRef<string | null>(null);
@@ -240,6 +240,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
   const bibId = useId();
   const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs);
+  const burstIds = new Set(currentBurst(tk.unassigned, tk.nowMs).map(m => m.id));
   const selectedMark = selectedId ? tk.unassigned.find(m => m.id === selectedId) ?? null : null;
 
   function showAssigned(r: Extract<AssignResult, { ok: true }>) {
@@ -269,7 +270,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
               size="sm" variant="secondary" data-testid="toast-undo"
               onClick={act(() => {
                 tk.unassign(markId);
-                setSel({ mode: 'id', id: markId, chosen: true });
+                setSel({ mode: 'id', id: markId });
               })}
             >
               Desfazer
@@ -313,18 +314,16 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       return;
     }
     if (assignment) {
-      // The bib typed belongs to this mark: select it so the corrected bib goes to it, not to an
-      // older mark still waiting.
+      // The bib typed belongs to this mark: select it explicitly, so the corrected bib goes to it
+      // — not to an older mark still waiting — however long the correction takes.
       showError(assignment.error);
-      setSel({ mode: 'id', id: markId, chosen: false });
+      setSel({ mode: 'id', id: markId });
       return;
     }
-    // Spec §7.3.2: the new mark becomes the selected one — except inside a burst, where the
-    // burst's oldest stays selected so bibs typed in arrival order land on marks 1, 2, 3…
-    // A selection older than the unassigned threshold never outlives a new tap: it would take
-    // this arrival's bib, and every identification after it would be one arrival off.
-    const current = selectedId ? tk.unassigned.find(m => m.id === selectedId) : undefined;
-    if (!current || isStale(current, Date.parse(ts))) setSel({ mode: 'id', id: markId, chosen: false });
+    // Spec §7.3.2 with Ruling 53: the automatic pick follows the burst the new mark belongs to —
+    // its oldest mark, so bibs typed in arrival order land on marks 1, 2, 3… A selection tapped
+    // before that burst never outlives a new tap: it would take this arrival's bib.
+    setSel(current => selectionAfterMark(current, tk.unassigned, Date.parse(ts)));
   }
 
   // Marks on pointerdown — the instant the finger lands, and a tap that turns into a slight drag
@@ -357,7 +356,8 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       toast.show({ message: 'Digite o nº de peito' });
       return;
     }
-    // The selected mark, else the oldest of the current burst — never a stale one unless chosen.
+    // The selected mark, else the oldest of the current burst (Ruling 53) — none once it went
+    // stale: then a mark must be picked.
     const target = selectedId ?? burstHead(tk.unassigned, tk.nowMs)?.id ?? null;
     if (!target) {
       toast.show({
@@ -382,7 +382,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     const { markId: newId } = tk.mark(undefined, stamp); // arrival tap: the instant of the press
     vibrate();
     const r = tk.assign(newId, item.entry.id);
-    if (!r.ok) setSel({ mode: 'id', id: newId, chosen: false });
+    if (!r.ok) setSel({ mode: 'id', id: newId });
     report(r);
   }
 
@@ -418,6 +418,9 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     const stamp = tk.stamp(); // the instant the finger landed
     lastRowPointer.current = e.timeStamp;
     rowPress.current = { item, stamp, markId: selectedId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+    // Keeps the focus — and the phone keyboard — in the bib field; the click still fires, and a
+    // scroll still starts (it is not a default action of pointerdown).
+    e.preventDefault();
   }
   function onRowClick(item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) {
     // The click of a press already handled when the finger lifted (it may land on another row, or
@@ -427,7 +430,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   }
 
   function toggleSelect(id: string) {
-    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id, chosen: true });
+    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id });
   }
 
   function onDiscard(m: MarkRow) {
@@ -442,7 +445,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   function onReassign(m: MarkRow) {
     tk.unassign(m.id);
     if (m.discarded) tk.restore(m.id); // a rejected mark discarded here goes back to "Sem atleta"
-    setSel({ mode: 'id', id: m.id, chosen: true });
+    setSel({ mode: 'id', id: m.id });
   }
 
   function onChangeLeg(markId: string, legIndex: number) {
@@ -489,7 +492,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
           Marcar
         </button>
 
-        <UnassignedList marks={tk.unassigned} nowMs={tk.nowMs} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
+        <UnassignedList marks={tk.unassigned} burstIds={burstIds} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
 
         <OnCourseList tk={tk} selectedMark={selectedMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
 
@@ -575,8 +578,8 @@ function SectionTitle({ id, children }: { id: string; children: ReactNode }) {
   return <h2 id={id} className="brand-title text-xs font-semibold text-muted">{children}</h2>;
 }
 
-function UnassignedList({ marks, nowMs, selectedId, onSelect, onDiscard }: {
-  marks: MarkRow[]; nowMs: number; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
+function UnassignedList({ marks, burstIds, selectedId, onSelect, onDiscard }: {
+  marks: MarkRow[]; burstIds: Set<string>; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
 }) {
   const titleId = useId();
   return (
@@ -597,7 +600,7 @@ function UnassignedList({ marks, nowMs, selectedId, onSelect, onDiscard }: {
               >
                 <span className="tabular text-lg font-semibold">{markTime(m)}</span>
                 <span className="text-xs text-muted">
-                  {selected ? 'Selecionada' : isStale(m, nowMs) ? 'Mais de 1 min · tocar para selecionar' : 'Tocar para selecionar'}
+                  {selected ? 'Selecionada' : burstIds.has(m.id) ? 'Tocar para selecionar' : 'Mais de 1 min · tocar para selecionar'}
                 </span>
               </button>
               <button
@@ -710,6 +713,7 @@ function OnCourseRow({ item, showRace, onPointerDown, onClick }: {
     <button
       type="button"
       onPointerDown={onPointerDown}
+      onMouseDown={e => e.preventDefault()}
       onClick={onClick}
       className={`flex min-h-16 w-full flex-col gap-0.5 rounded-xl border px-3 py-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
         confirm ? 'border-success bg-success/10' : 'border-border bg-surface'

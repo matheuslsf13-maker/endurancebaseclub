@@ -358,7 +358,7 @@ describe('marking', () => {
     expect(stored()[0]).toMatchObject({ ts: iso(NOW0 + OFFSET), entry_id: 'en1' });
   });
 
-  it('MARCAR selects the new mark when the chosen one is older than the unassigned threshold', async () => {
+  it('MARCAR selects the new mark when the chosen one was tapped before its burst', async () => {
     await renderMain();
     tapMark();
     await flush(2 * MIN);
@@ -369,6 +369,46 @@ describe('marking', () => {
     typeBib('303');
     submitBib();
     expect(stored().map(m => m.entry_id)).toEqual([null, 'en3']);
+  });
+
+  it('a pack identified slowly lands bib by bib while it is fresh, then asks for a pick instead of misfiling (Ruling 53)', async () => {
+    const pack = Array.from({ length: 10 }, (_, i) => entry(`p${i + 1}`, String(i + 1), 'r1', null, [[`pa${i + 1}`, `Atleta ${i + 1}`, [0, 1]]]));
+    mocks.open.mockResolvedValue(session({ entries: pack }));
+    await renderMain();
+    tapMark(); // 10 arrivals, 3 s apart
+    for (let k = 1; k < 10; k++) {
+      await flush(3 * SEC);
+      tapMark();
+    }
+    // Identified at ~8 s per bib: from the 7th bib on the head is over 60 s old (the age rule of round 1
+    // misfiled it one arrival late), but the newest only turns stale after the 7th.
+    for (let i = 0; i < 7; i++) {
+      await flush(8 * SEC);
+      typeBib(String(i + 1));
+      submitBib();
+    }
+    const filed = () => stored().map(m => [m.ts, m.entry_id]);
+    expect(filed()).toEqual(Array.from({ length: 10 }, (_, k) => [iso(NOW0 + OFFSET + k * 3 * SEC), k < 7 ? `p${k + 1}` : null]));
+
+    await flush(8 * SEC); // the newest mark is now 64 s old: no automatic target
+    typeBib('8');
+    submitBib();
+    expect(screen.getByText('Toque em MARCAR primeiro, ou selecione a marcação em "Sem atleta"')).toBeInTheDocument();
+    expect(filed().slice(7).map(([, e]) => e)).toEqual([null, null, null]);
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // picked explicitly, it takes the bib
+    submitBib();
+    expect(filed()[7]).toEqual([iso(NOW0 + OFFSET + 21 * SEC), 'p8']);
+  });
+
+  it('a corrected bib reaches the mark whose bib failed, even after 60 s (Ruling 53)', async () => {
+    await renderMain();
+    typeBib('999');
+    tapMark(); // not found: the mark stays in "Sem atleta", selected for the correction
+    await flush(70 * SEC);
+    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
+    typeBib('303');
+    submitBib();
+    expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en3' })]);
   });
 
   it('a press that slid off MARCAR does not swallow a later screen-reader activation (Ruling 44 M2)', async () => {
@@ -560,6 +600,18 @@ describe('"Em prova" list', () => {
     fireEvent.pointerDown(target, { pointerId: 3, pointerType: 'touch', clientX: 50, clientY: 300 });
     fireEvent.pointerCancel(target, { pointerId: 3, pointerType: 'touch' });
     expect(stored()).toEqual([]);
+  });
+
+  it('an "Em prova" tap keeps the focus (and the phone keyboard) in the bib field (Ruling 53)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW0);
+    await renderMain();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const input = screen.getByTestId('bib-input');
+    await user.click(input);
+    await user.click(within(rowFor('303')).getByRole('button'));
+    expect(stored()).toEqual([expect.objectContaining({ entry_id: 'en3', leg_index: 0 })]);
+    expect(input).toHaveFocus();
   });
 
   it('a crossing this device already marked says so instead of inviting a confirmation (Ruling 44 M8)', async () => {

@@ -5,7 +5,7 @@
 import type { AthleteRow, EntryRow, MarkRow, RaceRow, TkMarkInput, TkSession, WaveRow } from '../../lib/types';
 import type { ClockState } from '../../lib/clock';
 import type { LocalMark, OutboxItem } from '../../lib/outbox';
-import { computeEntryTiming } from '../../domain/consolidation';
+import { computeEntryTiming, UNASSIGNED_ISSUE_AFTER_MS } from '../../domain/consolidation';
 import type { EntryTiming } from '../../domain/consolidation';
 import { entryDisplayName, entryWave, indexEvent, legAthleteId } from '../../domain/eventModel';
 import type { EventIndex } from '../../domain/eventModel';
@@ -142,45 +142,58 @@ export function applyWaveStarts(session: TkSession, waves: Pick<WaveRow, 'id' | 
   return changed ? { ...session, waves: next } : session;
 }
 
-/** A mark still without an athlete this long after its tap becomes an "unassigned" issue (spec §8);
- * it also leaves the automatic pick below. */
-export const STALE_UNASSIGNED_MS = 60_000;
+const markMs = (m: MarkRow): number => Date.parse(m.ts);
+const byTs = (a: MarkRow, b: MarkRow): number => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
-/** Older than the unassigned-issue threshold at `nowMs` (synced time). */
-export function isStale(mark: MarkRow, nowMs: number): boolean {
-  return nowMs - Date.parse(mark.ts) > STALE_UNASSIGNED_MS;
+/**
+ * The marks a typed bib or an "Em prova" tap may reach on their own (Ruling 53): the marks still
+ * without an athlete tapped at most the unassigned-issue threshold (60 s, spec §8) before the
+ * newest of them — a pack of arrivals — oldest first, while that newest one is fresh
+ * (now − newest ≤ 60 s). Bibs typed in arrival order then land on marks 1, 2, 3… however long the
+ * pack takes to identify; a mark left unidentified before the pack never takes one of its bibs.
+ * Empty once the newest is older: nothing is picked automatically any more, a mark must be chosen.
+ */
+export function currentBurst(unassigned: MarkRow[], nowMs: number): MarkRow[] {
+  const open = unassigned.filter(m => !m.discarded && m.entry_id === null);
+  if (open.length === 0) return [];
+  const newest = Math.max(...open.map(markMs));
+  if (nowMs - newest > UNASSIGNED_ISSUE_AFTER_MS) return [];
+  return open.filter(m => markMs(m) >= newest - UNASSIGNED_ISSUE_AFTER_MS).sort(byTs);
 }
 
-/**
- * Which "Sem atleta" mark a typed bib or an "Em prova" tap goes to. `auto`: the oldest mark of the
- * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: one mark — `chosen` when
- * the timekeeper picked it (kept however old it gets), otherwise it holds only while it is not
- * stale, like the automatic pick.
- */
-export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string; chosen: boolean };
-
-/**
- * The oldest unassigned mark younger than the unassigned-issue threshold. FIFO only within a
- * burst: after four arrivals the bibs typed in arrival order go to marks 1..4, but a mark left
- * unidentified for longer never takes a later arrival's bib (every identification after it
- * would be one arrival off). Older marks are used only when chosen explicitly.
- */
+/** The automatic target: the oldest mark of the current burst, or null when there is none. */
 export function burstHead(unassigned: MarkRow[], nowMs: number): MarkRow | null {
-  let head: MarkRow | null = null;
-  for (const m of unassigned) {
-    if (!isStale(m, nowMs) && (head === null || m.ts < head.ts || (m.ts === head.ts && m.id < head.id))) head = m;
-  }
-  return head;
+  return currentBurst(unassigned, nowMs)[0] ?? null;
 }
+
+/**
+ * Which "Sem atleta" mark a typed bib or an "Em prova" tap goes to. `auto`: the head of the
+ * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: a mark picked explicitly —
+ * by the timekeeper, or kept after a failed bib or tap — which holds however old it gets, until
+ * it is identified or discarded.
+ */
+export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string };
 
 /** The mark `sel` points at among `unassigned` (this timekeeper's marks without an athlete). */
 export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
   if (sel.mode === 'none') return null;
+  if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) return sel.id;
+  return burstHead(unassigned, nowMs)?.id ?? null;
+}
+
+/**
+ * The selection after MARCAR without a bib recorded a mark at `markTsMs`: back to the automatic
+ * pick when nothing was selected, or when the selected mark was tapped before the new mark's
+ * burst — it would otherwise take this arrival's bib, and every identification after it would be
+ * one arrival off. A selection inside the burst stays.
+ */
+export function selectionAfterMark(sel: Selection, unassigned: MarkRow[], markTsMs: number): Selection {
+  if (sel.mode === 'none') return { mode: 'auto' };
   if (sel.mode === 'id') {
     const m = unassigned.find(x => x.id === sel.id);
-    if (m && (sel.chosen || !isStale(m, nowMs))) return m.id;
+    if (m && markMs(m) < markTsMs - UNASSIGNED_ISSUE_AFTER_MS) return { mode: 'auto' };
   }
-  return burstHead(unassigned, nowMs)?.id ?? null;
+  return sel;
 }
 
 /** A crossing other timekeepers can still confirm: shown pinned on top of "Em prova" (Ruling 22). */
