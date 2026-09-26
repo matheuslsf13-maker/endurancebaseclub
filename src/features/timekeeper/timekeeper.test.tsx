@@ -411,6 +411,70 @@ describe('marking', () => {
     expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en3' })]);
   });
 
+  it('MARCAR after a deselection selects the new mark, not an older one of its burst (Ruling 54)', async () => {
+    await renderMain();
+    tapMark(); // A
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // A deselected
+    expect(within(unassignedRows()[0]).queryByRole('button', { pressed: true })).not.toBeInTheDocument();
+    await flush(20 * SEC);
+    tapMark(); // C arrives
+    expect(within(unassignedRows()[1]).getByRole('button', { pressed: true })).toBeInTheDocument();
+    typeBib('101');
+    submitBib();
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(NOW0 + OFFSET + 20 * SEC), 'en1'],
+    ]);
+  });
+
+  it('after a deselection, an "Em prova" tap following MARCAR identifies the new mark (Ruling 54)', async () => {
+    await renderMain();
+    tapMark(); // A
+    fireEvent.click(markButtonOf(unassignedRows()[0]));
+    await flush(20 * SEC);
+    tapMark(); // C
+    fireEvent.click(within(rowFor('303')).getByRole('button'));
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(NOW0 + OFFSET + 20 * SEC), 'en3'],
+    ]);
+  });
+
+  it('a failed-bib mark outside its burst does not capture a later arrival tap; the corrected bib still reaches it (Ruling 54)', async () => {
+    await renderMain();
+    typeBib('999');
+    tapMark(); // M: not found, kept selected for the correction
+    await flush(70 * SEC);
+    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
+    expect(screen.getByText('Toque na inscrição na hora da passagem: marca e atribui de uma vez.')).toBeInTheDocument();
+    const tappedAt = Date.now();
+    fireEvent.click(within(rowFor('303')).getByRole('button')); // an arrival, a minute later
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(tappedAt + OFFSET), 'en3'],
+    ]);
+    typeBib('101');
+    submitBib();
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), 'en1'],
+      [iso(tappedAt + OFFSET), 'en3'],
+    ]);
+  });
+
+  it('within its burst, an arrival tap still identifies the failed-bib mark, not the burst head (Ruling 54)', async () => {
+    await renderMain();
+    tapMark(); // W: an earlier arrival still waiting (the burst head)
+    await flush(3 * SEC);
+    typeBib('999');
+    tapMark(); // M: not found, kept selected
+    await flush(5 * SEC);
+    fireEvent.click(within(rowFor('303')).getByRole('button'));
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(NOW0 + OFFSET + 3 * SEC), 'en3'],
+    ]);
+  });
+
   it('a press that slid off MARCAR does not swallow a later screen-reader activation (Ruling 44 M2)', async () => {
     await renderMain();
     const button = screen.getByTestId('mark-button');

@@ -168,13 +168,16 @@ export function burstHead(unassigned: MarkRow[], nowMs: number): MarkRow | null 
 
 /**
  * Which "Sem atleta" mark a typed bib or an "Em prova" tap goes to. `auto`: the head of the
- * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: a mark picked explicitly —
- * by the timekeeper, or kept after a failed bib or tap — which holds however old it gets, until
- * it is identified or discarded.
+ * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: one mark, with its origin
+ * (Ruling 54) — `user` when the timekeeper picked it (a tap in "Sem atleta", Desfazer,
+ * Reatribuir, or MARCAR's new mark after a deselection), `app` when the screen kept it selected
+ * after a failed bib or a failed "Em prova" tap. Either holds until the mark is identified or
+ * discarded; an "Em prova" tap honours an `app` one only inside the live burst (`tapTargetId`).
  */
-export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string };
+export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string; origin: 'user' | 'app' };
 
-/** The mark `sel` points at among `unassigned` (this timekeeper's marks without an athlete). */
+/** The mark a typed bib goes to (shown as "Selecionada"), among `unassigned` (this timekeeper's
+ * marks without an athlete): an explicit selection of either origin, else the burst head. */
 export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
   if (sel.mode === 'none') return null;
   if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) return sel.id;
@@ -182,16 +185,31 @@ export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: num
 }
 
 /**
- * The selection after MARCAR without a bib recorded a mark at `markTsMs`: back to the automatic
- * pick when nothing was selected, or when the selected mark was tapped before the new mark's
- * burst — it would otherwise take this arrival's bib, and every identification after it would be
- * one arrival off. A selection inside the burst stays.
+ * The mark an "Em prova" tap identifies; null = the tap records a new mark now (an arrival). A
+ * `user` selection is always honoured. An `app` one — kept after a failed bib, and maybe
+ * forgotten — only while its mark is in the live burst: past it, a later arrival tap would be
+ * filed at that mark's instant, minutes early, so the tap behaves as `auto` instead.
  */
-export function selectionAfterMark(sel: Selection, unassigned: MarkRow[], markTsMs: number): Selection {
-  if (sel.mode === 'none') return { mode: 'auto' };
+export function tapTargetId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
+  if (sel.mode === 'none') return null;
+  if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) {
+    if (sel.origin === 'user' || currentBurst(unassigned, nowMs).some(m => m.id === sel.id)) return sel.id;
+  }
+  return burstHead(unassigned, nowMs)?.id ?? null;
+}
+
+/**
+ * The selection after MARCAR without a bib recorded `mark`. After a deselection the new mark is
+ * the selected one (spec §7.3.2 item 2), picked for the timekeeper. A selection whose mark was
+ * tapped before the new mark's burst goes back to the automatic pick — it would otherwise take
+ * this arrival's bib, and every identification after it would be one arrival off. Otherwise
+ * nothing changes: in `auto` the pick follows the burst (the new mark itself when it starts one).
+ */
+export function selectionAfterMark(sel: Selection, unassigned: MarkRow[], mark: { id: string; ts: string }): Selection {
+  if (sel.mode === 'none') return { mode: 'id', id: mark.id, origin: 'user' };
   if (sel.mode === 'id') {
     const m = unassigned.find(x => x.id === sel.id);
-    if (m && markMs(m) < markTsMs - UNASSIGNED_ISSUE_AFTER_MS) return { mode: 'auto' };
+    if (m && markMs(m) < Date.parse(mark.ts) - UNASSIGNED_ISSUE_AFTER_MS) return { mode: 'auto' };
   }
   return sel;
 }

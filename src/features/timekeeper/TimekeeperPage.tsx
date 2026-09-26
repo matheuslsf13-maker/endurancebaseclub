@@ -13,7 +13,7 @@ import { formatClock, formatDateBR, formatDuration } from '../../lib/format';
 import { safeLocalStorage } from '../../lib/storage';
 import type { MarkRow } from '../../lib/types';
 import { legAthleteId } from '../../domain/eventModel';
-import { burstHead, currentBurst, legText, memberName, selectedMarkId, selectionAfterMark } from './tkStore';
+import { burstHead, currentBurst, legText, memberName, selectedMarkId, selectionAfterMark, tapTargetId } from './tkStore';
 import type { OnCourseItem, Selection } from './tkStore';
 import { useTimekeeper } from './useTimekeeper';
 import type { AssignResult, MyMark, TapStamp, Timekeeper } from './useTimekeeper';
@@ -229,9 +229,9 @@ interface RowPress extends RowTap { pointerId: number; x: number; y: number }
 function MainScreen({ tk }: { tk: Timekeeper }) {
   const toast = useToast();
   const [bib, setBib] = useState('');
-  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (see tkStore `selectedMarkId`,
-  // Ruling 53): the oldest of the current burst unless one was picked explicitly; `none` =
-  // deselected, so "Em prova" taps mark new arrivals.
+  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (tkStore `Selection`, Rulings 53
+  // and 54): the oldest of the current burst unless one was picked; `none` = deselected, so
+  // "Em prova" taps mark new arrivals.
   const [sel, setSel] = useState<Selection>({ mode: 'auto' });
   const [legSheet, setLegSheet] = useState<string | null>(null);
   const assignToastId = useRef<string | null>(null);
@@ -239,9 +239,10 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   const rowPress = useRef<RowPress | null>(null);
   const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
   const bibId = useId();
-  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs);
+  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs); // where a typed bib goes
+  const rowTargetId = tapTargetId(sel, tk.unassigned, tk.nowMs); // what an "Em prova" tap identifies
   const burstIds = new Set(currentBurst(tk.unassigned, tk.nowMs).map(m => m.id));
-  const selectedMark = selectedId ? tk.unassigned.find(m => m.id === selectedId) ?? null : null;
+  const rowTargetMark = rowTargetId ? tk.unassigned.find(m => m.id === rowTargetId) ?? null : null;
 
   function showAssigned(r: Extract<AssignResult, { ok: true }>) {
     if (assignToastId.current) toast.dismiss(assignToastId.current);
@@ -270,7 +271,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
               size="sm" variant="secondary" data-testid="toast-undo"
               onClick={act(() => {
                 tk.unassign(markId);
-                setSel({ mode: 'id', id: markId });
+                setSel({ mode: 'id', id: markId, origin: 'user' });
               })}
             >
               Desfazer
@@ -317,13 +318,14 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       // The bib typed belongs to this mark: select it explicitly, so the corrected bib goes to it
       // — not to an older mark still waiting — however long the correction takes.
       showError(assignment.error);
-      setSel({ mode: 'id', id: markId });
+      setSel({ mode: 'id', id: markId, origin: 'app' });
       return;
     }
-    // Spec §7.3.2 with Ruling 53: the automatic pick follows the burst the new mark belongs to —
-    // its oldest mark, so bibs typed in arrival order land on marks 1, 2, 3… A selection tapped
-    // before that burst never outlives a new tap: it would take this arrival's bib.
-    setSel(current => selectionAfterMark(current, tk.unassigned, Date.parse(ts)));
+    // Spec §7.3.2 with Rulings 53 and 54: after a deselection the new mark is selected; otherwise
+    // the automatic pick follows the burst the new mark belongs to — its oldest mark, so bibs typed
+    // in arrival order land on marks 1, 2, 3… A selection tapped before that burst never outlives
+    // a new tap: it would take this arrival's bib.
+    setSel(current => selectionAfterMark(current, tk.unassigned, { id: markId, ts }));
   }
 
   // Marks on pointerdown — the instant the finger lands, and a tap that turns into a slight drag
@@ -382,7 +384,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     const { markId: newId } = tk.mark(undefined, stamp); // arrival tap: the instant of the press
     vibrate();
     const r = tk.assign(newId, item.entry.id);
-    if (!r.ok) setSel({ mode: 'id', id: newId });
+    if (!r.ok) setSel({ mode: 'id', id: newId, origin: 'app' });
     report(r);
   }
 
@@ -417,7 +419,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     const stamp = tk.stamp(); // the instant the finger landed
     lastRowPointer.current = e.timeStamp;
-    rowPress.current = { item, stamp, markId: selectedId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+    rowPress.current = { item, stamp, markId: rowTargetId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
     // Keeps the focus — and the phone keyboard — in the bib field; the click still fires, and a
     // scroll still starts (it is not a default action of pointerdown).
     e.preventDefault();
@@ -426,11 +428,11 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     // The click of a press already handled when the finger lifted (it may land on another row, or
     // on none, when the list moved). Keyboard and screen-reader activations tap here.
     if (isClickOfPress(e, lastRowPointer.current)) return;
-    commitRowTap({ item, stamp: tk.stamp(), markId: selectedId });
+    commitRowTap({ item, stamp: tk.stamp(), markId: rowTargetId });
   }
 
   function toggleSelect(id: string) {
-    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id });
+    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id, origin: 'user' });
   }
 
   function onDiscard(m: MarkRow) {
@@ -445,7 +447,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   function onReassign(m: MarkRow) {
     tk.unassign(m.id);
     if (m.discarded) tk.restore(m.id); // a rejected mark discarded here goes back to "Sem atleta"
-    setSel({ mode: 'id', id: m.id });
+    setSel({ mode: 'id', id: m.id, origin: 'user' });
   }
 
   function onChangeLeg(markId: string, legIndex: number) {
@@ -494,7 +496,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
 
         <UnassignedList marks={tk.unassigned} burstIds={burstIds} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
 
-        <OnCourseList tk={tk} selectedMark={selectedMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
+        <OnCourseList tk={tk} targetMark={rowTargetMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
 
         <MyMarksList tk={tk} onDiscard={onDiscard} onRestore={id => tk.restore(id)} onReassign={onReassign} onChangeLeg={setLegSheet} />
       </main>
@@ -620,8 +622,8 @@ function UnassignedList({ marks, burstIds, selectedId, onSelect, onDiscard }: {
   );
 }
 
-function OnCourseList({ tk, selectedMark, onRowPointerDown, onRowClick }: {
-  tk: Timekeeper; selectedMark: MarkRow | null;
+function OnCourseList({ tk, targetMark, onRowPointerDown, onRowClick }: {
+  tk: Timekeeper; targetMark: MarkRow | null;
   onRowPointerDown: (item: OnCourseItem, e: PointerEvent<HTMLButtonElement>) => void;
   onRowClick: (item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -646,8 +648,8 @@ function OnCourseList({ tk, selectedMark, onRowPointerDown, onRowClick }: {
     <section aria-labelledby={titleId} className="flex flex-col gap-2">
       <SectionTitle id={titleId}>Em prova ({tk.onCourse.length})</SectionTitle>
       <p className="text-xs text-muted">
-        {selectedMark
-          ? `Toque na inscrição para atribuir a marcação das ${markTime(selectedMark)}.`
+        {targetMark
+          ? `Toque na inscrição para atribuir a marcação das ${markTime(targetMark)}.`
           : 'Toque na inscrição na hora da passagem: marca e atribui de uma vez.'}
       </p>
       <input
