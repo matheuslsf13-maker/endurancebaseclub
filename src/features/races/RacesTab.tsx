@@ -112,7 +112,7 @@ export default function RacesTab() {
                   </td>
                   <td className="px-3 py-2">{teamSizeLabel(race.team_size)}</td>
                   <td className="px-3 py-2">{legsSummary(race.legs)}</td>
-                  <td className="px-3 py-2 tabular">{count} inscrição{count === 1 ? '' : 's'}</td>
+                  <td className="px-3 py-2 tabular">{count} {count === 1 ? 'inscrição' : 'inscrições'}</td>
                   <td className="px-3 py-2">
                     <div className="flex justify-end gap-2">
                       <Button variant="secondary" size="sm" data-testid={`race-edit-${race.id}`} onClick={() => startEdit(race)}>

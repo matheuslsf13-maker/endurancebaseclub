@@ -124,11 +124,16 @@ export function ClassificationTable({ race, cls, showLegs = false, linkAthletes 
               <td className="px-3 py-2">{row.overall_pos ?? '—'}</td>
               <td className="px-3 py-2">{row.entry.bib}</td>
               <td className="px-3 py-2 whitespace-nowrap">
-                {linkAthletes ? (
-                  <MemberNames entry={row.entry} race={race} athletesById={athletesById} linkAthletes={linkAthletes} />
-                ) : (
-                  entryLabel(row.entry, race, athletesById)
-                )}
+                {/* A team is known by its name (announced on the podium, printed in the XLSX); its
+                    members and their legs follow on a second line. */}
+                {row.entry.team_name && <span className="block font-medium">{row.entry.team_name}</span>}
+                <span className={row.entry.team_name ? 'block text-xs text-muted' : undefined}>
+                  {linkAthletes ? (
+                    <MemberNames entry={row.entry} race={race} athletesById={athletesById} linkAthletes={linkAthletes} />
+                  ) : (
+                    entryLabel(row.entry, race, athletesById)
+                  )}
+                </span>
               </td>
               <td className="px-3 py-2 whitespace-nowrap">{groupLabel(catDims, row.category)}</td>
               {showLegs && Array.from({ length: legCount }, (_, k) => (

@@ -97,6 +97,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('layout', () => {
+  it('adds no padding of its own — aligned with the other tabs (EventLayout pads the page) — Task 28 E2E', async () => {
+    // It used `p-4 sm:p-6`, so every Cronometragem card sat 16–24 px inside the tab bar and the
+    // cards lost that width on a phone.
+    const { container } = renderTab(buildCtx(makeAgg()));
+    await screen.findByTestId('tk-link');
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className.split(/\s+/).filter((c) => /^(\w+:)?p[xytrbl]?-\d/.test(c))).toEqual([]);
+  });
+});
+
 describe('link dos cronometristas', () => {
   it('shows the link with the current token', () => {
     const agg = makeAgg({ event: makeEvent({ tk_token: 'abc123XYZ' }) });

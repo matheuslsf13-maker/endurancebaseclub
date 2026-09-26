@@ -95,6 +95,30 @@ beforeEach(() => {
 
 // ---------------------------------------------------------------------------
 
+/** A finished relay pair (swim 10 min, run 30 min) entered as team "Tubarões". */
+function buildTeamFixture() {
+  const race = makeRace({
+    id: 'rt', team_size: 2,
+    legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }],
+  });
+  const wave = makeWave({ id: 'wt', race_id: 'rt' });
+  const athletes = [makeAthlete({ id: 'ta1', name: 'Ana' }), makeAthlete({ id: 'ta2', name: 'Beto', sex: 'M' })];
+  const entry = makeEntry({
+    id: 'te1', race_id: 'rt', wave_id: 'wt', bib: '1', team_name: 'Tubarões',
+    members: [{ athlete_id: 'ta1', position: 0, legs: [0] }, { athlete_id: 'ta2', position: 1, legs: [1] }],
+  });
+  const marks = [makeMark({ entry_id: 'te1', leg_index: 0, at: T0 + 10 * MIN }), makeMark({ entry_id: 'te1', leg_index: 1, at: T0 + 40 * MIN })];
+  const event = makeEvent();
+  const agg: EventAggregate = {
+    event, races: [race], waves: [wave], entries: [entry], athletes, timekeepers: [makeTimekeeper()],
+    marks, resolutions: [], results: [], version: 1, server_now: iso(NOW),
+  };
+  const index = indexEvent(agg);
+  const timing = computeEventTiming(agg, NOW);
+  const cls = classifyRace(race, [entry], timing.byEntry, index.athletesById, event);
+  return { race, cls, index };
+}
+
 describe('ClassificationTable', () => {
   it('lists rows in classification order with positions, gaps, status and podium highlight', () => {
     const fx = buildIndividualRaceFixture();
@@ -181,6 +205,20 @@ describe('ClassificationTable', () => {
     expect(screen.getByText('Ana (Natação) · Beto (Corrida)')).toBeInTheDocument();
   });
 
+  it('names a team entry by its team name, above its members (admin and public links) — Task 28 E2E', () => {
+    const { race, cls, index } = buildTeamFixture();
+
+    for (const linkAthletes of ['admin', 'public', false] as const) {
+      const { unmount } = renderWithProviders(
+        <ClassificationTable race={race} cls={cls} athletesById={index.athletesById} linkAthletes={linkAthletes} />,
+      );
+      const row = screen.getByTestId('classification-row');
+      expect(within(row).getByText('Tubarões')).toBeInTheDocument();
+      expect(row).toHaveTextContent('Ana (Natação) · Beto (Corrida)');
+      unmount();
+    }
+  });
+
   it('shows a "Perna k (label)" column with the split time for each leg when showLegs is true', () => {
     const race = makeRace({
       id: 'rt2', team_size: 2,
@@ -224,6 +262,16 @@ describe('PodiumView', () => {
     expect(within(podiums).getAllByText('Ana Souza').length).toBeGreaterThan(0);
     expect(within(podiums).getAllByText('Nº 101').length).toBeGreaterThan(0);
     expect(within(podiums).getAllByText(formatDuration(25 * MIN)).length).toBeGreaterThan(0);
+  });
+
+  it('names a team by its team name, with its members — Task 28 E2E', () => {
+    const { cls, index } = buildTeamFixture();
+
+    renderWithProviders(<PodiumView cls={cls} athletesById={index.athletesById} />);
+
+    const podiums = screen.getByTestId('podiums');
+    expect(within(podiums).getByText('Tubarões')).toBeInTheDocument();
+    expect(podiums).toHaveTextContent('Ana (Natação) · Beto (Corrida)');
   });
 });
 

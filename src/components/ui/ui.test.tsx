@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { useState } from 'react';
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -249,6 +251,26 @@ describe('Table', () => {
     const thead = screen.getByText('Nº').closest('thead');
     expect(thead).toHaveClass('sticky');
   });
+
+  it('its horizontal scroller is the containing block of positioned cells (Task 28 E2E, 390 px)', () => {
+    // An `sr-only` label (position: absolute) in a column scrolled off to the right used to be
+    // positioned against the page, not the scroller, and widened the whole page at 390 px.
+    render(
+      <Table>
+        <tbody>
+          <tr>
+            <td>
+              <label className="sr-only" htmlFor="x">Horário</label>
+              <input id="x" />
+            </td>
+          </tr>
+        </tbody>
+      </Table>,
+    );
+    const scroller = screen.getByRole('table').parentElement;
+    expect(scroller).toHaveClass('overflow-x-auto');
+    expect(scroller).toHaveClass('relative');
+  });
 });
 
 describe('EmptyState', () => {
@@ -297,6 +319,29 @@ describe('useToast', () => {
     expect(onUndo).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['neutral', 'success', 'warning', 'danger'] as const)(
+    'a %s toast is opaque: its tint is mixed into the surface, never see-through (Task 28 E2E)',
+    (tone) => {
+      function Show() {
+        const { show } = useToast();
+        return <button onClick={() => show({ message: 'Prova finalizada.', tone, testid: 't' })}>Mostrar</button>;
+      }
+      render(
+        <ToastProvider>
+          <Show />
+        </ToastProvider>,
+      );
+      fireEvent.click(screen.getByText('Mostrar'));
+      const classes = screen.getByTestId('t').className.split(/\s+/);
+      // The toast floats over whatever is under it (a QR code, a table): an alpha background such
+      // as `bg-success/15` let that content show through the message on a phone.
+      expect(classes.filter((c) => /^bg-[\w-]+\/\d+$/.test(c))).toEqual([]);
+      expect(
+        classes.some((c) => /^bg-(surface|surface-2|\[color-mix\(in_srgb,var\(--color-\w+\)_\d+%,var\(--color-surface\)\)\])$/.test(c)),
+      ).toBe(true);
+    },
+  );
+
   it('pauses the auto-dismiss timer while hovered and resumes with the remaining time on mouseleave', () => {
     vi.useFakeTimers();
     const onUndo = vi.fn();
@@ -344,6 +389,15 @@ describe('Layout', () => {
     await user.click(screen.getByTestId('logout'));
     expect(onLogout).toHaveBeenCalledTimes(1);
   });
+
+  it('on phones the main nav gets a full-width row of its own (Task 28 E2E, 390 px)', () => {
+    // `flex-1` (flex-basis 0) overrode `w-full`: the nav squeezed in beside the theme/Sair buttons
+    // and hid "Ajuda" and "Configurações" off-screen. Only from `sm` up may it share the row.
+    renderWithProviders(<Layout onLogout={vi.fn()} />, { route: '/eventos' });
+    const nav = screen.getByRole('navigation', { name: 'Principal' });
+    expect(nav).toHaveClass('w-full', 'order-3', 'sm:flex-1');
+    expect(nav).not.toHaveClass('flex-1');
+  });
 });
 
 describe('ThemeToggle', () => {
@@ -364,6 +418,28 @@ describe('ThemeToggle', () => {
     await user.click(toggle);
     expect(document.documentElement.dataset.theme).toBe('dark');
     expect(window.localStorage.getItem('ebc.theme')).toBe('dark');
+  });
+
+  it('each theme declares its color-scheme, so native controls follow it (Task 28 E2E)', () => {
+    // Without it the dark theme kept light native widgets: white scrollbars and a dark calendar
+    // icon on the dark date field. jsdom does not apply stylesheets, so the rule is read from
+    // index.css itself.
+    const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8');
+    const block = (selector: string) => {
+      const start = css.indexOf(`${selector} {`);
+      expect(start, `${selector} block`).toBeGreaterThanOrEqual(0);
+      return css.slice(start, css.indexOf('}', start));
+    };
+    expect(block(':root, [data-theme="dark"]')).toMatch(/color-scheme:\s*dark;/);
+    expect(block('[data-theme="light"]')).toMatch(/color-scheme:\s*light;/);
+  });
+
+  it('native radios and checkboxes use the brand accent, not the browser blue (Task 28 E2E)', () => {
+    // The Revisão decision radios (CrossingEditor) rendered browser-blue; only the kit Checkbox
+    // set accent-color itself. accent-color inherits, so the root declares it once.
+    const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8');
+    const start = css.indexOf(':root, [data-theme="dark"] {');
+    expect(css.slice(start, css.indexOf('}', start))).toMatch(/accent-color:\s*var\(--accent\);/);
   });
 });
 
