@@ -1,33 +1,50 @@
-import React from 'react'
-import { createRoot } from 'react-dom/client'
-import App from './App'
-import { StoreProvider } from './lib/store'
-import { aplicarTemaSalvo } from './lib/tema'
-import './styles.css'
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { registerSW } from 'virtual:pwa-register';
+import App from './App';
+import { SessionProvider } from './features/auth/session';
+import { ConfirmProvider, ToastProvider } from './components/ui';
+import { shouldPromptForUpdate, UpdatePrompt } from './components/UpdatePrompt';
+import { ApiError } from './lib/api';
+import './index.css';
 
-// antes de montar a tela, para nao piscar um tema e trocar para o outro
-aplicarTemaSalvo()
-
-// service worker: deixa o app instalavel no celular e abrir mesmo sem sinal
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
-  window.addEventListener('load', () => {
-    // a versao vai na URL: quando muda, o navegador troca o service worker e o
-    // cache antigo e descartado, em vez de servir uma versao velha para sempre
-    void navigator.serviceWorker.register(
-      `${import.meta.env.BASE_URL}sw.js?v=${__VERSAO__}`,
-      { scope: import.meta.env.BASE_URL },
-    )
-  })
+// Ruling 26: registerType is 'prompt' (vite.config.ts), so a new build never reloads an open tab
+// on its own — it only takes over once every tab has closed. Registering here (production only;
+// dev/test never touch a service worker) lets us decide, per route, whether to even mention it:
+// the timekeeper link (#/c/<token>) stays silent so a cronometrista mid-race is never interrupted;
+// everywhere else `UpdatePrompt` offers a manual "Atualizar" that calls `updateSW(true)`.
+if (import.meta.env.PROD) {
+  const updateSW = registerSW({
+    immediate: true,
+    onNeedRefresh() {
+      if (!shouldPromptForUpdate(location.hash)) return;
+      window.dispatchEvent(new CustomEvent('ebc:sw-need-refresh', { detail: { update: () => updateSW(true) } }));
+    },
+  });
 }
 
-// o app assumiu: a tela de resgate do index.html sai de cena
-clearTimeout((window as unknown as { __bootTimer?: number }).__bootTimer)
-document.getElementById('boot')?.remove()
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 5_000,
+      // Validation/permission errors do not go away on retry; only network failures are retried.
+      retry: (failureCount, error) => failureCount < 2 && error instanceof ApiError && error.code === 'network',
+    },
+  },
+});
 
-createRoot(document.getElementById('root') as HTMLElement).render(
-  <React.StrictMode>
-    <StoreProvider>
-      <App />
-    </StoreProvider>
-  </React.StrictMode>,
-)
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <SessionProvider>
+        <ToastProvider>
+          <ConfirmProvider>
+            <UpdatePrompt />
+            <App />
+          </ConfirmProvider>
+        </ToastProvider>
+      </SessionProvider>
+    </QueryClientProvider>
+  </StrictMode>,
+);

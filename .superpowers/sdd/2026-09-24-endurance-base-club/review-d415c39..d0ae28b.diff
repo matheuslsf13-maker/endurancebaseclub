@@ -1,0 +1,353 @@
+# Review package: d415c39..d0ae28b (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+d0ae28b refactor(db): share individual entry creation between import and bulk
+
+## Files changed
+ .../migrations/0004_admin_athletes_entries.sql     | 68 +++++++++++-----------
+ supabase/tests/30_admin_athletes_entries.sql       | 17 ++++++
+ 2 files changed, 52 insertions(+), 33 deletions(-)
+
+## Diff
+diff --git a/supabase/migrations/0004_admin_athletes_entries.sql b/supabase/migrations/0004_admin_athletes_entries.sql
+index ae5abcb..6bcf5b2 100644
+--- a/supabase/migrations/0004_admin_athletes_entries.sql
++++ b/supabase/migrations/0004_admin_athletes_entries.sql
+@@ -1,21 +1,45 @@
+ -- Admin RPCs: athletes, import, athlete profile, entries (spec §6 "Organização").
+ -- Every public entry point below starts with assert_organizer() (from 0002).
+ 
+ -- 1. next_bib: next free numeric bib in an event, as text (max numeric bib + 1, or '1' if none).
+ create or replace function public.next_bib(p_event_id uuid) returns text
+ language sql stable security definer set search_path = public, extensions, pg_temp as $$
+   select (coalesce(max(bib::int) filter (where bib ~ '^\d+$'), 0) + 1)::text
+   from public.entries where event_id = p_event_id
+ $$;
+ 
+--- 2. admin_list_athletes: every athlete plus participations/wins/podiums tallied from results.
++-- 2. create_individual_entry: shared internal helper for a simple team_size=1 entry — the race's
++--    first wave (by position), every leg 0..N-1, next sequential bib. Used by admin_import_athletes
++--    and admin_bulk_create_entries so bib/wave/leg rules can't drift between the two call sites.
++--    No admin_/tk_/pub_ prefix: not a client-facing RPC, kept non-callable by the least-privilege
++--    grants added later.
++create or replace function public.create_individual_entry(p_race public.races, p_athlete_id uuid) returns uuid
++language plpgsql security definer set search_path = public, extensions, pg_temp as $$
++declare
++  v_wave_id uuid;
++  v_legs int[];
++  v_bib text;
++  v_entry_id uuid;
++begin
++  select w.id into v_wave_id from public.waves w where w.race_id = p_race.id order by w.position limit 1;
++  select array_agg(g) into v_legs from generate_series(0, jsonb_array_length(p_race.legs) - 1) as g;
++  v_bib := public.next_bib(p_race.event_id);
++  v_entry_id := gen_random_uuid();
++  insert into public.entries (id, event_id, race_id, wave_id, bib)
++  values (v_entry_id, p_race.event_id, p_race.id, v_wave_id, v_bib);
++  insert into public.entry_members (entry_id, athlete_id, position, legs)
++  values (v_entry_id, p_athlete_id, 0, v_legs);
++  return v_entry_id;
++end $$;
++
++-- 3. admin_list_athletes: every athlete plus participations/wins/podiums tallied from results.
+ create or replace function public.admin_list_athletes() returns jsonb
+ language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
+ begin
+   perform public.assert_organizer();
+   return coalesce((
+     select jsonb_agg(to_jsonb(a) || jsonb_build_object(
+       'participations', (
+         select count(*) from public.results r
+         where a.id = any(r.athlete_ids) and r.status not in ('dns', 'not_started')
+       ),
+@@ -29,21 +53,21 @@ begin
+           and exists (
+             select 1 from jsonb_array_elements(coalesce(r.data->'podiums', '[]'::jsonb)) p
+             where (p->>'podium_pos')::int <= 3
+           )
+       )
+     ) order by lower(a.name))
+     from public.athletes a
+   ), '[]'::jsonb);
+ end $$;
+ 
+--- 3. admin_save_athlete: create/update; trims strings (empty -> null), lowercases email,
++-- 4. admin_save_athlete: create/update; trims strings (empty -> null), lowercases email,
+ --    validates sex and birth_date.
+ create or replace function public.admin_save_athlete(p_athlete jsonb) returns jsonb
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ declare
+   is_insert boolean := (p_athlete->>'id') is null;
+   v_id uuid;
+   v_existing public.athletes;
+   v_name text;
+   v_sex text;
+   v_birth_date date;
+@@ -153,32 +177,32 @@ begin
+     update public.athletes set
+       name = v_name, sex = v_sex, birth_date = v_birth_date, email = v_email, phone = v_phone,
+       city = v_city, team_club = v_team_club, notes = v_notes, public_profile = v_public_profile
+     where id = v_id
+     returning * into a;
+   end if;
+ 
+   return to_jsonb(a);
+ end $$;
+ 
+--- 4. admin_delete_athlete: refuses while the athlete still has entries.
++-- 5. admin_delete_athlete: refuses while the athlete still has entries.
+ create or replace function public.admin_delete_athlete(p_athlete_id uuid) returns void
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ begin
+   perform public.assert_organizer();
+   if exists (select 1 from public.entry_members m where m.athlete_id = p_athlete_id) then
+     raise exception 'Atleta tem inscrições; remova-as antes de excluir' using errcode = 'P0001';
+   end if;
+   delete from public.athletes where id = p_athlete_id;
+ end $$;
+ 
+--- 5. admin_import_athletes: per row (1-based), soft-validate name/sex (bad rows become error
++-- 6. admin_import_athletes: per row (1-based), soft-validate name/sex (bad rows become error
+ --    entries and processing continues); match existing athlete by email or by name+birth_date;
+ --    update non-null incoming fields or insert; optionally enter the athlete in a matching
+ --    individual race of p_event_id. A row's own unexpected error is also reported, not raised.
+ create or replace function public.admin_import_athletes(p_event_id uuid, p_rows jsonb) returns jsonb
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ declare
+   v_rowrec record;
+   v_row jsonb;
+   v_idx int;
+   v_inserted int := 0;
+@@ -188,24 +212,20 @@ declare
+   v_name text;
+   v_sex text;
+   v_birth_date date;
+   v_email text;
+   v_phone text;
+   v_city text;
+   v_team_club text;
+   v_race_name text;
+   v_athlete_id uuid;
+   v_race public.races;
+-  v_entry_id uuid;
+-  v_bib text;
+-  v_wave_id uuid;
+-  v_legs int[];
+ begin
+   perform public.assert_organizer();
+ 
+   for v_rowrec in
+     select el, ord::int as idx from jsonb_array_elements(coalesce(p_rows, '[]'::jsonb)) with ordinality as t(el, ord)
+   loop
+     v_row := v_rowrec.el;
+     v_idx := v_rowrec.idx;
+     begin
+       v_name := btrim(coalesce(v_row->>'name', ''));
+@@ -257,57 +277,50 @@ begin
+         select * into v_race from public.races r where r.event_id = p_event_id and lower(btrim(r.name)) = lower(v_race_name);
+         if not found then
+           v_errors := v_errors || jsonb_build_object('row', v_idx, 'message', format('Prova "%s" não encontrada', v_race_name));
+         elsif v_race.team_size > 1 then
+           v_errors := v_errors || jsonb_build_object('row', v_idx, 'message',
+             format('Prova "%s" é por equipes; inscreva pela tela de inscrições', v_race_name));
+         elsif not exists (
+           select 1 from public.entry_members m join public.entries e on e.id = m.entry_id
+           where m.athlete_id = v_athlete_id and e.race_id = v_race.id
+         ) then
+-          select w.id into v_wave_id from public.waves w where w.race_id = v_race.id order by w.position limit 1;
+-          select array_agg(g) into v_legs from generate_series(0, jsonb_array_length(v_race.legs) - 1) as g;
+-          v_bib := public.next_bib(p_event_id);
+-          v_entry_id := gen_random_uuid();
+-          insert into public.entries (id, event_id, race_id, wave_id, bib)
+-          values (v_entry_id, p_event_id, v_race.id, v_wave_id, v_bib);
+-          insert into public.entry_members (entry_id, athlete_id, position, legs)
+-          values (v_entry_id, v_athlete_id, 0, v_legs);
++          perform public.create_individual_entry(v_race, v_athlete_id);
+           v_entries_created := v_entries_created + 1;
+         end if;
+       end if;
+     exception when others then
+       v_errors := v_errors || jsonb_build_object('row', v_idx, 'message', sqlerrm);
+     end;
+   end loop;
+ 
+   return jsonb_build_object('inserted', v_inserted, 'updated', v_updated, 'entries_created', v_entries_created, 'errors', v_errors);
+ end $$;
+ 
+--- 6. admin_athlete_profile: the athlete plus every result they were part of, newest event first.
++-- 7. admin_athlete_profile: the athlete plus every result they were part of, newest event first.
+ create or replace function public.admin_athlete_profile(p_athlete_id uuid) returns jsonb
+ language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
+ declare a public.athletes;
+ begin
+   perform public.assert_organizer();
+   select * into a from public.athletes where id = p_athlete_id;
+   if not found then raise exception 'Atleta não encontrado' using errcode = 'P0001'; end if;
+   return jsonb_build_object(
+     'athlete', to_jsonb(a),
+     'results', coalesce((
+       select jsonb_agg(to_jsonb(r) order by (r.data->'event'->>'date') desc)
+       from public.results r where p_athlete_id = any(r.athlete_ids)
+     ), '[]'::jsonb)
+   );
+ end $$;
+ 
+--- 7. admin_save_entry: create/update an entry. See spec §6 for the full rule list; order below
++-- 8. admin_save_entry: create/update an entry. See spec §6 for the full rule list; order below
+ --    matches it: race -> bib -> members/legs -> athlete dedup -> level/team_name -> wave -> persist.
+ create or replace function public.admin_save_entry(p_entry jsonb) returns jsonb
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ declare
+   is_insert boolean := (p_entry->>'id') is null;
+   v_entry_id uuid;
+   v_existing public.entries;
+   v_race_id uuid;
+   v_race public.races;
+   v_event_id uuid;
+@@ -486,79 +499,68 @@ begin
+ 
+   delete from public.entry_members where entry_id = v_entry_id;
+   insert into public.entry_members (entry_id, athlete_id, position, legs)
+   select v_entry_id, (m->>'athlete_id')::uuid, (m->>'position')::int,
+          (select coalesce(array_agg((x)::int), '{}'::int[]) from jsonb_array_elements_text(m->'legs') as t(x))
+   from jsonb_array_elements(v_computed_members) as t(m);
+ 
+   return public.entry_json(v_entry_id, true);
+ end $$;
+ 
+--- 8. admin_bulk_create_entries: individual races only; sequential bibs; skips already-entered athletes.
++-- 9. admin_bulk_create_entries: individual races only; sequential bibs; skips already-entered athletes.
+ create or replace function public.admin_bulk_create_entries(p_race_id uuid, p_athlete_ids uuid[]) returns jsonb
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ declare
+   v_race public.races;
+-  v_wave_id uuid;
+-  v_legs int[];
+   v_athlete_id uuid;
+   v_entry_id uuid;
+-  v_bib text;
+   v_created uuid[] := '{}';
+ begin
+   perform public.assert_organizer();
+   select * into v_race from public.races where id = p_race_id;
+   if not found then raise exception 'Prova não encontrada' using errcode = 'P0001'; end if;
+   if v_race.team_size <> 1 then
+     raise exception 'Inscrição em lote só para provas individuais' using errcode = 'P0001';
+   end if;
+ 
+-  select w.id into v_wave_id from public.waves w where w.race_id = p_race_id order by w.position limit 1;
+-  select array_agg(g) into v_legs from generate_series(0, jsonb_array_length(v_race.legs) - 1) as g;
+-
+   foreach v_athlete_id in array coalesce(p_athlete_ids, '{}'::uuid[]) loop
+     if exists (
+       select 1 from public.entry_members m join public.entries e on e.id = m.entry_id
+       where m.athlete_id = v_athlete_id and e.race_id = p_race_id
+     ) then
+       continue;
+     end if;
+ 
+-    v_bib := public.next_bib(v_race.event_id);
+-    v_entry_id := gen_random_uuid();
+-    insert into public.entries (id, event_id, race_id, wave_id, bib)
+-    values (v_entry_id, v_race.event_id, p_race_id, v_wave_id, v_bib);
+-    insert into public.entry_members (entry_id, athlete_id, position, legs)
+-    values (v_entry_id, v_athlete_id, 0, v_legs);
++    v_entry_id := public.create_individual_entry(v_race, v_athlete_id);
+     v_created := v_created || v_entry_id;
+   end loop;
+ 
+   return coalesce((
+     select jsonb_agg(public.entry_json(x, true) order by ord)
+     from unnest(v_created) with ordinality as t(x, ord)
+   ), '[]'::jsonb);
+ end $$;
+ 
+--- 9. admin_update_entry_status
++-- 10. admin_update_entry_status
+ create or replace function public.admin_update_entry_status(p_entry_id uuid, p_status text, p_penalty_ms int, p_notes text) returns jsonb
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ begin
+   perform public.assert_organizer();
+   if p_status is null or p_status not in ('ok', 'dns', 'dnf', 'dsq') then
+     raise exception 'Status inválido' using errcode = 'P0001';
+   end if;
+   if p_penalty_ms is null or p_penalty_ms < 0 then
+     raise exception 'A penalidade não pode ser negativa' using errcode = 'P0001';
+   end if;
+   update public.entries set status = p_status, penalty_ms = p_penalty_ms, notes = coalesce(p_notes, '')
+   where id = p_entry_id;
+   if not found then raise exception 'Inscrição não encontrada' using errcode = 'P0001'; end if;
+   return public.entry_json(p_entry_id, true);
+ end $$;
+ 
+--- 10. admin_delete_entry: marks referencing the entry become unassigned via FK (on delete set null).
++-- 11. admin_delete_entry: marks referencing the entry become unassigned via FK (on delete set null).
+ create or replace function public.admin_delete_entry(p_entry_id uuid) returns void
+ language plpgsql security definer set search_path = public, extensions, pg_temp as $$
+ begin
+   perform public.assert_organizer();
+   delete from public.entries where id = p_entry_id;
+ end $$;
+diff --git a/supabase/tests/30_admin_athletes_entries.sql b/supabase/tests/30_admin_athletes_entries.sql
+index 7f0d432..73c44aa 100644
+--- a/supabase/tests/30_admin_athletes_entries.sql
++++ b/supabase/tests/30_admin_athletes_entries.sql
+@@ -125,20 +125,25 @@ do $$ declare e jsonb; begin
+   assert e ->> 'notes' = 'ok';
+ end $$;
+ 
+ -- admin_bulk_create_entries: rejected for team races; skips already-entered athletes for individual ones.
+ select tests.assert_raises($$select public.admin_bulk_create_entries(tests.get('race_team')::uuid, array[tests.get('ath_h')::uuid])$$, 'P0001');
+ do $$ declare created jsonb; begin
+   created := public.admin_bulk_create_entries(tests.get('race_ind')::uuid,
+     array[tests.get('ath_a')::uuid, tests.get('ath_g')::uuid, tests.get('ath_h')::uuid]);
+   assert jsonb_array_length(created) = 2, 'expected 2 entries (ath_a already entered), got ' || jsonb_array_length(created);
+   assert (created -> 0 ->> 'bib') <> (created -> 1 ->> 'bib');
++  -- pins create_individual_entry's shared wave/legs rule at this call site too.
++  assert (created -> 0 ->> 'wave_id') = tests.get('wave_ind') and (created -> 1 ->> 'wave_id') = tests.get('wave_ind'),
++    'bulk-created entries should default to the race''s first wave';
++  assert (created -> 0 -> 'members' -> 0 -> 'legs') = '[0]'::jsonb and (created -> 1 -> 'members' -> 0 -> 'legs') = '[0]'::jsonb,
++    'bulk-created entries should assign every leg to the lone member';
+ end $$;
+ 
+ -- admin_update_entry_status / admin_delete_entry
+ do $$ declare e jsonb; begin
+   e := public.admin_update_entry_status(tests.get('entry_de')::uuid, 'dnf', 5000, 'caiu na natação');
+   assert e ->> 'status' = 'dnf' and (e ->> 'penalty_ms')::int = 5000 and e ->> 'notes' = 'caiu na natação';
+ end $$;
+ select tests.assert_raises($$select public.admin_update_entry_status(tests.get('entry_de')::uuid, 'invalido', 0, '')$$, 'P0001');
+ select tests.assert_raises($$select public.admin_update_entry_status(tests.get('entry_de')::uuid, 'ok', -1, '')$$, 'P0001');
+ 
+@@ -211,20 +216,32 @@ do $$ declare res jsonb; begin
+   assert (res ->> 'entries_created')::int = 1, 'expected entries_created=1, got ' || (res ->> 'entries_created');
+   assert jsonb_array_length(res -> 'errors') = 2, 'expected 2 error rows, got ' || jsonb_array_length(res -> 'errors');
+   assert exists (select 1 from jsonb_array_elements(res -> 'errors') e where (e ->> 'row')::int = 2);
+   assert exists (select 1 from jsonb_array_elements(res -> 'errors') e where (e ->> 'row')::int = 3);
+ end $$;
+ do $$ declare list jsonb; arow jsonb; begin
+   list := public.admin_list_athletes();
+   select x into arow from jsonb_array_elements(list) x where x ->> 'name' = 'ana souza';
+   perform tests.set('ana', arow ->> 'id');
+ end $$;
++-- the entry admin_import_athletes created for Ana should match create_individual_entry's rule
++-- (same one admin_bulk_create_entries goes through): the race's first wave, every leg assigned.
++-- (raw table read, so drop to the unrestricted role like the other direct-table checks above.)
++reset role;
++do $$ declare entry_ana jsonb; begin
++  select public.entry_json(e.id, true) into entry_ana
++  from public.entries e join public.entry_members m on m.entry_id = e.id
++  where m.athlete_id = tests.get('ana')::uuid and e.race_id = tests.get('race_ind')::uuid;
++  assert entry_ana ->> 'wave_id' = tests.get('wave_ind'), 'import-created entry should default to the race''s first wave';
++  assert (entry_ana -> 'members' -> 0 -> 'legs') = '[0]'::jsonb, 'import-created entry should assign every leg to the lone member';
++end $$;
++select tests.as_user(tests.get('owner')::uuid);
+ 
+ -- admin_delete_athlete: blocked while the athlete has entries; succeeds otherwise.
+ select tests.assert_raises($$select public.admin_delete_athlete(tests.get('ana')::uuid)$$, 'P0001', 'Atleta tem inscrições%');
+ do $$ declare a jsonb; begin
+   a := public.admin_save_athlete('{"name":"Descartável","sex":"F"}'::jsonb);
+   perform public.admin_delete_athlete((a ->> 'id')::uuid);
+   assert not exists (select 1 from jsonb_array_elements(public.admin_list_athletes()) x where x ->> 'name' = 'Descartável');
+ end $$;
+ 
+ reset role;

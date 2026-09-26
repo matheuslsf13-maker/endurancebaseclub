@@ -1,0 +1,6 @@
+# Keep LF everywhere: bash scripts and SQL run inside WSL/Linux; a CRLF checkout from Git for Windows breaks them.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.xlsx binary
+*.zip binary

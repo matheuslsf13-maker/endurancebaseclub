@@ -1,0 +1,1150 @@
+# Review package: bae2379..c03ef19 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+c03ef19 feat(timing): timekeeper link, starts and live board
+
+## Files changed
+ src/features/timing/LiveBoard.tsx        | 281 ++++++++++++++++++++
+ src/features/timing/TimekeepersPanel.tsx | 108 ++++++++
+ src/features/timing/TimingTab.tsx        | 129 +++++++++-
+ src/features/timing/WavesPanel.tsx       | 165 ++++++++++++
+ src/features/timing/timing.test.tsx      | 424 +++++++++++++++++++++++++++++++
+ 5 files changed, 1106 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/features/timing/LiveBoard.tsx b/src/features/timing/LiveBoard.tsx
+new file mode 100644
+index 0000000..a0b00d2
+--- /dev/null
++++ b/src/features/timing/LiveBoard.tsx
+@@ -0,0 +1,281 @@
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import { Link } from 'react-router';
++import { Badge, Button, Card, EmptyState, Table } from '../../components/ui';
++import { useToast } from '../../components/ui/Toast';
++import { formatClock, formatDuration } from '../../lib/format';
++import { api, ApiError } from '../../lib/api';
++import { entryDisplayName, legAthleteId } from '../../domain/eventModel';
++import type { EventIndex } from '../../domain/eventModel';
++import { planBibAssignment } from '../../domain/suggestLeg';
++import { useEventContext } from '../events/EventContext';
++import { useNow } from '../../hooks/useNow';
++import type { EntryRow, MarkRow, RaceRow } from '../../lib/types';
++
++const RECENT_MARKS_LIMIT = 30;
++/** Live per-leg timers refresh twice a second (spec §7.6 "cronômetro da perna"). */
++const LEG_TIMER_TICK_MS = 500;
++
++function errorMessage(e: unknown): string {
++  return e instanceof ApiError ? e.message : 'Erro inesperado';
++}
++
++/** Author label for a mark's feed row: "Organização" for an organizer mark, the timekeeper's
++ * name when known, or "Cronometrista" for an id no longer in the loaded roster (Ruling 33). */
++function timekeeperLabel(timekeeperId: string | null, index: EventIndex): string {
++  if (timekeeperId === null) return 'Organização';
++  return index.timekeepersById.get(timekeeperId)?.name ?? 'Cronometrista';
++}
++
++function markSituacao(mark: MarkRow, byEntry: ReturnType<typeof useEventContext>['timing']['byEntry']): string {
++  if (mark.discarded) return 'Descartada';
++  if (mark.entry_id === null) return 'Sem atleta';
++  const entryTiming = byEntry.get(mark.entry_id);
++  const leg = mark.leg_index !== null ? entryTiming?.legs[mark.leg_index] : undefined;
++  if (leg?.crossing.duplicates.includes(mark.id)) return 'Duplicada';
++  return 'Usada';
++}
++
++interface OnCourseRowProps {
++  entry: EntryRow;
++  race: RaceRow;
++}
++
++/** One on-course entry: current athlete, current leg and a running leg timer (spec §7.6). */
++function OnCourseRow({ entry, race }: OnCourseRowProps) {
++  const { index, timing, clock } = useEventContext();
++  const tick = useNow(LEG_TIMER_TICK_MS);
++  const officialNow = tick + (clock.offsetMs ?? 0);
++
++  const t = timing.byEntry.get(entry.id);
++  if (!t || t.current_leg === null) return null;
++  const leg = race.legs[t.current_leg];
++  const athleteId = legAthleteId(entry, t.current_leg);
++  const athleteName = athleteId ? (index.athletesById.get(athleteId)?.name ?? '—') : '—';
++  const elapsed = t.current_leg_start_ms !== null ? Math.max(0, officialNow - t.current_leg_start_ms) : null;
++
++  return (
++    <tr className="border-t border-border">
++      <td className="tabular px-3 py-2">{entry.bib}</td>
++      <td className="px-3 py-2">{entryDisplayName(entry, index)}</td>
++      <td className="px-3 py-2">{athleteName}</td>
++      <td className="px-3 py-2">
++        Perna {t.current_leg + 1} · {leg.label}
++      </td>
++      <td className="tabular px-3 py-2">{formatDuration(elapsed, { tenths: true })}</td>
++    </tr>
++  );
++}
++
++interface UnassignedRowProps {
++  mark: MarkRow;
++}
++
++/** "Sem atleta" inline assignment: types a bib, `planBibAssignment` resolves it and suggests the
++ * leg (Ruling 2 — no local `resolveBib`/`suggestLeg` copy); no athleteId is ever passed here
++ * (Ruling 10 only applies to the "Em prova" list, but there is none to derive one from anyway). */
++function UnassignedRow({ mark }: UnassignedRowProps) {
++  const { agg, index, refresh } = useEventContext();
++  const toast = useToast();
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const input = e.currentTarget.elements.namedItem('bib') as HTMLInputElement;
++    const bibText = input.value;
++    const plan = planBibAssignment({
++      entries: agg.entries,
++      racesById: index.racesById,
++      marks: agg.marks,
++      markId: mark.id,
++      tsMs: Date.parse(mark.ts),
++      bibText,
++    });
++    if ('error' in plan) {
++      setError(plan.error);
++      return;
++    }
++    setError(null);
++    setBusy(true);
++    try {
++      await api.admin.updateMark(mark.id, { entry_id: plan.entry.id, leg_index: plan.suggestion.leg_index });
++      await refresh();
++      toast.show({
++        message: `Nº ${plan.entry.bib} atribuído · perna ${plan.suggestion.leg_index + 1}/${plan.race.legs.length} (${plan.race.legs[plan.suggestion.leg_index].label})`,
++        tone: plan.warning ? 'warning' : 'success',
++      });
++      if (plan.warning) toast.show({ message: plan.warning, tone: 'warning' });
++      input.value = '';
++    } catch (e2) {
++      toast.show({ message: errorMessage(e2), tone: 'danger' });
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <li className="flex flex-wrap items-center gap-2 border-t border-border py-2 first:border-t-0">
++      <span className="tabular">{formatClock(Date.parse(mark.ts), { tenths: true })}</span>
++      <span className="text-muted">{timekeeperLabel(mark.timekeeper_id, index)}</span>
++      <form onSubmit={handleSubmit} className="flex items-center gap-2">
++        <label className="sr-only" htmlFor={`live-assign-bib-${mark.id}`}>
++          Nº de peito
++        </label>
++        <input
++          id={`live-assign-bib-${mark.id}`}
++          name="bib"
++          data-testid="live-assign-bib"
++          placeholder="Nº"
++          aria-invalid={error ? true : undefined}
++          aria-describedby={error ? `live-assign-error-${mark.id}` : undefined}
++          className="min-h-11 w-24 rounded-xl border border-border bg-surface px-3 py-2 text-fg tabular placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++        />
++        <Button type="submit" size="sm" data-testid="live-assign-submit" loading={busy}>
++          Atribuir
++        </Button>
++      </form>
++      {error && (
++        <p id={`live-assign-error-${mark.id}`} role="alert" className="w-full text-sm text-danger">
++          {error}
++        </p>
++      )}
++    </li>
++  );
++}
++
++/** Painel ao vivo (spec §7.6): contadores, quem está em prova (com cronômetro da perna), o feed
++ * de marcações recentes e a lista "Sem atleta" para atribuição rápida. */
++export function LiveBoard() {
++  const { eventId, agg, index, timing } = useEventContext();
++
++  let onCourse = 0;
++  let finished = 0;
++  let notStarted = 0;
++  for (const t of timing.byEntry.values()) {
++    if (t.status === 'on_course') onCourse++;
++    else if (t.status === 'finished') finished++;
++    else if (t.status === 'not_started') notStarted++;
++  }
++  const pendingCount = timing.issues.filter((i) => i.severity !== 'info').length;
++
++  const races = [...agg.races].sort((a, b) => a.position - b.position);
++  const onCourseByRace = new Map<string, EntryRow[]>();
++  for (const entry of agg.entries) {
++    if (timing.byEntry.get(entry.id)?.status !== 'on_course') continue;
++    const list = onCourseByRace.get(entry.race_id) ?? [];
++    list.push(entry);
++    onCourseByRace.set(entry.race_id, list);
++  }
++  for (const list of onCourseByRace.values()) {
++    list.sort((a, b) => a.bib.localeCompare(b.bib, 'pt-BR', { numeric: true }));
++  }
++
++  const recentMarks = [...agg.marks].sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts)).slice(0, RECENT_MARKS_LIMIT);
++  const unassigned = agg.marks
++    .filter((m) => !m.discarded && m.entry_id === null)
++    .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
++
++  return (
++    <Card data-testid="live-board">
++      <h2 className="brand-title mb-4 text-lg font-semibold">Ao vivo</h2>
++
++      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
++        <div className="rounded-xl border border-border bg-surface-2 p-3">
++          <p className="text-sm text-muted">Em prova</p>
++          <p className="tabular text-2xl font-semibold">{onCourse}</p>
++        </div>
++        <div className="rounded-xl border border-border bg-surface-2 p-3">
++          <p className="text-sm text-muted">Concluídos</p>
++          <p className="tabular text-2xl font-semibold">{finished}</p>
++        </div>
++        <div className="rounded-xl border border-border bg-surface-2 p-3">
++          <p className="text-sm text-muted">Não largaram</p>
++          <p className="tabular text-2xl font-semibold">{notStarted}</p>
++        </div>
++        <Link
++          to={`/eventos/${eventId}/revisao`}
++          className="rounded-xl border border-border bg-surface-2 p-3 hover:bg-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++        >
++          <p className="text-sm text-muted">Pendências</p>
++          <p className={`tabular text-2xl font-semibold ${pendingCount > 0 ? 'text-warning' : ''}`}>{pendingCount}</p>
++        </Link>
++      </div>
++
++      {races.map((race) => {
++        const list = onCourseByRace.get(race.id) ?? [];
++        if (list.length === 0) return null;
++        return (
++          <div key={race.id} className="mb-6">
++            <h3 className="mb-2 font-semibold">{race.name}</h3>
++            <Table data-testid={`on-course-table-${race.id}`}>
++              <thead>
++                <tr>
++                  <th className="px-3 py-2">Nº</th>
++                  <th className="px-3 py-2">Equipe</th>
++                  <th className="px-3 py-2">Atleta atual</th>
++                  <th className="px-3 py-2">Perna</th>
++                  <th className="px-3 py-2">Tempo da perna</th>
++                </tr>
++              </thead>
++              <tbody>
++                {list.map((entry) => (
++                  <OnCourseRow key={entry.id} entry={entry} race={race} />
++                ))}
++              </tbody>
++            </Table>
++          </div>
++        );
++      })}
++
++      <div className="mb-6">
++        <h3 className="mb-2 font-semibold">Últimas marcações</h3>
++        {recentMarks.length === 0 ? (
++          <EmptyState title="Nenhuma marcação ainda" />
++        ) : (
++          <Table data-testid="recent-marks-table">
++            <thead>
++              <tr>
++                <th className="px-3 py-2">Hora</th>
++                <th className="px-3 py-2">Cronometrista</th>
++                <th className="px-3 py-2">Nº</th>
++                <th className="px-3 py-2">Perna</th>
++                <th className="px-3 py-2">Situação</th>
++              </tr>
++            </thead>
++            <tbody>
++              {recentMarks.map((m) => {
++                const entry = m.entry_id ? index.entriesById.get(m.entry_id) : undefined;
++                return (
++                  <tr key={m.id} className="border-t border-border">
++                    <td className="tabular px-3 py-2">{formatClock(Date.parse(m.ts), { tenths: true })}</td>
++                    <td className="px-3 py-2">{timekeeperLabel(m.timekeeper_id, index)}</td>
++                    <td className="tabular px-3 py-2">{entry?.bib ?? '—'}</td>
++                    <td className="tabular px-3 py-2">{m.leg_index !== null ? m.leg_index + 1 : '—'}</td>
++                    <td className="px-3 py-2">{markSituacao(m, timing.byEntry)}</td>
++                  </tr>
++                );
++              })}
++            </tbody>
++          </Table>
++        )}
++      </div>
++
++      <div>
++        <h3 className="mb-2 flex items-center gap-2 font-semibold">
++          Sem atleta
++          {unassigned.length > 0 && <Badge tone="warning">{unassigned.length}</Badge>}
++        </h3>
++        {unassigned.length === 0 ? (
++          <p className="text-sm text-muted">Nenhuma marcação pendente.</p>
++        ) : (
++          <ul>
++            {unassigned.map((m) => (
++              <UnassignedRow key={m.id} mark={m} />
++            ))}
++          </ul>
++        )}
++      </div>
++    </Card>
++  );
++}
+diff --git a/src/features/timing/TimekeepersPanel.tsx b/src/features/timing/TimekeepersPanel.tsx
+new file mode 100644
+index 0000000..379acbf
+--- /dev/null
++++ b/src/features/timing/TimekeepersPanel.tsx
+@@ -0,0 +1,108 @@
++import { useState } from 'react';
++import { Badge, Card, Checkbox, EmptyState, Table } from '../../components/ui';
++import { useToast } from '../../components/ui/Toast';
++import { api, ApiError } from '../../lib/api';
++import { useEventContext } from '../events/EventContext';
++
++function errorMessage(e: unknown): string {
++  return e instanceof ApiError ? e.message : 'Erro inesperado';
++}
++
++/** "há 12 s" / "há 3 min" / "há 2 h" / "há 5 d"; "nunca" when the timekeeper never synced. */
++function relativeAgo(atIso: string | null | undefined, nowMs: number): string {
++  if (!atIso) return 'nunca';
++  const diffMs = Math.max(0, nowMs - Date.parse(atIso));
++  const s = Math.floor(diffMs / 1000);
++  if (s < 60) return `há ${s} s`;
++  const m = Math.floor(s / 60);
++  if (m < 60) return `há ${m} min`;
++  const h = Math.floor(m / 60);
++  if (h < 24) return `há ${h} h`;
++  return `há ${Math.floor(h / 24)} d`;
++}
++
++/**
++ * Cronometristas cadastrados pelo link (spec §7.1). The mark count is computed from `agg.marks`
++ * rather than `timekeeper.marks_count`: `admin_live` deltas merge marks but not timekeepers, so
++ * that stored count only refreshes on a full aggregate reload (Ruling 33) and can lag behind.
++ */
++export function TimekeepersPanel() {
++  const { agg, nowMs, patchAgg, refresh } = useEventContext();
++  const toast = useToast();
++  const [busyId, setBusyId] = useState<string | null>(null);
++
++  const marksCount = new Map<string, number>();
++  for (const m of agg.marks) {
++    if (m.discarded || m.timekeeper_id === null) continue;
++    marksCount.set(m.timekeeper_id, (marksCount.get(m.timekeeper_id) ?? 0) + 1);
++  }
++
++  const referenceOf = new Map<string, string[]>();
++  for (const race of agg.races) {
++    if (race.config.time_source !== 'reference' || !race.config.reference_timekeeper_id) continue;
++    const list = referenceOf.get(race.config.reference_timekeeper_id) ?? [];
++    list.push(race.name);
++    referenceOf.set(race.config.reference_timekeeper_id, list);
++  }
++
++  async function toggleActive(id: string, next: boolean) {
++    setBusyId(id);
++    try {
++      const updated = await api.admin.updateTimekeeper(id, { active: next });
++      patchAgg((a) => ({ ...a, timekeepers: a.timekeepers.map((t) => (t.id === updated.id ? updated : t)) }));
++      await refresh();
++    } catch (e) {
++      toast.show({ message: errorMessage(e), tone: 'danger' });
++    } finally {
++      setBusyId(null);
++    }
++  }
++
++  return (
++    <Card>
++      <h2 className="brand-title mb-4 text-lg font-semibold">Cronometristas</h2>
++      {agg.timekeepers.length === 0 ? (
++        <EmptyState title="Nenhum cronometrista cadastrado ainda">
++          Compartilhe o link acima para que os ajudantes se cadastrem.
++        </EmptyState>
++      ) : (
++        <Table>
++          <thead>
++            <tr>
++              <th className="px-3 py-2">Nome</th>
++              <th className="px-3 py-2">Última atividade</th>
++              <th className="px-3 py-2">Marcações</th>
++              <th className="px-3 py-2">Ativo</th>
++            </tr>
++          </thead>
++          <tbody>
++            {agg.timekeepers.map((tk) => (
++              <tr key={tk.id} className="border-t border-border">
++                <td className="px-3 py-2">
++                  <div className="flex flex-wrap items-center gap-2">
++                    <span>{tk.name}</span>
++                    {referenceOf.get(tk.id)?.map((raceName) => (
++                      <Badge key={raceName} tone="info">
++                        Referência · {raceName}
++                      </Badge>
++                    ))}
++                  </div>
++                </td>
++                <td className="tabular px-3 py-2">{relativeAgo(tk.last_seen_at, nowMs)}</td>
++                <td className="tabular px-3 py-2">{marksCount.get(tk.id) ?? 0}</td>
++                <td className="px-3 py-2">
++                  <Checkbox
++                    label="Ativo"
++                    checked={tk.active ?? true}
++                    disabled={busyId === tk.id}
++                    onChange={(e) => void toggleActive(tk.id, e.currentTarget.checked)}
++                  />
++                </td>
++              </tr>
++            ))}
++          </tbody>
++        </Table>
++      )}
++    </Card>
++  );
++}
+diff --git a/src/features/timing/TimingTab.tsx b/src/features/timing/TimingTab.tsx
+index cb2ed5a..8bfca71 100644
+--- a/src/features/timing/TimingTab.tsx
++++ b/src/features/timing/TimingTab.tsx
+@@ -1 +1,128 @@
+-export default function TimingTab() { return <h1 className="p-6 brand-title">TimingTab</h1>; }
++import { useState } from 'react';
++import { Button, Card, Checkbox, Input } from '../../components/ui';
++import { useConfirm } from '../../components/ui/Confirm';
++import { useToast } from '../../components/ui/Toast';
++import { QrCode } from '../../components/QrCode';
++import { api, ApiError } from '../../lib/api';
++import { useEventContext } from '../events/EventContext';
++import { TimekeepersPanel } from './TimekeepersPanel';
++import { WavesPanel } from './WavesPanel';
++import { LiveBoard } from './LiveBoard';
++
++function errorMessage(e: unknown): string {
++  return e instanceof ApiError ? e.message : 'Erro inesperado';
++}
++
++/**
++ * The timekeeper link (spec §7.1): the master copies it or shows the QR code, toggles whether
++ * it currently accepts new marks, and can rotate the token so old links stop working. The copied
++ * text is exactly `${location.origin}${location.pathname}#/c/${event.tk_token}`.
++ */
++function TimekeeperLinkCard() {
++  const { agg, patchAgg, refresh } = useEventContext();
++  const { event } = agg;
++  const confirm = useConfirm();
++  const toast = useToast();
++  const [rotating, setRotating] = useState(false);
++  const [togglingEnabled, setTogglingEnabled] = useState(false);
++
++  const link = `${location.origin}${location.pathname}#/c/${event.tk_token ?? ''}`;
++
++  async function handleCopy() {
++    try {
++      await navigator.clipboard.writeText(link);
++      toast.show({ message: 'Link copiado', tone: 'success' });
++    } catch {
++      toast.show({ message: 'Não foi possível copiar o link', tone: 'danger' });
++    }
++  }
++
++  function handleShare() {
++    const nav = navigator as Navigator & { share?: (data: { title?: string; text?: string; url?: string }) => Promise<void> };
++    if (typeof nav.share === 'function') {
++      void nav.share({ title: 'Cronometragem', text: 'Entre para cronometrar', url: link }).catch(() => {});
++    } else {
++      window.open(`https://wa.me/?text=${encodeURIComponent(link)}`, '_blank', 'noopener');
++    }
++  }
++
++  async function handleToggleEnabled(next: boolean) {
++    setTogglingEnabled(true);
++    try {
++      const updated = await api.admin.saveEvent({ ...event, tk_enabled: next });
++      patchAgg((a) => ({ ...a, event: updated }));
++      await refresh();
++    } catch (e) {
++      toast.show({ message: errorMessage(e), tone: 'danger' });
++    } finally {
++      setTogglingEnabled(false);
++    }
++  }
++
++  async function handleRotate() {
++    const ok = await confirm({
++      title: 'Gerar novo link dos cronometristas?',
++      message: 'O link e o QR code atuais deixam de funcionar. Os cronometristas já cadastrados continuam ativos.',
++      confirmLabel: 'Gerar novo link',
++      danger: true,
++    });
++    if (!ok) return;
++    setRotating(true);
++    try {
++      const token = await api.admin.rotateTkToken(event.id);
++      patchAgg((a) => ({ ...a, event: { ...a.event, tk_token: token } }));
++      await refresh();
++      toast.show({ message: 'Novo link gerado', tone: 'success' });
++    } catch (e) {
++      toast.show({ message: errorMessage(e), tone: 'danger' });
++    } finally {
++      setRotating(false);
++    }
++  }
++
++  return (
++    <Card>
++      <h2 className="brand-title mb-4 text-lg font-semibold">Link dos cronometristas</h2>
++      <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
++        <div className="flex flex-1 flex-col gap-3">
++          <Input
++            label="Link"
++            readOnly
++            value={link}
++            data-testid="tk-link"
++            onFocus={(e) => e.currentTarget.select()}
++          />
++          <div className="flex flex-wrap gap-2">
++            <Button data-testid="tk-copy" onClick={handleCopy}>
++              Copiar link
++            </Button>
++            <Button variant="secondary" onClick={handleShare}>
++              Compartilhar
++            </Button>
++            <Button variant="secondary" onClick={handleRotate} loading={rotating}>
++              Gerar novo link
++            </Button>
++          </div>
++          <Checkbox
++            label="Link ativo"
++            checked={event.tk_enabled ?? true}
++            disabled={togglingEnabled}
++            onChange={(e) => void handleToggleEnabled(e.currentTarget.checked)}
++          />
++        </div>
++        <QrCode value={link} size={160} testid="tk-qr" />
++      </div>
++    </Card>
++  );
++}
++
++export default function TimingTab() {
++  return (
++    <div className="flex flex-col gap-6 p-4 sm:p-6">
++      <TimekeeperLinkCard />
++      <TimekeepersPanel />
++      <WavesPanel />
++      <LiveBoard />
++    </div>
++  );
++}
+diff --git a/src/features/timing/WavesPanel.tsx b/src/features/timing/WavesPanel.tsx
+new file mode 100644
+index 0000000..bfa116b
+--- /dev/null
++++ b/src/features/timing/WavesPanel.tsx
+@@ -0,0 +1,165 @@
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import { Button, Card, Table } from '../../components/ui';
++import { useConfirm } from '../../components/ui/Confirm';
++import { useToast } from '../../components/ui/Toast';
++import { formatClock, parseClockInput } from '../../lib/format';
++import { api, ApiError } from '../../lib/api';
++import { useEventContext } from '../events/EventContext';
++import type { WaveRow } from '../../lib/types';
++
++function errorMessage(e: unknown): string {
++  return e instanceof ApiError ? e.message : 'Erro inesperado';
++}
++
++interface WaveRowItemProps {
++  raceName: string;
++  wave: WaveRow;
++}
++
++/**
++ * One race/wave (spec §7.6). "Largar agora" stamps the synced instant of the confirm tap
++ * (Review Focus 5 + a controller ruling): the handler awaits the confirmation first, then reads
++ * `clock.now()` as the very first thing afterwards — before any further `await` — so the recorded
++ * start is the moment the organizer actually confirmed, not the moment the dialog opened.
++ */
++function WaveRowItem({ raceName, wave }: WaveRowItemProps) {
++  const { agg, patchAgg, refresh, clock } = useEventContext();
++  const confirm = useConfirm();
++  const toast = useToast();
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function applyStart(startAt: string | null) {
++    setBusy(true);
++    try {
++      const updated = await api.admin.setWaveStart(wave.id, startAt);
++      // Immediate feedback locally; `refresh()` then recomputes every entry's timing against the
++      // canonical aggregate — required whether this is the first start or a correction made after
++      // marks already exist (Review Focus 5: "esqueceram de apertar Largar").
++      patchAgg((a) => ({ ...a, waves: a.waves.map((w) => (w.id === updated.id ? updated : w)) }));
++      await refresh();
++    } catch (e) {
++      toast.show({ message: errorMessage(e), tone: 'danger' });
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function handleLargarAgora() {
++    const ok = await confirm({
++      title: `Largar ${raceName} – ${wave.name} agora?`,
++      confirmLabel: 'Largar agora',
++    });
++    if (!ok) return;
++    const nowMs = clock.now();
++    await applyStart(new Date(nowMs).toISOString());
++  }
++
++  function handleSave(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const input = e.currentTarget.elements.namedItem('time') as HTMLInputElement;
++    const text = input.value.trim();
++    if (!text) return;
++    const ms = parseClockInput(text, agg.event.date);
++    if (ms === null) {
++      setError('Horário inválido — use hh:mm:ss');
++      return;
++    }
++    setError(null);
++    void applyStart(new Date(ms).toISOString());
++  }
++
++  async function handleClear() {
++    const ok = await confirm({
++      title: `Limpar a largada de ${raceName} – ${wave.name}?`,
++      message: 'A onda volta a mostrar "Não largou".',
++      confirmLabel: 'Limpar',
++      danger: true,
++    });
++    if (!ok) return;
++    await applyStart(null);
++  }
++
++  const started = wave.start_at !== null;
++  const status = started ? formatClock(Date.parse(wave.start_at as string), { tenths: true }) : 'Não largou';
++
++  return (
++    <tr className="border-t border-border">
++      <td className="px-3 py-2">{raceName}</td>
++      <td className="px-3 py-2">{wave.name}</td>
++      <td className="tabular px-3 py-2">{status}</td>
++      <td className="px-3 py-2">
++        <Button data-testid="wave-start" size="sm" loading={busy} onClick={() => void handleLargarAgora()}>
++          Largar agora
++        </Button>
++      </td>
++      <td className="px-3 py-2">
++        <form
++          // Remounts (and so resets the uncontrolled input) whenever the wave's own start time
++          // changes, but not while the organizer is mid-edit of an unsaved value.
++          key={`${wave.id}-${wave.start_at ?? ''}`}
++          onSubmit={handleSave}
++          className="flex flex-wrap items-center gap-2"
++        >
++          <label className="sr-only" htmlFor={`wave-time-${wave.id}`}>
++            Horário de largada — {raceName} {wave.name}
++          </label>
++          <input
++            id={`wave-time-${wave.id}`}
++            name="time"
++            data-testid="wave-time-input"
++            defaultValue={started ? status : ''}
++            placeholder="hh:mm:ss.d"
++            aria-invalid={error ? true : undefined}
++            aria-describedby={error ? `wave-time-error-${wave.id}` : undefined}
++            className="min-h-11 w-32 rounded-xl border border-border bg-surface px-3 py-2 text-fg tabular placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++          />
++          <Button type="submit" variant="secondary" size="sm" data-testid="wave-time-save" loading={busy}>
++            Salvar
++          </Button>
++        </form>
++        {error && (
++          <p id={`wave-time-error-${wave.id}`} role="alert" className="text-sm text-danger">
++            {error}
++          </p>
++        )}
++      </td>
++      <td className="px-3 py-2">
++        <Button variant="ghost" size="sm" disabled={!started || busy} onClick={() => void handleClear()}>
++          Limpar
++        </Button>
++      </td>
++    </tr>
++  );
++}
++
++export function WavesPanel() {
++  const { agg, index } = useEventContext();
++  const races = [...agg.races].sort((a, b) => a.position - b.position);
++
++  return (
++    <Card>
++      <h2 className="brand-title mb-4 text-lg font-semibold">Largadas</h2>
++      <Table>
++        <thead>
++          <tr>
++            <th className="px-3 py-2">Prova</th>
++            <th className="px-3 py-2">Onda</th>
++            <th className="px-3 py-2">Horário</th>
++            <th className="px-3 py-2">Largar agora</th>
++            <th className="px-3 py-2">Corrigir horário</th>
++            <th className="px-3 py-2">Limpar</th>
++          </tr>
++        </thead>
++        <tbody>
++          {races.flatMap((race) =>
++            (index.wavesByRace.get(race.id) ?? []).map((wave) => (
++              <WaveRowItem key={wave.id} raceName={race.name} wave={wave} />
++            )),
++          )}
++        </tbody>
++      </Table>
++    </Card>
++  );
++}
+diff --git a/src/features/timing/timing.test.tsx b/src/features/timing/timing.test.tsx
+new file mode 100644
+index 0000000..0fc09fb
+--- /dev/null
++++ b/src/features/timing/timing.test.tsx
+@@ -0,0 +1,424 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { createMemoryRouter, RouterProvider } from 'react-router';
++
++import { ConfirmProvider } from '../../components/ui/Confirm';
++import { ToastProvider } from '../../components/ui/Toast';
++import { ClockSync } from '../../lib/clock';
++import type { EventAggregate } from '../../lib/types';
++import { indexEvent } from '../../domain/eventModel';
++import { computeEventTiming } from '../../domain/consolidation';
++import {
++  iso, makeAthlete, makeEntry, makeEvent, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
++} from '../../domain/testing/fixtures';
++import { EventContext } from '../events/EventContext';
++import type { EventContextValue } from '../events/EventContext';
++import TimingTab from './TimingTab';
++
++vi.mock('../../lib/supabase', () => ({ supabase: {} }));
++
++const mocks = vi.hoisted(() => ({
++  saveEvent: vi.fn(),
++  rotateTkToken: vi.fn(),
++  updateTimekeeper: vi.fn(),
++  setWaveStart: vi.fn(),
++  updateMark: vi.fn(),
++}));
++vi.mock('../../lib/api', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('../../lib/api')>()),
++  api: {
++    admin: {
++      saveEvent: mocks.saveEvent,
++      rotateTkToken: mocks.rotateTkToken,
++      updateTimekeeper: mocks.updateTimekeeper,
++      setWaveStart: mocks.setWaveStart,
++      updateMark: mocks.updateMark,
++    },
++  },
++}));
++
++function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
++  return {
++    event: makeEvent(), races: [makeRace()], waves: [makeWave()], entries: [], athletes: [makeAthlete()],
++    timekeepers: [makeTimekeeper()], marks: [], resolutions: [], results: [],
++    version: 1, server_now: iso(T0 + 60 * SEC), ...p,
++  };
++}
++
++function buildCtx(agg: EventAggregate, overrides: Partial<EventContextValue> = {}): EventContextValue {
++  const index = indexEvent(agg);
++  const nowMs = overrides.nowMs ?? T0 + 5 * MIN;
++  const timing = overrides.timing ?? computeEventTiming(agg, nowMs);
++  return {
++    eventId: agg.event.id,
++    agg,
++    index,
++    timing,
++    classifications: new Map(),
++    nowMs,
++    refresh: vi.fn(async () => {}),
++    patchAgg: vi.fn(),
++    clock: new ClockSync({ now: () => nowMs }),
++    ...overrides,
++  };
++}
++
++function renderTab(ctx: EventContextValue) {
++  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  const router = createMemoryRouter(
++    [
++      {
++        path: '/eventos/:eventId/cronometragem',
++        element: (
++          <QueryClientProvider client={queryClient}>
++            <ToastProvider>
++              <ConfirmProvider>
++                <EventContext.Provider value={ctx}>
++                  <TimingTab />
++                </EventContext.Provider>
++              </ConfirmProvider>
++            </ToastProvider>
++          </QueryClientProvider>
++        ),
++      },
++    ],
++    { initialEntries: [`/eventos/${ctx.eventId}/cronometragem`] },
++  );
++  return render(<RouterProvider router={router} />);
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++});
++afterEach(() => {
++  cleanup();
++  vi.useRealTimers();
++});
++
++describe('link dos cronometristas', () => {
++  it('shows the link with the current token', () => {
++    const agg = makeAgg({ event: makeEvent({ tk_token: 'abc123XYZ' }) });
++    renderTab(buildCtx(agg));
++
++    const link = screen.getByTestId('tk-link') as HTMLInputElement;
++    expect(link.value).toBe(`${location.origin}${location.pathname}#/c/abc123XYZ`);
++    expect(link.value).toContain('#/c/abc123XYZ');
++    expect(link).toHaveAttribute('readonly');
++  });
++
++  it('renders the QR code for the link', async () => {
++    const agg = makeAgg({ event: makeEvent({ tk_token: 'abc123XYZ' }) });
++    renderTab(buildCtx(agg));
++    const img = await screen.findByTestId('tk-qr');
++    expect(img.tagName).toBe('IMG');
++  });
++
++  it('copies the link to the clipboard and shows a toast', async () => {
++    const user = userEvent.setup({ delay: null });
++    const writeText = vi.fn().mockResolvedValue(undefined);
++    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
++    const agg = makeAgg({ event: makeEvent({ tk_token: 'tok1' }) });
++    renderTab(buildCtx(agg));
++
++    await user.click(screen.getByTestId('tk-copy'));
++
++    expect(writeText).toHaveBeenCalledWith(`${location.origin}${location.pathname}#/c/tok1`);
++    expect(await screen.findByText('Link copiado')).toBeInTheDocument();
++  });
++
++  it('toggles the link on and off through saveEvent', async () => {
++    const user = userEvent.setup({ delay: null });
++    const agg = makeAgg({ event: makeEvent({ tk_enabled: true }) });
++    const ctx = buildCtx(agg);
++    mocks.saveEvent.mockResolvedValue({ ...agg.event, tk_enabled: false });
++    renderTab(ctx);
++
++    await user.click(screen.getByLabelText('Link ativo'));
++
++    await waitFor(() => expect(mocks.saveEvent).toHaveBeenCalledWith({ ...agg.event, tk_enabled: false }));
++    expect(ctx.refresh).toHaveBeenCalled();
++  });
++
++  it('rotates the token after confirmation', async () => {
++    const user = userEvent.setup({ delay: null });
++    const agg = makeAgg({ event: makeEvent({ tk_token: 'old-token' }) });
++    const ctx = buildCtx(agg);
++    mocks.rotateTkToken.mockResolvedValue('new-token');
++    renderTab(ctx);
++
++    await user.click(screen.getByRole('button', { name: 'Gerar novo link' }));
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    await waitFor(() => expect(mocks.rotateTkToken).toHaveBeenCalledWith(agg.event.id));
++    expect(ctx.refresh).toHaveBeenCalled();
++  });
++
++  it('does not rotate the token when the organizer cancels', async () => {
++    const user = userEvent.setup({ delay: null });
++    const agg = makeAgg({ event: makeEvent({ tk_token: 'old-token' }) });
++    renderTab(buildCtx(agg));
++
++    await user.click(screen.getByRole('button', { name: 'Gerar novo link' }));
++    await user.click(screen.getByTestId('confirm-cancel'));
++
++    expect(mocks.rotateTkToken).not.toHaveBeenCalled();
++  });
++});
++
++describe('cronometristas', () => {
++  it('shows relative activity computed from now, and the mark count from agg.marks (not the possibly-stale marks_count field)', () => {
++    const tk = makeTimekeeper({ id: 'tk1', name: 'Bia', last_seen_at: iso(T0 + 5 * MIN - 12 * SEC), marks_count: 999 });
++    const agg = makeAgg({
++      timekeepers: [tk],
++      marks: [
++        makeMark({ id: 'm1', at: T0 + MIN, timekeeper_id: 'tk1' }),
++        makeMark({ id: 'm2', at: T0 + 2 * MIN, timekeeper_id: 'tk1' }),
++        makeMark({ id: 'm3', at: T0 + 3 * MIN, timekeeper_id: 'tk1', discarded: true }),
++        makeMark({ id: 'm4', at: T0 + 3 * MIN, timekeeper_id: 'tk2' }),
++      ],
++    });
++    renderTab(buildCtx(agg, { nowMs: T0 + 5 * MIN }));
++
++    // The Cronometristas panel renders before the live marks feed, which also names its author;
++    // the first "Bia" in the document is the panel's own row.
++    const row = screen.getAllByText('Bia')[0].closest('tr') as HTMLElement;
++    expect(within(row).getByText('há 12 s')).toBeInTheDocument();
++    expect(within(row).getByText('2')).toBeInTheDocument();
++  });
++
++  it('shows "nunca" for a timekeeper that never synced', () => {
++    const agg = makeAgg({ timekeepers: [makeTimekeeper({ id: 'tk1', name: 'Caio', last_seen_at: null })] });
++    renderTab(buildCtx(agg));
++    expect(screen.getByText('nunca')).toBeInTheDocument();
++  });
++
++  it('marks the reference timekeeper per race', () => {
++    const race = makeRace({ configPatch: { time_source: 'reference', reference_timekeeper_id: 'tk1' } });
++    const agg = makeAgg({ races: [race], timekeepers: [makeTimekeeper({ id: 'tk1', name: 'Ana' })] });
++    renderTab(buildCtx(agg));
++    expect(screen.getByText(`Referência · ${race.name}`)).toBeInTheDocument();
++  });
++
++  it('toggles a timekeeper active state', async () => {
++    const user = userEvent.setup({ delay: null });
++    const tk = makeTimekeeper({ id: 'tk1', name: 'Bia', active: true });
++    const agg = makeAgg({ timekeepers: [tk] });
++    const ctx = buildCtx(agg);
++    mocks.updateTimekeeper.mockResolvedValue({ ...tk, active: false });
++    renderTab(ctx);
++
++    await user.click(screen.getByLabelText('Ativo'));
++
++    await waitFor(() => expect(mocks.updateTimekeeper).toHaveBeenCalledWith('tk1', { active: false }));
++    expect(ctx.refresh).toHaveBeenCalled();
++  });
++});
++
++describe('largadas', () => {
++  it('captures clock.now() at the moment confirm-ok is pressed, not when the dialog opens', async () => {
++    const user = userEvent.setup({ delay: null });
++    let currentNow = T0 + 5 * MIN;
++    const clock = new ClockSync({ now: () => currentNow });
++    const wave = makeWave({ id: 'w1', race_id: 'r1', start_at: null });
++    const agg = makeAgg({ waves: [wave] });
++    const ctx = buildCtx(agg, { clock });
++    mocks.setWaveStart.mockResolvedValue({ ...wave, start_at: iso(currentNow) });
++    renderTab(ctx);
++
++    await user.click(screen.getAllByTestId('wave-start')[0]);
++    // Time moves on while the confirm dialog is open; the captured instant must reflect this.
++    currentNow = T0 + 6 * MIN;
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    await waitFor(() => expect(mocks.setWaveStart).toHaveBeenCalledWith('w1', iso(currentNow)));
++    expect(ctx.patchAgg).toHaveBeenCalled();
++    expect(ctx.refresh).toHaveBeenCalled();
++  });
++
++  it('does not start the wave when the organizer cancels', async () => {
++    const user = userEvent.setup({ delay: null });
++    const wave = makeWave({ id: 'w1', start_at: null });
++    renderTab(buildCtx(makeAgg({ waves: [wave] })));
++
++    await user.click(screen.getAllByTestId('wave-start')[0]);
++    await user.click(screen.getByTestId('confirm-cancel'));
++
++    expect(mocks.setWaveStart).not.toHaveBeenCalled();
++  });
++
++  it('typing a Brasília time and saving converts it to UTC for the event date', async () => {
++    const user = userEvent.setup({ delay: null });
++    const wave = makeWave({ id: 'w1', start_at: null });
++    const agg = makeAgg({ event: makeEvent({ date: '2026-10-11' }), waves: [wave] });
++    const ctx = buildCtx(agg);
++    mocks.setWaveStart.mockResolvedValue({ ...wave, start_at: '2026-10-11T11:00:05.300Z' });
++    renderTab(ctx);
++
++    const input = screen.getAllByTestId('wave-time-input')[0];
++    await user.type(input, '08:00:05.3');
++    await user.click(screen.getAllByTestId('wave-time-save')[0]);
++
++    await waitFor(() =>
++      expect(mocks.setWaveStart).toHaveBeenCalledWith('w1', '2026-10-11T11:00:05.300Z'),
++    );
++    expect(ctx.refresh).toHaveBeenCalled();
++  });
++
++  it('shows an inline error for an invalid time and does not call setWaveStart', async () => {
++    const user = userEvent.setup({ delay: null });
++    const wave = makeWave({ id: 'w1', start_at: null });
++    renderTab(buildCtx(makeAgg({ waves: [wave] })));
++
++    const input = screen.getAllByTestId('wave-time-input')[0];
++    await user.type(input, 'não é hora');
++    await user.click(screen.getAllByTestId('wave-time-save')[0]);
++
++    expect(await screen.findByRole('alert')).toHaveTextContent('Horário inválido');
++    expect(mocks.setWaveStart).not.toHaveBeenCalled();
++  });
++
++  it('clears a wave start after confirmation', async () => {
++    const user = userEvent.setup({ delay: null });
++    const wave = makeWave({ id: 'w1', start_at: iso(T0) });
++    const ctx = buildCtx(makeAgg({ waves: [wave] }));
++    mocks.setWaveStart.mockResolvedValue({ ...wave, start_at: null });
++    renderTab(ctx);
++
++    await user.click(screen.getByRole('button', { name: 'Limpar' }));
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    await waitFor(() => expect(mocks.setWaveStart).toHaveBeenCalledWith('w1', null));
++  });
++
++  it('disables Limpar when the wave has not started', () => {
++    const wave = makeWave({ id: 'w1', start_at: null });
++    renderTab(buildCtx(makeAgg({ waves: [wave] })));
++    expect(screen.getByRole('button', { name: 'Limpar' })).toBeDisabled();
++  });
++
++  it('lists waves in race, then wave, position order', () => {
++    const raceA = makeRace({ id: 'rA', name: 'Aquathlon', position: 0 });
++    const raceB = makeRace({ id: 'rB', name: 'Corrida', position: 1 });
++    const waves = [
++      makeWave({ id: 'wA2', race_id: 'rA', name: 'Onda 2', position: 1, start_at: null }),
++      makeWave({ id: 'wB1', race_id: 'rB', name: 'Onda única', position: 0, start_at: null }),
++      makeWave({ id: 'wA1', race_id: 'rA', name: 'Onda 1', position: 0, start_at: null }),
++    ];
++    renderTab(buildCtx(makeAgg({ races: [raceA, raceB], waves })));
++
++    const rows = screen.getAllByTestId('wave-start').map((btn) => btn.closest('tr')?.textContent ?? '');
++    expect(rows[0]).toContain('Onda 1');
++    expect(rows[1]).toContain('Onda 2');
++    expect(rows[2]).toContain('Onda única');
++  });
++});
++
++describe('painel ao vivo', () => {
++  it('shows the status counters and links pendências to the review tab', () => {
++    // "notStarted" sits on its own wave that never got a "Largar agora" (a started wave makes
++    // every one of its entries at least on_course, even with zero marks).
++    const entries = [
++      makeEntry({ id: 'finished', bib: '1', status: 'ok', wave_id: 'w1' }),
++      makeEntry({ id: 'onCourse', bib: '2', status: 'ok', wave_id: 'w1' }),
++      makeEntry({ id: 'notStarted', bib: '3', status: 'ok', wave_id: 'w2' }),
++    ];
++    const waves = [makeWave({ id: 'w1', start_at: iso(T0) }), makeWave({ id: 'w2', position: 1, start_at: null })];
++    const marks = [
++      makeMark({ id: 'f1', at: T0 + MIN, entry_id: 'finished', leg_index: 0 }),
++      makeMark({ id: 'f2', at: T0 + 2 * MIN, entry_id: 'finished', leg_index: 1 }),
++      makeMark({ id: 'o1', at: T0 + MIN, entry_id: 'onCourse', leg_index: 0 }),
++      // A mark left unassigned for a while: an "unassigned" warning issue → counted in pendências.
++      makeMark({ id: 'u1', at: T0, entry_id: null, leg_index: null }),
++    ];
++    const agg = makeAgg({ entries, waves, marks });
++    renderTab(buildCtx(agg, { nowMs: T0 + 10 * MIN }));
++
++    expect(screen.getByText('Em prova').nextSibling).toHaveTextContent('1');
++    expect(screen.getByText('Concluídos').nextSibling).toHaveTextContent('1');
++    expect(screen.getByText('Não largaram').nextSibling).toHaveTextContent('1');
++    const pendLink = screen.getByRole('link', { name: /Pendências/ });
++    expect(pendLink).toHaveAttribute('href', `/eventos/${agg.event.id}/revisao`);
++    expect(within(pendLink).getByText('1')).toBeInTheDocument();
++  });
++
++  it('shows an on-course entry with its current athlete, leg and a live leg timer', async () => {
++    vi.useFakeTimers({ now: T0 + 65 * SEC });
++    const race = makeRace({
++      id: 'r1',
++      legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }],
++    });
++    const entry = makeEntry({
++      id: 'en1', bib: '7', race_id: 'r1', wave_id: 'w1',
++      members: [{ athlete_id: 'a1', position: 0, legs: [0, 1] }],
++    });
++    const wave = makeWave({ id: 'w1', race_id: 'r1', start_at: iso(T0) });
++    // The swim leg finished at T0 + 30s; the runner has been on the run leg for 35 s.
++    const marks = [makeMark({ id: 'm1', at: T0 + 30 * SEC, entry_id: 'en1', leg_index: 0 })];
++    const agg = makeAgg({ races: [race], entries: [entry], waves: [wave], marks, athletes: [makeAthlete({ id: 'a1', name: 'Ana Souza' })] });
++    renderTab(buildCtx(agg, { nowMs: T0 + 65 * SEC }));
++
++    // The same mark also appears in the "Últimas marcações" feed below, so scope to the
++    // on-course table (the entry's bib alone is not unique across both).
++    const onCourseTable = screen.getByTestId('on-course-table-r1');
++    const row = within(onCourseTable).getByText('7').closest('tr') as HTMLElement;
++    expect(row).toHaveTextContent('Ana Souza');
++    expect(within(row).getByText('Perna 2 · Corrida')).toBeInTheDocument();
++    expect(within(row).getByText('0:35.0')).toBeInTheDocument();
++
++    await act(() => vi.advanceTimersByTimeAsync(1000));
++    expect(within(row).getByText('0:36.0')).toBeInTheDocument();
++  });
++
++  it('lists recent marks with hour, timekeeper, bib, leg and situation', () => {
++    const entry = makeEntry({ id: 'en1', bib: '9' });
++    const agg = makeAgg({
++      entries: [entry],
++      marks: [
++        makeMark({ id: 'm1', at: T0 + MIN, entry_id: 'en1', leg_index: 0, timekeeper_id: 'tk1' }),
++        makeMark({ id: 'm2', at: T0 + 2 * MIN, entry_id: null, leg_index: null, timekeeper_id: 'ghost-tk' }),
++      ],
++      timekeepers: [makeTimekeeper({ id: 'tk1', name: 'Bia' })],
++    });
++    renderTab(buildCtx(agg, { nowMs: T0 + 5 * MIN }));
++
++    // The assigned mark's entry also shows up in the on-course table above (it now has an
++    // open crossing); scope to the marks feed itself, where "9" and "Bia" are unambiguous.
++    const feed = screen.getByTestId('recent-marks-table');
++    const row1 = within(feed).getByText('9').closest('tr') as HTMLElement;
++    expect(within(row1).getByText('Bia')).toBeInTheDocument();
++    expect(within(row1).getByText('1')).toBeInTheDocument();
++    // Unknown timekeeper id in the feed: labeled generically, never crashes.
++    const row2 = within(feed).getByText('Sem atleta').closest('tr') as HTMLElement;
++    expect(within(row2).getByText('Cronometrista')).toBeInTheDocument();
++  });
++
++  it('assigns an unassigned mark to a typed bib via planBibAssignment, then refreshes', async () => {
++    const user = userEvent.setup({ delay: null });
++    const entry = makeEntry({ id: 'en1', bib: '101', race_id: 'r1', members: [{ athlete_id: 'a1', position: 0, legs: [0, 1] }] });
++    const mark = makeMark({ id: 'm1', at: T0 + 10 * MIN, entry_id: null, leg_index: null, timekeeper_id: null });
++    const agg = makeAgg({ entries: [entry], marks: [mark] });
++    const ctx = buildCtx(agg, { nowMs: T0 + 10 * MIN });
++    mocks.updateMark.mockResolvedValue({ ...mark, entry_id: 'en1', leg_index: 0 });
++    renderTab(ctx);
++
++    await user.type(screen.getByTestId('live-assign-bib'), '101');
++    await user.click(screen.getByTestId('live-assign-submit'));
++
++    await waitFor(() => expect(mocks.updateMark).toHaveBeenCalledWith('m1', { entry_id: 'en1', leg_index: 0 }));
++    expect(ctx.refresh).toHaveBeenCalled();
++  });
++
++  it('shows an inline pt-BR error for an unknown bib and does not call updateMark', async () => {
++    const user = userEvent.setup({ delay: null });
++    const mark = makeMark({ id: 'm1', at: T0 + 10 * MIN, entry_id: null, leg_index: null });
++    renderTab(buildCtx(makeAgg({ entries: [makeEntry()], marks: [mark] })));
++
++    await user.type(screen.getByTestId('live-assign-bib'), '999');
++    await user.click(screen.getByTestId('live-assign-submit'));
++
++    expect(await screen.findByText('Nº 999 não encontrado')).toBeInTheDocument();
++    expect(mocks.updateMark).not.toHaveBeenCalled();
++  });
++});
