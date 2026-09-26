@@ -5,7 +5,7 @@ import { registerSW } from 'virtual:pwa-register';
 import App from './App';
 import { SessionProvider } from './features/auth/session';
 import { ConfirmProvider, ToastProvider } from './components/ui';
-import { UpdatePrompt } from './components/UpdatePrompt';
+import { shouldPromptForUpdate, UpdatePrompt } from './components/UpdatePrompt';
 import { ApiError } from './lib/api';
 import './index.css';
 
@@ -18,7 +18,7 @@ if (import.meta.env.PROD) {
   const updateSW = registerSW({
     immediate: true,
     onNeedRefresh() {
-      if (location.hash.startsWith('#/c/')) return;
+      if (!shouldPromptForUpdate(location.hash)) return;
       window.dispatchEvent(new CustomEvent('ebc:sw-need-refresh', { detail: { update: () => updateSW(true) } }));
     },
   });

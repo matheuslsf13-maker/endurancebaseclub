@@ -3,6 +3,16 @@ import { useToast } from './ui';
 
 const EVENT = 'ebc:sw-need-refresh';
 
+/**
+ * Ruling 26: the timekeeper link (`#/c/<token>`) must never see the update prompt — a
+ * cronometrista mid-race must not be interrupted; a new build there only takes over on the next
+ * launch. Every other route (including no hash at all) is free to show it. Exported as a pure
+ * predicate (rather than inlined in main.tsx) so this one-line safety rule has its own unit tests.
+ */
+export function shouldPromptForUpdate(hash: string): boolean {
+  return !hash.startsWith('#/c/');
+}
+
 interface NeedRefreshDetail {
   /** Wraps the service worker's `updateSW(true)`: sends skip-waiting, then reloads once it takes over. */
   update: () => void;

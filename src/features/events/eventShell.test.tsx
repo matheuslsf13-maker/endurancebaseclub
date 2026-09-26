@@ -241,6 +241,21 @@ describe('EventLayout', () => {
     vi.useFakeTimers();
     getEvent.mockResolvedValue(makeAgg());
     const router = renderApp('/eventos/ev1/geral', organizer());
+    // `/eventos/ev1/geral` renders through two nested lazy() boundaries (EventLayout, then
+    // EventGeneralTab inside it). React.lazy() memoizes each page's dynamic import for the lifetime
+    // of this module, so once any earlier test in this file has rendered a given lazy page, a later
+    // render of it resolves synchronously — but in an isolated run (`vitest -t "polls every 2 s"`)
+    // this is the first time either resolves. `useEventData`'s polling effect must see the *fake*
+    // clock from its very first run (it arms its own `setTimeout` on mount), so timers cannot be
+    // switched to real just for this render the way the other, data-free lazy tests do it: instead,
+    // settle each pending `import()` on the real clock via `vi.dynamicImportSettled()` (it uses
+    // Vitest's own un-faked timers internally) and force a fresh render pass with `router.navigate`
+    // so `lazy()` picks up the now-resolved module directly, without depending on React's automatic
+    // retry ping — which in this environment does not reliably fire while timers are faked.
+    await vi.dynamicImportSettled();
+    await act(async () => router.navigate('/eventos/ev1/geral'));
+    await vi.dynamicImportSettled();
+    await act(async () => router.navigate('/eventos/ev1/geral'));
     await act(() => vi.advanceTimersByTimeAsync(5));
     expect(screen.getByTestId('page-event-general')).toBeInTheDocument();
 

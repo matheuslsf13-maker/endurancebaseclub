@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from './ui';
-import { UpdatePrompt } from './UpdatePrompt';
+import { shouldPromptForUpdate, UpdatePrompt } from './UpdatePrompt';
 
 // Ruling 26: main.tsx dispatches this event (never on the timekeeper route) with an `update`
 // callback that wraps the service worker's own `updateSW(true)`; UpdatePrompt only wires it to
@@ -44,5 +44,19 @@ describe('UpdatePrompt', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(() => render(<UpdatePrompt />)).toThrow('useToast must be used within a ToastProvider');
     spy.mockRestore();
+  });
+});
+
+describe('shouldPromptForUpdate', () => {
+  // Ruling 26: the timekeeper link is the one route a cronometrista may be mid-race on, so an
+  // incoming update must never interrupt it there — every other route is free to prompt.
+  it('is false on the timekeeper route', () => {
+    expect(shouldPromptForUpdate('#/c/abc')).toBe(false);
+  });
+
+  it('is true everywhere else', () => {
+    expect(shouldPromptForUpdate('#/eventos')).toBe(true);
+    expect(shouldPromptForUpdate('#/')).toBe(true);
+    expect(shouldPromptForUpdate('')).toBe(true);
   });
 });
