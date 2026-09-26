@@ -878,3 +878,240 @@ npm run build      →  dist/assets/index-Cw396mv_.js 814.79 kB │ gzip: 238.77
 
 - A `user` selection is honoured by row taps however old it is, as the ruling requires. A timekeeper who deselects, taps MARCAR and then abandons that mark keeps it as the row target until it is identified or discarded. The "Em prova" header shows its time.
 - Deferred items, not touched: the lock held in the invalid phase, and the tappable "✓ marcada por você" rows.
+
+## Fix round 4
+
+**Status: DONE.** Scope: Ruling 55, items 1–5, on top of `755f0a7`. I am a fresh implementer for this round.
+
+- **Commit:** `278234a` fix(timekeeper): deselected marks stay out of the automatic pick (Ruling 55)
+- **Files changed:** only the Files block. The outbox, storage and consolidation grants were not needed.
+
+```
+src/features/timekeeper/TimekeeperPage.tsx  |  77 +++++++----
+src/features/timekeeper/timekeeper.test.tsx | 194 ++++++++++++++++++++++++++++
+src/features/timekeeper/tkStore.test.ts     |  52 +++++++-
+src/features/timekeeper/tkStore.ts          |  61 ++++++---
+src/features/timekeeper/useTimekeeper.ts    |  78 +++++++++--
+5 files changed, 405 insertions(+), 57 deletions(-)
+```
+
+Line numbers below refer to `278234a`.
+
+### Model
+
+- The selection keeps its three modes (`auto | none | id{user|app}`). Next to it there is now a persisted set of **set-aside** mark ids.
+- **Deselecting** a mark (tapping the row shown "Selecionada") adds it to the set and switches the selection to `none`, as before: "Em prova" taps are arrivals.
+- **Every automatic computation excludes set-aside marks:** the burst, the burst head, the bib-submit fallback, and the arrival-tap target. The Ruling 53 burst itself is computed over marks not set aside, so a set-aside mark neither heads a burst nor keeps one alive.
+- **A mark stops being set aside when:**
+  - the timekeeper selects it again (`select()` takes it back), or
+  - it leaves "Sem atleta" (identified or discarded, here or by the organization). The stored list is pruned to marks still waiting.
+- An explicit selection is honoured exactly as before. Every `id` selection goes through `select()`, which takes the mark back first, so an explicit selection and a set-aside mark never overlap.
+
+### Item 1: the fallback after an identification never returns to a set-aside mark (Important)
+
+**What changed**
+
+- `tkStore.ts:160,169,191,204`: `currentBurst`, `burstHead`, `selectedMarkId` and `tapTargetId` take `aside: ReadonlySet<string>` (default empty).
+  - `currentBurst` filters `!aside.has(m.id)` before finding the newest mark and the window. The others pass `aside` through.
+- `TimekeeperPage.tsx:243-245`: the typed-bib target, the row target and the burst ids all pass `tk.aside`.
+- `TimekeeperPage.tsx:370`: the bib-submit fallback passes `tk.aside`.
+- `TimekeeperPage.tsx:441-452` `toggleSelect`: deselecting calls `tk.setAside(id, true)` and then `setSel({ mode: 'none' })`.
+
+**Covering tests**
+
+- `timekeeper.test.tsx:594` "once the new mark is identified, the next bib goes to the next arrival, not to the mark set aside". This is the ruling's trace:
+  1. Mark A, then deselect A.
+  2. 20 s later MARCAR records C, which is selected.
+  3. 2 s later MARCAR records D; C is still selected.
+  4. `101` goes to C, and `303` goes to **D**. A stays untouched and reads "Deixada de lado".
+- `tkStore.test.ts:350` "the burst is computed over the marks not set aside…":
+  - A set-aside head is skipped.
+  - A set-aside newest mark does not keep the window: p1 becomes the newest.
+  - With only a stale mark left after setting the fresh one aside, the burst is empty.
+- `tkStore.test.ts:360` "no automatic target reaches a set-aside mark…":
+  - `auto` skips the set-aside mark.
+  - The fallback after the selected mark is gone skips it.
+  - Row taps under `auto` and under a lapsed `app` selection skip it, and give null when only that mark is left.
+  - Explicit `user` selections are honoured unchanged.
+
+**RED** (on `755f0a7`). The trace reproduces: D's bib was filed at A's instant.
+
+```
+FAIL timekeeper.test.tsx > a deselected mark is set aside (Ruling 55) > once the new mark is identified, the next bib goes to the next arrival, not to the mark set aside
+    [ "2026-10-11T11:10:01.500Z",  - null   + "en3" ],
+    [ "2026-10-11T11:10:21.500Z",    "en1" ],
+    [ "2026-10-11T11:10:23.500Z",  - "en3"  + null  ],
+FAIL tkStore.test.ts > set-aside marks (Ruling 55) > the burst is computed over the marks not set aside … → expected [ 'p0', 'p1', 'p2' ] to deeply equal [ 'p1', 'p2' ]
+FAIL tkStore.test.ts > set-aside marks (Ruling 55) > no automatic target reaches a set-aside mark … → expected 'p0' to be 'p1'
+```
+
+### Item 2: consequences of setting a deselected mark aside
+
+**(a) MARCAR without a bib after a deselection returns to `auto`**
+
+- `tkStore.ts:227-228` `selectionAfterMark`: `none` returns `{ mode: 'auto' }`. Before, it returned the Ruling 54 `{ id: <new>, origin: 'user' }`.
+- The new mark heads its burst (the deselected mark is set aside), is shown "Selecionada", and lapses with the burst.
+- The other branch is unchanged: a selection tapped before the new mark's burst still goes back to `auto`.
+- Covering tests:
+  - `timekeeper.test.tsx:616` "MARCAR after a deselection goes back to the automatic pick: the new mark lapses with its burst":
+    1. A is marked and deselected.
+    2. 20 s later C is marked.
+    3. After 2 min, nothing is pressed and the header offers an arrival tap.
+    4. A tap on 303 records a **new** mark at the tap instant. A and C are untouched.
+  - `tkStore.test.ts:325` (updated, see below): `none` → `auto`.
+- RED:
+
+```
+FAIL … MARCAR after a deselection goes back to the automatic pick: the new mark lapses with its burst → expect(element).not.toBeInTheDocument()
+     found <button aria-pressed="true" …>08:10:21.5 … Selecionada</button>   (C, a never-lapsing user selection)
+FAIL tkStore.test.ts … MARCAR after a deselection goes back to the automatic pick … → expected { mode: 'id', id: 'new', …(1) } to deeply equal { mode: 'auto' }
+```
+
+**(b) The fallback after an identification never returns to a set-aside mark:** item 1 above.
+
+**(c) A typed number with nothing selected never reaches a set-aside mark**
+
+- The fallback at `TimekeeperPage.tsx:370` uses `burstHead(…, tk.aside)`.
+- Covering test: `timekeeper.test.tsx:634` "a typed number with nothing selected skips a set-aside mark":
+  1. Marks A and B, 3 s apart. A heads the burst.
+  2. Deselect A. Nothing is pressed.
+  3. `101` goes to **B**.
+  4. `303` finds only A, which is set aside, and gets the toast `Toque em MARCAR primeiro, ou selecione a marcação em "Sem atleta"`. A is untouched and reads "Deixada de lado · tocar para selecionar".
+- RED: `expected [ 'en1', null ] to deeply equal [ null, 'en1' ]` (the deselected A took `101`).
+
+**Also: selecting a set-aside mark again makes it a target again**
+
+- `TimekeeperPage.tsx:249-252` `select(id, origin)` calls `tk.setAside(id, false)` before `setSel`.
+- All `id` selections use it: the "Sem atleta" tap, Desfazer (:281), Reatribuir (:475), the failed bib (:328) and the failed row commit (:394).
+- Covering test: `timekeeper.test.tsx:708` "selecting a set-aside mark again makes it a target again, also for the fallback":
+  1. A is set aside; B, marked 5 s later, heads the burst.
+  2. Pick A: A is pressed and the stored list is `[]`.
+  3. Pick B, then `101` goes to B.
+  4. The fallback now reaches **A** (pressed), and `303` goes to A.
+- RED: `expected null to deeply equal []`. Nothing was stored. The behaviour part passes on `755f0a7`, so the mutation check below is what pins it.
+
+### Item 3: set-aside ids persist with the device's timekeeper state
+
+**What changed** in `useTimekeeper.ts`:
+
+- **Key (:41):** `ebc.tk.aside.<eventId>.<timekeeperId>`, a JSON array of ids. It is read with `readJSON` and shape-checked (`readAside`, :136), and written with `writeJSON`.
+- **In memory:** `asideRef`/`asideFor` (:193, :217) keep the list like `boxRef`/`cacheRef`. `setAside(markId, on)` (:597) saves it and bumps.
+- **Exposed:** `derived.aside` (:642) is the stored list filtered to the current `unassigned`. It is returned as `tk.aside` (:680).
+- **Pruning (:651-661):** an effect rewrites the stored list with `keepAside(ids, unassigned)` (`tkStore.ts:214`, deduped) when a mark has left "Sem atleta". It runs only when `derived.loaded`, meaning this tab holds the lock and has the registration and session. An empty list while loading, or in a tab without the lock, can never wipe the stored ids.
+- **Web Lock takeover:** `take()` also resets `asideRef` (:339), so the tab re-reads the list the other tab saved.
+- **Re-registration (not in the ruling):** `adoptPending` (:455) carries the set-aside ids of the pending marks it adopts from the old registration's list into the new one. Without this, a "Cronometrista não autorizado" re-registration less than 60 s after an arrival would bring a deselected mark back as the burst head.
+
+**Covering tests** (`timekeeper.test.tsx`)
+
+- :652 "stays set aside after a reload, from the device storage":
+  1. Set A aside. The stored list is `[A]`.
+  2. Unmount, wait 5 s, and render again.
+  3. A is not pressed and reads "Deixada de lado".
+  4. `101` gets the pick toast, and a tap on 303 records a new mark.
+- :672 "stays set aside when a waiting tab takes over from the one that set it aside":
+  1. The other tab holds the lock, writes a pending mark and `ASIDE_KEY = ['theirs']`, then closes.
+  2. After the takeover, the mark is not pressed and `101` gets the pick toast.
+- :692 "stays set aside under a new registration of the device":
+  1. A is set aside, then the sync answers "Cronometrista não autorizado".
+  2. After re-registering as `tk-new`, A is not pressed, and `ebc.tk.aside.e1.tk-new` = `[A]`.
+- :727 "a discard drops the mark from the set-aside list, and its Desfazer puts it back aside" (pruning):
+  1. After × the stored list is `[]`.
+  2. After `discard-undo`, A is back, not pressed, and stored as set aside again. `101` gets the pick toast.
+  - This relies on `TimekeeperPage.tsx:455-470`: `onDiscard` remembers whether the mark was set aside, and its Desfazer restores that state. Desfazer is an undo, so it must not bring the mark back as an automatic target.
+
+**RED**
+
+```
+FAIL … stays set aside after a reload, from the device storage → expected null to deeply equal [ Array(1) ]
+FAIL … stays set aside when a waiting tab takes over … → expect(element).not.toBeInTheDocument()   (the mark was the pressed automatic pick)
+FAIL … stays set aside under a new registration of the device → expect(element).not.toBeInTheDocument()
+FAIL … a discard drops the mark from the set-aside list, and its Desfazer puts it back aside → expected null to deeply equal []
+```
+
+### Item 4: tapping an `app`-selected row promotes it to `user`
+
+**What changed:** `TimekeeperPage.tsx:444-447`. When the tapped row is the one shown "Selecionada", the tap now depends on the selection:
+
+- If it is an `app` selection of that mark, the tap sets `{ mode: 'id', id, origin: 'user' }`. The mark stays selected and "Em prova" taps honour it.
+- Otherwise (the `auto` head or a `user` selection), the tap deselects the mark and sets it aside.
+
+**Covering test:** `timekeeper.test.tsx:743` "tapping a mark kept selected after a failed bib makes it the timekeeper's own pick instead of deselecting it".
+1. `999` + MARCAR records M. 70 s later the header offers an arrival tap.
+2. Tap M: M is still pressed, and nothing is set aside.
+3. The header now reads `Toque na inscrição para atribuir a marcação das 08:10:01.5.`
+4. A tap on 303 files **M** on `en3`.
+
+**RED:** `expect(received).toBeInTheDocument()`, because the tap deselected M.
+
+### Item 5: row-tap-level tests pinning `user` for Desfazer and Reatribuir
+
+**Covering tests** (`timekeeper.test.tsx`)
+
+- :757 "Desfazer picks the mark for the timekeeper: an \"Em prova\" tap minutes later still identifies it":
+  1. MARCAR, then `101` + Atribuir, then `toast-undo`.
+  2. After 70 s the mark is outside any burst and still pressed.
+  3. A tap on 303 files **that mark** on `en3`, with no new mark.
+- :769 "Reatribuir picks the mark for the timekeeper: an \"Em prova\" tap minutes later still identifies it":
+  1. `101` + MARCAR, then "Reatribuir a marcação das 08:10:01.5" in "Minhas marcações".
+  2. After 70 s, a tap on 303 files that mark on `en3`.
+
+Both pass on `755f0a7`, which already used `user`, so they are not RED. They are pinned by mutation instead: with `app`, the row tap past the burst would record a new mark.
+
+### Mutation checks
+
+Each mutation was applied, run with `npx vitest run src/features/timekeeper`, and restored with `cmp` against the saved copies.
+
+| Mutation | Result |
+|---|---|
+| M1: Desfazer selects with `app` | 1 fails (Desfazer pin) |
+| M2: Reatribuir selects with `app` | 1 fails (Reatribuir pin) |
+| M3: `select()` does not take the mark back | 1 fails (select again) |
+| M4: `currentBurst` ignores `aside` | 11 fail (unit + screen, including both Ruling 54 screen tests) |
+| M5: no pruning write | 1 fails (discard) |
+| M6: discard Desfazer does not put the mark back aside | 1 fails (discard) |
+| M7: `selectionAfterMark(none)` returns the Ruling 54 `user` selection | 2 fail (the lapse test + unit) |
+
+The `asideRef` reset in `take()` is defensive only. It mirrors the `boxRef`/`cacheRef` resets, but it is an **equivalent mutant**: a tab never reads the list before it holds the lock, so nothing stale can be cached.
+
+### Tests changed, and why
+
+- **`tkStore.test.ts:325`.** Renamed from "MARCAR after a deselection selects the new mark for the timekeeper; a selection from before its burst goes back to auto (Ruling 54)" to "…goes back to the automatic pick; so does a selection from before its burst (Ruling 55)".
+  - Its `none` expectation changed from `{ mode: 'id', id: 'new', origin: 'user' }` to `{ mode: 'auto' }`.
+  - It encoded the Ruling 54 deselection semantics that Ruling 55 replaces. The other five assertions are unchanged.
+- **Kept unchanged, still green:**
+  - "MARCAR after a deselection selects the new mark, not an older one of its burst (Ruling 54)"
+  - "after a deselection, an \"Em prova\" tap following MARCAR identifies the new mark (Ruling 54)"
+  - Their observable behaviour is the same: the new mark is now the automatic pick because A is set aside. Mutation M4 shows they now depend on the set-aside exclusion.
+- Every other earlier test is unchanged.
+
+### TDD summary and gates
+
+- **RED** (`npx vitest run src/features/timekeeper`, new tests on `755f0a7`): `Test Files 2 failed (2) · Tests 13 failed | 94 passed (107)`.
+  - All 13 failures are the new or updated tests quoted above.
+  - The Desfazer and Reatribuir pins passed, as expected.
+- **GREEN** (`npx vitest run src/domain/consolidation.test.ts src/features/timekeeper src/lib/outbox.test.ts src/lib/storage.test.ts`): `Test Files 5 passed (5) · Tests 156 passed (156)`. No act() warnings, no console noise, no unhandled rejections.
+
+**Gates** (on `278234a`'s tree, before committing)
+
+```
+npx vitest run     →  Test Files  36 passed (36)
+                      Tests  554 passed (554)          (round 3: 540; +14 this round: 3 unit, 11 screen)
+                      exit 0; no act() / unhandled / warning lines in the output
+npm run typecheck  →  tsc --noEmit -p tsconfig.json    (exit 0, clean)
+npm run build      →  dist/assets/index-gkcBesv4.js 816.06 kB │ gzip: 239.19 kB · ✓ built in 373ms
+                      (exit 0; only the existing >500 kB chunk warning)
+```
+
+### Decisions and concerns
+
+1. **`none` is kept as the state after a deselection.** Ruling 55 says MARCAR "returns to `auto`", which implies a distinct post-deselection state.
+   - In `none`, "Em prova" taps are arrivals, as before.
+   - A typed bib still falls back to the oldest mark of the burst that is not set aside (the brief's "or the oldest one"). That target is not highlighted while in `none`. This is pre-existing behaviour; it now just skips set-aside marks.
+2. **Two small additions beyond the ruling's list, each tested:**
+   - set-aside ids carried over on re-registration (`adoptPending`);
+   - the discard Desfazer restoring the set-aside state.
+   - Both close a way for a deselected mark to come back as an automatic target.
+3. **"Restaurar" in "Minhas marcações" brings a discarded mark back as a normal mark,** not set aside. The discard ended the set-aside (ruling); this is a later, deliberate action, unlike the immediate Desfazer.
+4. **Storage of dead registrations:** set-aside lists of dead registrations stay in storage, like their outboxes. Each is a few ids, and pruning applies only to the active registration's list.
+5. **New pt-BR copy** in "Sem atleta": `Deixada de lado · tocar para selecionar` for a set-aside mark (a selected one still reads "Selecionada").
+6. **Deferred items, not touched:** the lock held in the invalid phase, and the tappable "✓ marcada por você" rows.
