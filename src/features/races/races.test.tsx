@@ -69,6 +69,22 @@ describe('RacesTab list', () => {
     expect(screen.getByText('Finalizada')).toBeInTheDocument();
   });
 
+  it('counts inscriptions in Portuguese: "1 inscrição", "0/2 inscrições" (never "inscriçãos") — Task 28 E2E', () => {
+    const races = [
+      makeRace({ id: 'r1', name: 'Duas', position: 0 }),
+      makeRace({ id: 'r2', name: 'Uma', position: 1 }),
+      makeRace({ id: 'r3', name: 'Nenhuma', position: 2 }),
+    ];
+    const entries = [makeEntry({ id: 'en1', race_id: 'r1' }), makeEntry({ id: 'en2', race_id: 'r1' }), makeEntry({ id: 'en3', race_id: 'r2' })];
+    renderTab(makeAgg({ races, entries }));
+
+    const rows = screen.getAllByRole('row').slice(1);
+    expect(within(rows[0]).getByText('2 inscrições')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('1 inscrição')).toBeInTheDocument();
+    expect(within(rows[2]).getByText('0 inscrições')).toBeInTheDocument();
+    expect(screen.queryByText(/inscriçãos/)).not.toBeInTheDocument();
+  });
+
   it('shows an empty state with no races', () => {
     renderTab(makeAgg());
     expect(screen.getByText(/nenhuma prova/i)).toBeInTheDocument();
