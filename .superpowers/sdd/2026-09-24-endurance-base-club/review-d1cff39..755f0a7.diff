@@ -1,0 +1,548 @@
+# Review package: d1cff39..755f0a7 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+755f0a7 fix(timekeeper): new mark selected after a deselection; selection origin (Ruling 54)
+
+## Files changed
+ src/features/timekeeper/TimekeeperPage.tsx  | 46 +++++++++++----------
+ src/features/timekeeper/timekeeper.test.tsx | 64 +++++++++++++++++++++++++++++
+ src/features/timekeeper/tkStore.test.ts     | 43 +++++++++++++------
+ src/features/timekeeper/tkStore.ts          | 42 +++++++++++++------
+ 4 files changed, 148 insertions(+), 47 deletions(-)
+
+## Diff
+diff --git a/src/features/timekeeper/TimekeeperPage.tsx b/src/features/timekeeper/TimekeeperPage.tsx
+index 735bb1d..29a8019 100644
+--- a/src/features/timekeeper/TimekeeperPage.tsx
++++ b/src/features/timekeeper/TimekeeperPage.tsx
+@@ -6,21 +6,21 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 're
+ import type { FormEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
+ import { useParams } from 'react-router';
+ import { Button, Input, Modal, Spinner, useToast } from '../../components/ui';
+ import { Logo } from '../../components/Logo';
+ import { ThemeToggle } from '../../components/ThemeToggle';
+ import type { ClockSync } from '../../lib/clock';
+ import { formatClock, formatDateBR, formatDuration } from '../../lib/format';
+ import { safeLocalStorage } from '../../lib/storage';
+ import type { MarkRow } from '../../lib/types';
+ import { legAthleteId } from '../../domain/eventModel';
+-import { burstHead, currentBurst, legText, memberName, selectedMarkId, selectionAfterMark } from './tkStore';
++import { burstHead, currentBurst, legText, memberName, selectedMarkId, selectionAfterMark, tapTargetId } from './tkStore';
+ import type { OnCourseItem, Selection } from './tkStore';
+ import { useTimekeeper } from './useTimekeeper';
+ import type { AssignResult, MyMark, TapStamp, Timekeeper } from './useTimekeeper';
+ 
+ export default function TimekeeperPage() {
+   const { token = '' } = useParams();
+   // A different link is a different app state (session, registration, outbox).
+   return <TimekeeperApp key={token} token={token} />;
+ }
+ 
+@@ -222,33 +222,34 @@ function RegisterScreen({ tk }: { tk: Timekeeper }) {
+   );
+ }
+ 
+ /** An "Em prova" tap, fixed when the finger lands: the list may move under it before it lifts. */
+ interface RowTap { item: OnCourseItem; stamp: TapStamp; markId: string | null }
+ interface RowPress extends RowTap { pointerId: number; x: number; y: number }
+ 
+ function MainScreen({ tk }: { tk: Timekeeper }) {
+   const toast = useToast();
+   const [bib, setBib] = useState('');
+-  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (see tkStore `selectedMarkId`,
+-  // Ruling 53): the oldest of the current burst unless one was picked explicitly; `none` =
+-  // deselected, so "Em prova" taps mark new arrivals.
++  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (tkStore `Selection`, Rulings 53
++  // and 54): the oldest of the current burst unless one was picked; `none` = deselected, so
++  // "Em prova" taps mark new arrivals.
+   const [sel, setSel] = useState<Selection>({ mode: 'auto' });
+   const [legSheet, setLegSheet] = useState<string | null>(null);
+   const assignToastId = useRef<string | null>(null);
+   const lastMarkPointer = useRef(Number.NEGATIVE_INFINITY);
+   const rowPress = useRef<RowPress | null>(null);
+   const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
+   const bibId = useId();
+-  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs);
++  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs); // where a typed bib goes
++  const rowTargetId = tapTargetId(sel, tk.unassigned, tk.nowMs); // what an "Em prova" tap identifies
+   const burstIds = new Set(currentBurst(tk.unassigned, tk.nowMs).map(m => m.id));
+-  const selectedMark = selectedId ? tk.unassigned.find(m => m.id === selectedId) ?? null : null;
++  const rowTargetMark = rowTargetId ? tk.unassigned.find(m => m.id === rowTargetId) ?? null : null;
+ 
+   function showAssigned(r: Extract<AssignResult, { ok: true }>) {
+     if (assignToastId.current) toast.dismiss(assignToastId.current);
+     const markId = r.markId;
+     const warned = r.warning !== null || r.suggestion.warning !== null;
+     let id = '';
+     const act = (fn: () => void) => () => {
+       toast.dismiss(id);
+       fn();
+     };
+@@ -263,21 +264,21 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+             {warned && <span aria-hidden="true" className="text-warning">⚠ </span>}
+             {r.message}
+           </p>
+           {r.warning && r.warning !== r.message && <p className="text-warning">{r.warning}</p>}
+           <p className="tabular text-xs text-muted">Marcação das {clockText(Date.parse(r.ts))}</p>
+           <div className="mt-1 flex flex-wrap gap-2">
+             <Button
+               size="sm" variant="secondary" data-testid="toast-undo"
+               onClick={act(() => {
+                 tk.unassign(markId);
+-                setSel({ mode: 'id', id: markId });
++                setSel({ mode: 'id', id: markId, origin: 'user' });
+               })}
+             >
+               Desfazer
+             </Button>
+             {r.race.legs.length > 1 && (
+               <Button size="sm" variant="secondary" data-testid="toast-change-leg" onClick={act(() => setLegSheet(markId))}>
+                 Trocar perna
+               </Button>
+             )}
+           </div>
+@@ -310,27 +311,28 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+     vibrate();
+     if (assignment?.ok) {
+       setBib('');
+       showAssigned(assignment);
+       return;
+     }
+     if (assignment) {
+       // The bib typed belongs to this mark: select it explicitly, so the corrected bib goes to it
+       // — not to an older mark still waiting — however long the correction takes.
+       showError(assignment.error);
+-      setSel({ mode: 'id', id: markId });
++      setSel({ mode: 'id', id: markId, origin: 'app' });
+       return;
+     }
+-    // Spec §7.3.2 with Ruling 53: the automatic pick follows the burst the new mark belongs to —
+-    // its oldest mark, so bibs typed in arrival order land on marks 1, 2, 3… A selection tapped
+-    // before that burst never outlives a new tap: it would take this arrival's bib.
+-    setSel(current => selectionAfterMark(current, tk.unassigned, Date.parse(ts)));
++    // Spec §7.3.2 with Rulings 53 and 54: after a deselection the new mark is selected; otherwise
++    // the automatic pick follows the burst the new mark belongs to — its oldest mark, so bibs typed
++    // in arrival order land on marks 1, 2, 3… A selection tapped before that burst never outlives
++    // a new tap: it would take this arrival's bib.
++    setSel(current => selectionAfterMark(current, tk.unassigned, { id: markId, ts }));
+   }
+ 
+   // Marks on pointerdown — the instant the finger lands, and a tap that turns into a slight drag
+   // still counts. The click of the same press is ignored by its time (a press that slid off the
+   // button has no click, and must not swallow a later one); keyboard presses and screen-reader
+   // activations come without a pointer press and mark on click.
+   function onMarkPointerDown(e: PointerEvent<HTMLButtonElement>) {
+     if (e.pointerType === 'mouse' && e.button !== 0) return;
+     doMark();
+     lastMarkPointer.current = e.timeStamp;
+@@ -375,21 +377,21 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+   function commitRowTap({ item, stamp, markId }: RowTap) {
+     // Ruling 10: never pass the row's current athlete — confirming a relay handoff shows the
+     // next athlete as current, and the leg must come from the crossing times.
+     if (markId && tk.unassigned.some(m => m.id === markId)) {
+       report(tk.assign(markId, item.entry.id));
+       return;
+     }
+     const { markId: newId } = tk.mark(undefined, stamp); // arrival tap: the instant of the press
+     vibrate();
+     const r = tk.assign(newId, item.entry.id);
+-    if (!r.ok) setSel({ mode: 'id', id: newId });
++    if (!r.ok) setSel({ mode: 'id', id: newId, origin: 'app' });
+     report(r);
+   }
+ 
+   // "Em prova" rows move (pinned crossings arrive with every sync, windows close): what a press
+   // does — the entry, the mark it identifies, the instant — is fixed on pointerdown and committed
+   // on pointerup, wherever the finger is then, if it barely moved (a scroll cancels it).
+   const commitLatest = useRef(commitRowTap);
+   useLayoutEffect(() => {
+     commitLatest.current = commitRowTap;
+   });
+@@ -410,49 +412,49 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+     return () => {
+       window.removeEventListener('pointerup', up);
+       window.removeEventListener('pointercancel', cancel);
+     };
+   }, []);
+ 
+   function onRowPointerDown(item: OnCourseItem, e: PointerEvent<HTMLButtonElement>) {
+     if (e.pointerType === 'mouse' && e.button !== 0) return;
+     const stamp = tk.stamp(); // the instant the finger landed
+     lastRowPointer.current = e.timeStamp;
+-    rowPress.current = { item, stamp, markId: selectedId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
++    rowPress.current = { item, stamp, markId: rowTargetId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+     // Keeps the focus — and the phone keyboard — in the bib field; the click still fires, and a
+     // scroll still starts (it is not a default action of pointerdown).
+     e.preventDefault();
+   }
+   function onRowClick(item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) {
+     // The click of a press already handled when the finger lifted (it may land on another row, or
+     // on none, when the list moved). Keyboard and screen-reader activations tap here.
+     if (isClickOfPress(e, lastRowPointer.current)) return;
+-    commitRowTap({ item, stamp: tk.stamp(), markId: selectedId });
++    commitRowTap({ item, stamp: tk.stamp(), markId: rowTargetId });
+   }
+ 
+   function toggleSelect(id: string) {
+-    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id });
++    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id, origin: 'user' });
+   }
+ 
+   function onDiscard(m: MarkRow) {
+     tk.discard(m.id);
+     toast.show({
+       testid: 'discard-toast',
+       message: `Marcação das ${markTime(m)} descartada`,
+       actions: [{ label: 'Desfazer', testid: 'discard-undo', onClick: () => tk.restore(m.id) }],
+     });
+   }
+ 
+   function onReassign(m: MarkRow) {
+     tk.unassign(m.id);
+     if (m.discarded) tk.restore(m.id); // a rejected mark discarded here goes back to "Sem atleta"
+-    setSel({ mode: 'id', id: m.id });
++    setSel({ mode: 'id', id: m.id, origin: 'user' });
+   }
+ 
+   function onChangeLeg(markId: string, legIndex: number) {
+     setLegSheet(null);
+     report(tk.changeLeg(markId, legIndex));
+   }
+ 
+   return (
+     <div className="min-h-full bg-bg text-fg">
+       <Header tk={tk} />
+@@ -487,21 +489,21 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+           onClick={onMarkClick}
+           onKeyDown={onMarkKeyDown}
+           onContextMenu={e => e.preventDefault()}
+           className="brand-title min-h-[35vh] w-full touch-none select-none rounded-2xl bg-accent text-5xl font-bold text-accent-fg shadow-lg transition-transform active:scale-[0.98] focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-accent"
+         >
+           Marcar
+         </button>
+ 
+         <UnassignedList marks={tk.unassigned} burstIds={burstIds} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
+ 
+-        <OnCourseList tk={tk} selectedMark={selectedMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
++        <OnCourseList tk={tk} targetMark={rowTargetMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
+ 
+         <MyMarksList tk={tk} onDiscard={onDiscard} onRestore={id => tk.restore(id)} onReassign={onReassign} onChangeLeg={setLegSheet} />
+       </main>
+ 
+       <LegSheet tk={tk} markId={legSheet} onClose={() => setLegSheet(null)} onPick={onChangeLeg} />
+     </div>
+   );
+ }
+ 
+ function Header({ tk }: { tk: Timekeeper }) {
+@@ -613,22 +615,22 @@ function UnassignedList({ marks, burstIds, selectedId, onSelect, onDiscard }: {
+               </button>
+             </li>
+           );
+         })}
+       </ul>
+       {marks.length === 0 && <p className="text-sm text-muted">Nenhuma marcação sem atleta.</p>}
+     </section>
+   );
+ }
+ 
+-function OnCourseList({ tk, selectedMark, onRowPointerDown, onRowClick }: {
+-  tk: Timekeeper; selectedMark: MarkRow | null;
++function OnCourseList({ tk, targetMark, onRowPointerDown, onRowClick }: {
++  tk: Timekeeper; targetMark: MarkRow | null;
+   onRowPointerDown: (item: OnCourseItem, e: PointerEvent<HTMLButtonElement>) => void;
+   onRowClick: (item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) => void;
+ }) {
+   const titleId = useId();
+   const [query, setQuery] = useState('');
+   const [raceId, setRaceId] = useState<string | null>(null);
+   const races = tk.session?.races ?? [];
+   const multiRace = races.length > 1;
+   const chips: { id: string | null; name: string }[] = [{ id: null, name: 'Todas' }, ...races.map(r => ({ id: r.id, name: r.name }))];
+ 
+@@ -639,22 +641,22 @@ function OnCourseList({ tk, selectedMark, onRowPointerDown, onRowClick }: {
+       if (!q) return true;
+       const names = [item.displayName, ...item.entry.members.map(m => m.name ?? '')];
+       return fold(item.entry.bib).includes(q) || names.some(n => fold(n).includes(q));
+     });
+   }, [tk.onCourse, query, raceId]);
+ 
+   return (
+     <section aria-labelledby={titleId} className="flex flex-col gap-2">
+       <SectionTitle id={titleId}>Em prova ({tk.onCourse.length})</SectionTitle>
+       <p className="text-xs text-muted">
+-        {selectedMark
+-          ? `Toque na inscrição para atribuir a marcação das ${markTime(selectedMark)}.`
++        {targetMark
++          ? `Toque na inscrição para atribuir a marcação das ${markTime(targetMark)}.`
+           : 'Toque na inscrição na hora da passagem: marca e atribui de uma vez.'}
+       </p>
+       <input
+         type="search"
+         aria-label="Buscar nº ou nome"
+         placeholder="Buscar nº ou nome"
+         value={query}
+         onChange={e => setQuery(e.target.value)}
+         className="min-h-11 w-full rounded-xl border border-border bg-surface px-3 text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+       />
+diff --git a/src/features/timekeeper/timekeeper.test.tsx b/src/features/timekeeper/timekeeper.test.tsx
+index 921cdf4..0c4ec97 100644
+--- a/src/features/timekeeper/timekeeper.test.tsx
++++ b/src/features/timekeeper/timekeeper.test.tsx
+@@ -404,20 +404,84 @@ describe('marking', () => {
+     await renderMain();
+     typeBib('999');
+     tapMark(); // not found: the mark stays in "Sem atleta", selected for the correction
+     await flush(70 * SEC);
+     expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
+     typeBib('303');
+     submitBib();
+     expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en3' })]);
+   });
+ 
++  it('MARCAR after a deselection selects the new mark, not an older one of its burst (Ruling 54)', async () => {
++    await renderMain();
++    tapMark(); // A
++    fireEvent.click(markButtonOf(unassignedRows()[0])); // A deselected
++    expect(within(unassignedRows()[0]).queryByRole('button', { pressed: true })).not.toBeInTheDocument();
++    await flush(20 * SEC);
++    tapMark(); // C arrives
++    expect(within(unassignedRows()[1]).getByRole('button', { pressed: true })).toBeInTheDocument();
++    typeBib('101');
++    submitBib();
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), null],
++      [iso(NOW0 + OFFSET + 20 * SEC), 'en1'],
++    ]);
++  });
++
++  it('after a deselection, an "Em prova" tap following MARCAR identifies the new mark (Ruling 54)', async () => {
++    await renderMain();
++    tapMark(); // A
++    fireEvent.click(markButtonOf(unassignedRows()[0]));
++    await flush(20 * SEC);
++    tapMark(); // C
++    fireEvent.click(within(rowFor('303')).getByRole('button'));
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), null],
++      [iso(NOW0 + OFFSET + 20 * SEC), 'en3'],
++    ]);
++  });
++
++  it('a failed-bib mark outside its burst does not capture a later arrival tap; the corrected bib still reaches it (Ruling 54)', async () => {
++    await renderMain();
++    typeBib('999');
++    tapMark(); // M: not found, kept selected for the correction
++    await flush(70 * SEC);
++    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
++    expect(screen.getByText('Toque na inscrição na hora da passagem: marca e atribui de uma vez.')).toBeInTheDocument();
++    const tappedAt = Date.now();
++    fireEvent.click(within(rowFor('303')).getByRole('button')); // an arrival, a minute later
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), null],
++      [iso(tappedAt + OFFSET), 'en3'],
++    ]);
++    typeBib('101');
++    submitBib();
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), 'en1'],
++      [iso(tappedAt + OFFSET), 'en3'],
++    ]);
++  });
++
++  it('within its burst, an arrival tap still identifies the failed-bib mark, not the burst head (Ruling 54)', async () => {
++    await renderMain();
++    tapMark(); // W: an earlier arrival still waiting (the burst head)
++    await flush(3 * SEC);
++    typeBib('999');
++    tapMark(); // M: not found, kept selected
++    await flush(5 * SEC);
++    fireEvent.click(within(rowFor('303')).getByRole('button'));
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), null],
++      [iso(NOW0 + OFFSET + 3 * SEC), 'en3'],
++    ]);
++  });
++
+   it('a press that slid off MARCAR does not swallow a later screen-reader activation (Ruling 44 M2)', async () => {
+     await renderMain();
+     const button = screen.getByTestId('mark-button');
+     fireEvent.pointerDown(button, { button: 0, pointerType: 'touch' }); // the finger slides off: no click
+     expect(stored()).toHaveLength(1);
+     await flush(2 * SEC);
+     fireEvent.click(button, { detail: 1 }); // VoiceOver/TalkBack activation: a click without a pointerdown
+     expect(stored()).toHaveLength(2);
+   });
+ 
+diff --git a/src/features/timekeeper/tkStore.test.ts b/src/features/timekeeper/tkStore.test.ts
+index 2920a52..c30655f 100644
+--- a/src/features/timekeeper/tkStore.test.ts
++++ b/src/features/timekeeper/tkStore.test.ts
+@@ -1,19 +1,19 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import type { EntryRow, MarkRow, TkSession } from '../../lib/types';
+ import type { LocalMark, OutboxItem } from '../../lib/outbox';
+ import {
+   iso, makeEntry, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
+ } from '../../domain/testing/fixtures';
+ import {
+   applyWaveStarts, assignMark, assignmentMessage, burstHead, currentBurst, localToMarkRow, markToInput, mergedMarks, newMark,
+-  onCourse, selectedMarkId, selectionAfterMark, sessionIndex,
++  onCourse, selectedMarkId, selectionAfterMark, sessionIndex, tapTargetId,
+ } from './tkStore';
+ 
+ const ME = 'tk-me';
+ 
+ // Solo entry (Ana does both legs), with the member name tk_open embeds.
+ const solo = (p: Partial<EntryRow> = {}): EntryRow =>
+   makeEntry({ members: [{ athlete_id: 'a1', position: 0, legs: [0, 1], name: 'Ana Souza' }], ...p });
+ 
+ function session(p: Partial<TkSession> = {}): TkSession {
+   return {
+@@ -289,38 +289,55 @@ describe('burst selection (Ruling 53)', () => {
+     const discarded = { ...un('d', 5 * SEC), discarded: true };
+     const assigned = { ...un('e', 5 * SEC), entry_id: 'en1', leg_index: 0 };
+     expect(currentBurst([stale, discarded, assigned], now)).toEqual([]);
+   });
+ 
+   it('burstHead is the oldest mark of the burst, however old, and nothing once the burst went stale', () => {
+     expect(burstHead([stale, p0, p1, p2], now)?.id).toBe('p0');
+     expect(burstHead([stale], now)).toBeNull();
+   });
+ 
+-  it('auto picks the burst head; an explicit selection holds until its mark is identified', () => {
++  it('a typed bib goes to the burst head, or to a selection of either origin while its mark waits', () => {
+     expect(selectedMarkId({ mode: 'auto' }, [stale, p0, p1, p2], now)).toBe('p0');
+     expect(selectedMarkId({ mode: 'auto' }, [stale], now)).toBeNull();
+     expect(selectedMarkId({ mode: 'none' }, [stale, p0, p1, p2], now)).toBeNull();
+-    expect(selectedMarkId({ mode: 'id', id: 'p1' }, [stale, p0, p1, p2], now)).toBe('p1');
+-    expect(selectedMarkId({ mode: 'id', id: 'stale' }, [stale, p0, p1, p2], now)).toBe('stale');
+-    expect(selectedMarkId({ mode: 'id', id: 'stale' }, [stale], now)).toBe('stale');
++    expect(selectedMarkId({ mode: 'id', id: 'p1', origin: 'user' }, [stale, p0, p1, p2], now)).toBe('p1');
++    expect(selectedMarkId({ mode: 'id', id: 'stale', origin: 'user' }, [stale, p0, p1, p2], now)).toBe('stale');
++    expect(selectedMarkId({ mode: 'id', id: 'stale', origin: 'app' }, [stale, p0, p1, p2], now)).toBe('stale');
++    expect(selectedMarkId({ mode: 'id', id: 'stale', origin: 'app' }, [stale], now)).toBe('stale');
+     // A selected mark that got an athlete (or was discarded) hands over to the automatic pick.
+-    expect(selectedMarkId({ mode: 'id', id: 'gone' }, [stale, p0, p1, p2], now)).toBe('p0');
++    expect(selectedMarkId({ mode: 'id', id: 'gone', origin: 'user' }, [stale, p0, p1, p2], now)).toBe('p0');
+   });
+ 
+-  it('a new mark resets a deselection and a selection from before its burst to the automatic pick', () => {
+-    const tapped = now;
+-    expect(selectionAfterMark({ mode: 'auto' }, [p0, p1, p2], tapped)).toEqual({ mode: 'auto' });
+-    expect(selectionAfterMark({ mode: 'none' }, [p0, p1, p2], tapped)).toEqual({ mode: 'auto' });
+-    expect(selectionAfterMark({ mode: 'id', id: 'stale' }, [stale, p2], tapped)).toEqual({ mode: 'auto' });
+-    expect(selectionAfterMark({ mode: 'id', id: 'edge' }, [un('edge', 60 * SEC)], tapped)).toEqual({ mode: 'id', id: 'edge' });
+-    expect(selectionAfterMark({ mode: 'id', id: 'p1' }, [p0, p1, p2], tapped)).toEqual({ mode: 'id', id: 'p1' });
++  it('an "Em prova" tap honours a user selection always, an app selection only inside the live burst (Ruling 54)', () => {
++    const all = [stale, p0, p1, p2];
++    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'user' }, all, now)).toBe('stale');
++    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'app' }, all, now)).toBe('p0'); // behaves as auto
++    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'app' }, [stale], now)).toBeNull(); // no burst: a new mark now
++    expect(tapTargetId({ mode: 'id', id: 'p1', origin: 'app' }, all, now)).toBe('p1');
++    expect(tapTargetId({ mode: 'auto' }, all, now)).toBe('p0');
++    expect(tapTargetId({ mode: 'none' }, all, now)).toBeNull();
++    // An app selection lapses with its burst (p2 is 61 s old here); a user selection does not.
++    expect(tapTargetId({ mode: 'id', id: 'p2', origin: 'app' }, [p2], now + 51 * SEC)).toBeNull();
++    expect(tapTargetId({ mode: 'id', id: 'p2', origin: 'user' }, [p2], now + 51 * SEC)).toBe('p2');
++    expect(tapTargetId({ mode: 'id', id: 'gone', origin: 'user' }, all, now)).toBe('p0');
++  });
++
++  it('MARCAR after a deselection selects the new mark for the timekeeper; a selection from before its burst goes back to auto (Ruling 54)', () => {
++    const fresh = { id: 'new', ts: iso(now) };
++    expect(selectionAfterMark({ mode: 'auto' }, [p0, p1, p2], fresh)).toEqual({ mode: 'auto' });
++    expect(selectionAfterMark({ mode: 'none' }, [p0, p1, p2], fresh)).toEqual({ mode: 'id', id: 'new', origin: 'user' });
++    expect(selectionAfterMark({ mode: 'id', id: 'stale', origin: 'user' }, [stale, p2], fresh)).toEqual({ mode: 'auto' });
++    expect(selectionAfterMark({ mode: 'id', id: 'stale', origin: 'app' }, [stale, p2], fresh)).toEqual({ mode: 'auto' });
++    expect(selectionAfterMark({ mode: 'id', id: 'edge', origin: 'app' }, [un('edge', 60 * SEC)], fresh))
++      .toEqual({ mode: 'id', id: 'edge', origin: 'app' });
++    expect(selectionAfterMark({ mode: 'id', id: 'p1', origin: 'user' }, [p0, p1, p2], fresh)).toEqual({ mode: 'id', id: 'p1', origin: 'user' });
+   });
+ });
+ 
+ describe('sessionIndex', () => {
+   it('names entries from the member names embedded by tk_open', () => {
+     const idx = sessionIndex(session({ entries: [relayEntry({ team_name: null })] }));
+     expect(idx.athletesById.get('a2')?.name).toBe('Matheus');
+   });
+ });
+ 
+diff --git a/src/features/timekeeper/tkStore.ts b/src/features/timekeeper/tkStore.ts
+index da20149..a7047d1 100644
+--- a/src/features/timekeeper/tkStore.ts
++++ b/src/features/timekeeper/tkStore.ts
+@@ -161,44 +161,62 @@ export function currentBurst(unassigned: MarkRow[], nowMs: number): MarkRow[] {
+   return open.filter(m => markMs(m) >= newest - UNASSIGNED_ISSUE_AFTER_MS).sort(byTs);
+ }
+ 
+ /** The automatic target: the oldest mark of the current burst, or null when there is none. */
+ export function burstHead(unassigned: MarkRow[], nowMs: number): MarkRow | null {
+   return currentBurst(unassigned, nowMs)[0] ?? null;
+ }
+ 
+ /**
+  * Which "Sem atleta" mark a typed bib or an "Em prova" tap goes to. `auto`: the head of the
+- * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: a mark picked explicitly —
+- * by the timekeeper, or kept after a failed bib or tap — which holds however old it gets, until
+- * it is identified or discarded.
++ * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: one mark, with its origin
++ * (Ruling 54) — `user` when the timekeeper picked it (a tap in "Sem atleta", Desfazer,
++ * Reatribuir, or MARCAR's new mark after a deselection), `app` when the screen kept it selected
++ * after a failed bib or a failed "Em prova" tap. Either holds until the mark is identified or
++ * discarded; an "Em prova" tap honours an `app` one only inside the live burst (`tapTargetId`).
+  */
+-export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string };
++export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string; origin: 'user' | 'app' };
+ 
+-/** The mark `sel` points at among `unassigned` (this timekeeper's marks without an athlete). */
++/** The mark a typed bib goes to (shown as "Selecionada"), among `unassigned` (this timekeeper's
++ * marks without an athlete): an explicit selection of either origin, else the burst head. */
+ export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
+   if (sel.mode === 'none') return null;
+   if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) return sel.id;
+   return burstHead(unassigned, nowMs)?.id ?? null;
+ }
+ 
+ /**
+- * The selection after MARCAR without a bib recorded a mark at `markTsMs`: back to the automatic
+- * pick when nothing was selected, or when the selected mark was tapped before the new mark's
+- * burst — it would otherwise take this arrival's bib, and every identification after it would be
+- * one arrival off. A selection inside the burst stays.
++ * The mark an "Em prova" tap identifies; null = the tap records a new mark now (an arrival). A
++ * `user` selection is always honoured. An `app` one — kept after a failed bib, and maybe
++ * forgotten — only while its mark is in the live burst: past it, a later arrival tap would be
++ * filed at that mark's instant, minutes early, so the tap behaves as `auto` instead.
+  */
+-export function selectionAfterMark(sel: Selection, unassigned: MarkRow[], markTsMs: number): Selection {
+-  if (sel.mode === 'none') return { mode: 'auto' };
++export function tapTargetId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
++  if (sel.mode === 'none') return null;
++  if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) {
++    if (sel.origin === 'user' || currentBurst(unassigned, nowMs).some(m => m.id === sel.id)) return sel.id;
++  }
++  return burstHead(unassigned, nowMs)?.id ?? null;
++}
++
++/**
++ * The selection after MARCAR without a bib recorded `mark`. After a deselection the new mark is
++ * the selected one (spec §7.3.2 item 2), picked for the timekeeper. A selection whose mark was
++ * tapped before the new mark's burst goes back to the automatic pick — it would otherwise take
++ * this arrival's bib, and every identification after it would be one arrival off. Otherwise
++ * nothing changes: in `auto` the pick follows the burst (the new mark itself when it starts one).
++ */
++export function selectionAfterMark(sel: Selection, unassigned: MarkRow[], mark: { id: string; ts: string }): Selection {
++  if (sel.mode === 'none') return { mode: 'id', id: mark.id, origin: 'user' };
+   if (sel.mode === 'id') {
+     const m = unassigned.find(x => x.id === sel.id);
+-    if (m && markMs(m) < markTsMs - UNASSIGNED_ISSUE_AFTER_MS) return { mode: 'auto' };
++    if (m && markMs(m) < Date.parse(mark.ts) - UNASSIGNED_ISSUE_AFTER_MS) return { mode: 'auto' };
+   }
+   return sel;
+ }
+ 
+ /** A crossing other timekeepers can still confirm: shown pinned on top of "Em prova" (Ruling 22). */
+ export interface ConfirmInfo {
+   leg_index: number; leg_label: string; leg_ms: number | null; crossing_ms: number;
+   /** Whole seconds left in the same-crossing window (1..window). */
+   remaining_s: number;
+   /** This timekeeper already has a mark in the crossing: a tap would only duplicate it. */
