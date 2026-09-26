@@ -305,3 +305,4 @@ Task 22: minor (deferred): Web Lock is kept in the `invalid` phase, so a rotated
 Task 22: fix round 2/5 dispatched (resume implementer, opus) — Ruling 53
 Task 27: fix round 1/5 (2 addressed, 0 open — eventShell tests order-independent via vi.dynamicImportSettled, shouldPromptForUpdate predicate + tests; commits 5c97fe2..65fcf4b) — scoped re-review clean (sonnet; re-ran isolated test, full file, full suite 448)
 Task 27: complete (commits 3d47624..65fcf4b, review clean) — merged into feat/ebc-app as b54dfa2 (Windows gates on the merge: vitest 38 files / 497, typecheck clean, build ok; EntriesTab/PublicEventPage now lazy chunks; TimekeeperPage chunk still the stub until T22 merges)
+Task 22: fix round 2 applied (commits 5342738..d1cff39; 36 files / 535 tests, typecheck, build; Ruling 53 burst window, failed-bib selection explicit, row preventDefault, shared threshold) — scoped re-review dispatched (opus)

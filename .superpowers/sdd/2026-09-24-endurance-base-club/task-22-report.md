@@ -593,3 +593,161 @@ npm run build      →  dist/assets/index-BPZzDUV5.js 814.28 kB │ gzip: 238.68
    - I recommend checking on iOS Safari and Android Chrome in the Task 28 E2E or browser pass:
      - MARCAR keeps the keyboard open.
      - An "Em prova" tap during a sync lands on the pressed entry.
+
+## Fix round 2
+
+**Status: DONE.** Scope: Ruling 53 items (a)–(d), on top of `5342738`. The two deferred items were not touched: the lock held in the invalid phase, and the tappable "✓ marcada por você" rows.
+
+- **Commit:** `d1cff39` fix(timekeeper): burst window for the automatic mark pick (Ruling 53)
+- **Files changed:** only the Files block plus the round grant for `src/domain/consolidation.ts` and its test.
+
+```
+src/domain/consolidation.test.ts            |  5 ++-
+src/domain/consolidation.ts                 |  5 ++-
+src/features/timekeeper/TimekeeperPage.tsx  | 48 +++++++++++----------
+src/features/timekeeper/timekeeper.test.tsx | 54 ++++++++++++++++++++++-
+src/features/timekeeper/tkStore.test.ts     | 63 ++++++++++++++++++---------
+src/features/timekeeper/tkStore.ts          | 67 +++++++++++++++++------------
+6 files changed, 168 insertions(+), 74 deletions(-)
+```
+
+Line numbers below refer to `d1cff39`.
+
+### (a) The burst window replaces the age rule for the automatic pick
+
+**What changed in `tkStore.ts`**
+
+- **`currentBurst(unassigned, nowMs)` (:156):**
+  - Takes the device's marks that have no athlete and are not discarded. It filters defensively, even though the caller already passes `tk.unassigned`.
+  - Finds the newest of them.
+  - Returns `[]` when `now − newest > 60 s`.
+  - Otherwise returns the marks with `ts ≥ newest − 60 s`, oldest first.
+- **`burstHead` (:165):** the first mark of the burst, or null. This is the automatic target.
+- **`selectedMarkId` (:178):**
+  - `auto` → `burstHead`
+  - `none` → null
+  - `id` → that mark while it is still in "Sem atleta", otherwise `burstHead`
+- **`selectionAfterMark(sel, unassigned, markTsMs)` (:190)** is new and pure. It gives the selection after MARCAR without a bib:
+  - `none` → `auto`.
+  - An `id` whose mark was tapped more than 60 s before the new mark (so before the new mark's burst) → `auto`, so it cannot take this arrival's bib.
+  - Otherwise the selection is unchanged.
+- The round-1 `STALE_UNASSIGNED_MS` / `isStale` are gone.
+
+**Where the automatic target is used, in `TimekeeperPage.tsx`**
+
+- **MARCAR without a bib (:326):** `setSel(current => selectionAfterMark(...))`.
+  - In `auto` there is no explicit selection any more; the automatic pick follows the new mark's burst.
+  - After a deselection (`none`), MARCAR returns to `auto`, that is to the burst head, instead of selecting the new mark explicitly as in round 1.
+- **bib-submit fallback (:361):** `selectedId ?? burstHead(...)`. When the burst is stale there is no target, and the existing toast asks for MARCAR or an explicit pick.
+- **"Em prova" arrival taps:** they capture `selectedId` on pointerdown, which is computed from the burst. With only a stale mark there is no target, so the tap records a new mark.
+- **"Sem atleta" hint (:243, :603):** "Mais de 1 min · tocar para selecionar" is now shown for marks outside the live burst, the ones only an explicit pick reaches. Such a mark is always more than 1 min old. Marks inside the burst read "Tocar para selecionar".
+
+**Covering tests**
+
+- `timekeeper.test.tsx` "a pack identified slowly lands bib by bib while it is fresh, then asks for a pick instead of misfiling (Ruling 53)". This is the re-review's trace:
+  1. 10 marks 3 s apart, then one bib every 8 s.
+  2. Bibs 1–7 land on marks 1–7. By bib 7 the head is 65 s old.
+  3. At bib 8 the newest is 64 s old: the toast asks for a pick, and marks 8–10 stay unassigned.
+  4. After an explicit pick, bib 8 lands on mark 8.
+- Still passing unchanged:
+  - Important 1 trace: "a mark left without athlete for 2 min does not take the next identification".
+  - "an arrival tap marks now instead of using a mark left without athlete for 2 min".
+  - The 4-tap burst test.
+  - "a bib with only stale marks waiting asks for MARCAR or an explicit pick…".
+  - "MARCAR selects the new mark when the chosen one was tapped before its burst" (renamed from round 1's "…older than the unassigned threshold").
+- `tkStore.test.ts` "burst selection (Ruling 53)". These replace the round-1 age-rule tests; the 60 s edges were moved to the new rule:
+  - "the burst is the marks tapped up to 60 s before the newest, while the newest is fresh":
+    - A mark exactly `newest − 60 s` is in, 1 ms older is out.
+    - The newest exactly 60 s old is still live, 1 ms more is dead.
+    - An empty list gives no burst.
+    - Discarded or identified marks do not keep a burst alive.
+  - "burstHead is the oldest mark of the burst, however old, and nothing once the burst went stale".
+  - "auto picks the burst head; an explicit selection holds until its mark is identified".
+  - "a new mark resets a deselection and a selection from before its burst to the automatic pick". It includes the exactly-60 s-before edge, which keeps the selection.
+
+**RED:** `npx vitest run src/domain/consolidation.test.ts src/features/timekeeper`, with the new tests on `5342738`. The re-review's misfile appears: bib 7 landed on the mark at +24 s instead of +18 s.
+
+```
+FAIL timekeeper.test.tsx > marking > a pack identified slowly lands bib by bib while it is fresh, then asks for a pick instead of misfiling (Ruling 53)
+    [ "2026-10-11T11:10:19.500Z",  - "p7"  + null ],
+    [ "2026-10-11T11:10:22.500Z",    null ],
+    [ "2026-10-11T11:10:25.500Z",  - null  + "p7" ],
+FAIL tkStore.test.ts > burst selection (Ruling 53) > the burst is the marks tapped up to 60 s before the newest … → TypeError: currentBurst is not a function
+FAIL … burstHead is the oldest mark of the burst, however old … → AssertionError: expected 'p1' to be 'p0'
+FAIL … auto picks the burst head; an explicit selection holds … → AssertionError: expected 'p1' to be 'p0'
+FAIL … a new mark resets a deselection … → TypeError: selectionAfterMark is not a function
+```
+
+**Mutation checks** (applied, run, restored):
+- No "newest is fresh" check (a stale burst still picks automatically): 7 tests fail, including the Important 1 arrival-tap case and the slow pack.
+- Window anchored on `now` instead of on the newest mark (the round-1 age rule): 4 tests fail, including the slow pack.
+
+### (b) The mark kept after a failed bib is an explicit selection
+
+**What changed**
+
+- `TimekeeperPage.tsx:320`: after a failed bib at MARCAR, the page sets `setSel({ mode: 'id', id: markId })`.
+- **The `chosen` flag is removed** (`tkStore.ts:175`: `Selection = auto | none | { mode: 'id'; id }`).
+  - After (a), no selection is made by the app any more. The automatic target is always `auto`.
+  - So every `id` selection is explicit and holds until its mark gets an athlete or is discarded. These are: a tap in "Sem atleta" (:430), Desfazer (:273), Reatribuir (:445), a failed bib (:320), and a failed row tap (:385), which is the same situation as a failed bib.
+- A new MARCAR still moves off an explicit selection tapped before its burst (`selectionAfterMark`, kept from round 1) so that a forgotten pick cannot take a new arrival's bib.
+
+**Covering test:** `timekeeper.test.tsx` "a corrected bib reaches the mark whose bib failed, even after 60 s (Ruling 53)".
+1. `999` + MARCAR: not found.
+2. 70 s later the mark is still shown as selected (pressed).
+3. `303` + Atribuir files it on `en3`.
+
+The round-1 test "after a mistyped bib, the corrected bib goes to that mark and not to an older one" still passes.
+
+**RED:** `FAIL … a corrected bib reaches the mark whose bib failed, even after 60 s → Unable to find an accessible element with the role "button"` (pressed: true). The round-1 non-chosen selection had lapsed at 60 s.
+
+**Mutation check:** a failed bib falling back to `auto` makes both failed-bib tests fail.
+
+### (c) "Em prova" rows keep the bib keyboard open
+
+**What changed** in `TimekeeperPage.tsx`:
+- `onRowPointerDown` (:423) calls `e.preventDefault()` after capturing the press.
+  - It does not stop a scroll: scrolling is not a default action of pointerdown, so `pointercancel` still ends the press.
+  - The click still fires, and is ignored as before as the press's own click.
+- `OnCourseRow` adds `onMouseDown={e => e.preventDefault()}` (:716) for the mobile-Safari compatibility mousedown, like MARCAR (:486).
+- The ★1 press/commit logic is unchanged. All round-1 M1 tests still pass: stamped at pointerdown, the list moving under the finger, scroll/cancel.
+
+**Covering test:** `timekeeper.test.tsx` "an \"Em prova\" tap keeps the focus (and the phone keyboard) in the bib field (Ruling 53)", with user-event.
+1. Click the bib field.
+2. Click row 303: exactly one mark, `en3` leg 0.
+3. `bib-input` still has the focus.
+
+**RED:** `expect(element).toHaveFocus()`; the element with focus was the row `<button …>`.
+
+**Mutation check:** removing the row `preventDefault` makes this test fail.
+
+### (d) The 60 s threshold is shared with consolidation
+
+**What changed**
+- `consolidation.ts:32`: `export const UNASSIGNED_ISSUE_AFTER_MS = 60_000`. The value and the comparison at :171 are unchanged; only the export and a comment are new.
+- `tkStore.ts:8` imports it. The duplicate constant is gone.
+
+**Covering test:** `consolidation.test.ts` "exports the 60 s unassigned threshold (spec §8) the timekeeper screen shares".
+
+**RED:** `AssertionError: expected undefined to be 60000`.
+
+### TDD summary and gates
+
+- **RED** (`npx vitest run src/domain/consolidation.test.ts src/features/timekeeper`, before implementation): `Test Files 3 failed (3) · Tests 8 failed | 118 passed (126)`. All 8 failures are the new or rewritten tests quoted above.
+- **GREEN** (focused, after implementation): `npx vitest run src/domain/consolidation.test.ts src/features/timekeeper src/lib/outbox.test.ts src/lib/storage.test.ts` gives `Test Files 5 passed (5) · Tests 137 passed (137)`. No act() warnings, no console noise.
+
+**Gates**
+
+```
+npx vitest run     →  Test Files  36 passed (36)
+                      Tests  535 passed (535)          (round 1: 529; +6 this round)
+                      no warnings / act() / unhandled rejections in the output
+npm run typecheck  →  tsc --noEmit -p tsconfig.json    (exit 0, clean)
+npm run build      →  dist/assets/index-DlxvqrsJ.js 814.50 kB │ gzip: 238.70 kB · ✓ built in 364ms
+                      (only the existing >500 kB chunk warning)
+```
+
+### Notes
+
+- **Remaining limit, accepted in Ruling 53:** a mark forgotten less than 60 s before a pack stays the burst head, which is inherent to FIFO. The target is shown on screen ("Selecionada" and the "Em prova" header).
+- **Behaviour change in the `none` case:** after the timekeeper deselects, MARCAR returns to the automatic pick (the burst head) instead of selecting the new mark explicitly. It is FIFO-consistent: bibs typed in order land in order.
