@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { median, computeCrossing, computeEntryTiming, computeEventTiming } from './consolidation';
+import { median, computeCrossing, computeEntryTiming, computeEventTiming, UNASSIGNED_ISSUE_AFTER_MS } from './consolidation';
 import type { IssueType } from './consolidation';
 import type { MarkRow, ResolutionRow, WaveRow } from '../lib/types';
 import { makeRace, makeWave, makeEntry, makeMark, makeResolution, makeTimekeeper, makeAthlete, T0, SEC, MIN, iso } from './testing/fixtures';
@@ -239,6 +239,9 @@ describe('computeEventTiming issue details', () => {
     expect(computeEventTiming({ ...base, marks }, now).issues.filter(i => i.type === 'unassigned')).toEqual([
       { type: 'unassigned', severity: 'warning', message: 'Marcação 08:38:59.0 (Ana) sem atleta', mark_ids: [late.id] },
     ]);
+  });
+  it('exports the 60 s unassigned threshold (spec §8) the timekeeper screen shares', () => {
+    expect(UNASSIGNED_ISSUE_AFTER_MS).toBe(60_000);
   });
   it('orders issues of the same severity by message, with numeric-aware bibs', () => {
     const r = computeEventTiming({ ...base, entries: [makeEntry(), makeEntry({ id: 'en2', bib: '9' })], marks: [] }, now);

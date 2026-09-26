@@ -8,8 +8,9 @@
     <link rel="icon" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <script>
-      try { var t = localStorage.getItem('ebc.theme'); document.documentElement.dataset.theme = (t === 'light' || t === 'dark') ? t : 'dark'; }
-      catch (e) { document.documentElement.dataset.theme = 'dark'; }
+      var d = location.hash.indexOf('#/c/') === 0 ? 'light' : 'dark'; /* timekeeper link: light by default (sun glare) */
+      try { var t = localStorage.getItem('ebc.theme'); document.documentElement.dataset.theme = (t === 'light' || t === 'dark') ? t : d; }
+      catch (e) { document.documentElement.dataset.theme = d; }
     </script>
   </head>
   <body>

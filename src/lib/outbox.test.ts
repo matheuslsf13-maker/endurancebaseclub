@@ -33,6 +33,24 @@ describe('Outbox', () => {
     o.upsert({ id: 'm1', ...base, discarded: true });
     expect(o.get('m1')!.state).toBe('pending');
   });
+  it('ignores the rejection of a version edited while it was in flight: the edit goes next', () => {
+    const s = memoryStorage(); let t = 1; const o = new Outbox(s, 'k', () => t++);
+    o.upsert({ id: 'm1', ...base });
+    o.markSent(o.pending());
+    o.upsert({ id: 'm1', ...base, entry_id: 'en1', leg_index: 0 });
+    o.applyResult([], [{ id: 'm1', reason: 'Alterada pela organização' }]);
+    expect(o.get('m1')!.state).toBe('pending');
+    expect(o.get('m1')!.reason).toBeUndefined();
+    expect(o.pending().map(m => m.entry_id)).toEqual(['en1']);
+  });
+  it('keeps an edit made in the same millisecond as the version in flight pending', () => {
+    const s = memoryStorage(); const o = new Outbox(s, 'k', () => 5);
+    o.upsert({ id: 'm1', ...base });
+    o.markSent(o.pending());
+    o.upsert({ id: 'm1', ...base, entry_id: 'en1', leg_index: 0 });
+    o.applyResult(['m1'], []);
+    expect(o.get('m1')!.state).toBe('pending');
+  });
   it('orders by ts and honors limits', () => {
     const s = memoryStorage(); const o = new Outbox(s, 'k');
     o.upsert({ id: 'late', ...base, ts: '2026-10-11T11:20:00.000Z' });

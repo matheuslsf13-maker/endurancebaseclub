@@ -27,8 +27,9 @@ export interface Issue {
 }
 export interface EventTiming { byEntry: Map<string, EntryTiming>; issues: Issue[] }
 
-/** A mark still without an athlete becomes an issue once it is older than this. */
-const UNASSIGNED_ISSUE_AFTER_MS = 60_000;
+/** A mark still without an athlete becomes an issue once it is older than this (spec §8). The
+ * timekeeper screen bounds its automatic mark pick with the same threshold. */
+export const UNASSIGNED_ISSUE_AFTER_MS = 60_000;
 
 const markMs = (m: MarkRow): number => Date.parse(m.ts);
 const compareIds = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
