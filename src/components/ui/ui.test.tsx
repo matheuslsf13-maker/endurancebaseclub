@@ -249,6 +249,26 @@ describe('Table', () => {
     const thead = screen.getByText('Nº').closest('thead');
     expect(thead).toHaveClass('sticky');
   });
+
+  it('its horizontal scroller is the containing block of positioned cells (Task 28 E2E, 390 px)', () => {
+    // An `sr-only` label (position: absolute) in a column scrolled off to the right used to be
+    // positioned against the page, not the scroller, and widened the whole page at 390 px.
+    render(
+      <Table>
+        <tbody>
+          <tr>
+            <td>
+              <label className="sr-only" htmlFor="x">Horário</label>
+              <input id="x" />
+            </td>
+          </tr>
+        </tbody>
+      </Table>,
+    );
+    const scroller = screen.getByRole('table').parentElement;
+    expect(scroller).toHaveClass('overflow-x-auto');
+    expect(scroller).toHaveClass('relative');
+  });
 });
 
 describe('EmptyState', () => {
