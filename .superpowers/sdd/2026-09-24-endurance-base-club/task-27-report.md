@@ -279,3 +279,238 @@ Manifest body confirmed matches the brief verbatim (name, short_name, lang pt-BR
   is vite-plugin-pwa's own behavior with the brief's verbatim config, not something introduced here;
   it is harmless (same URL/revision both times) and not worth deviating from the given config to
   avoid.
+
+## Fix round 1
+
+New implementer (this session cannot resume the original cloud session). Base: `task/27` merged
+with current `feat/ebc-app`, HEAD `5c97fe2` (typecheck clean, `npx vitest run` 35 files / 446 green,
+build ok, confirmed before touching anything). Addressed **Important 1** and **Important 3** from
+`task-27-review.md`; Important 2 needed no change (Ruling 52); the Minor items are deferred and were
+left untouched (in particular I did **not** rename the `UpdatePrompt.test.tsx` "ignores the event…"
+test title, even though I drafted that rename at one point — reverted it once I re-read the review's
+scope).
+
+### Important 1 — order-dependent test in `eventShell.test.tsx`
+
+**Finding**: `EventLayout > polls every 2 s only on the timing, review and results tabs`
+(`src/features/events/eventShell.test.tsx:240`, line 245 in the pre-fix file) did a synchronous
+`screen.getByTestId('page-event-general')` right after a 5 ms fake-timer advance. It only passed in
+the full-file run because earlier tests in the file had already warmed React's module-level
+`lazy()` cache for `EventLayout`/`EventGeneralTab`; run alone it failed exactly as the review said.
+
+**Isolation sweep methodology**: Git Bash on Windows (MSYS) rewrites a `-t` argument starting with
+`/` into a Windows path before it reaches Node, silently turning `-t "/ shows the public home..."`
+into a pattern that matches nothing (all 29 tests print `↓` skipped, `0` ran) — this must be run with
+`MSYS_NO_PATHCONV=1` or the argument passed some other way, otherwise "isolation" runs silently
+check nothing. I hit this on the very first sweep and want it on record so the next round doesn't
+lose an afternoon to the same silent-no-match failure. Similarly, `-t` is a regex: a title containing
+literal parentheses (the `it.each` `(%s page)` titles) needs the parens escaped or a substring
+without them — I used the latter (e.g. `"renders the provas tab"`).
+
+**RED — every one of the file's 29 tests run alone** (`MSYS_NO_PATHCONV=1 npx vitest run
+src/features/events/eventShell.test.tsx -t "<title>"`, looped over all 29 titles before touching the
+file): 28/29 passed alone; only the polling test failed:
+```
+ × src/features/events/eventShell.test.tsx > EventLayout > polls every 2 s only on the timing, review and results tabs 46ms
+   → Unable to find an element by: [data-testid="page-event-general"]
+   ...
+ ❯ src/features/events/eventShell.test.tsx:245:19
+    243|     const router = renderApp('/eventos/ev1/geral', organizer());
+    244|     await act(() => vi.advanceTimersByTimeAsync(5));
+    245|     expect(screen.getByTestId('page-event-general')).toBeInTheDocument…
+ Test Files  1 failed (1)
+      Tests  1 failed | 28 skipped (29)
+```
+(Full sweep output — all 29 individual runs — kept as evidence during the session; not committed,
+per the "no scratch files in the repo" rule.)
+
+**Root cause, established by elimination** (documented in code comments at
+`src/features/events/eventShell.test.tsx:244-254`): `/eventos/ev1/geral` renders through two nested
+`lazy()` boundaries — `EventLayout` and, inside it, `EventGeneralTab`. In an isolated `-t` run this
+is the very first time either resolves. I first tried the same fix as the file's other tests
+(`await screen.findByTestId(...)`, i.e. `@testing-library/dom`'s real-clock `waitFor`) — it timed
+out, because that `waitFor` polls using whatever `setInterval` is on `globalThis` **at the time it
+starts**, which is already the fake one once `vi.useFakeTimers()` has run, and nothing re-advances it
+from inside. Vitest's own `vi.waitFor` (which nudges the fake clock on every real-clock tick) also
+timed out — advancing the fake clock alone does not make Vitest's module loader actually finish
+loading `EventLayout.tsx`/`EventGeneralTab.tsx` for the first time, which is genuine async I/O on the
+real clock. `vi.dynamicImportSettled()` (documented for exactly this) does wait for that on the real
+clock, but confirmed via `document.body.innerHTML` in an ad-hoc debug pass that even after it
+resolved, the DOM still showed the outer `<Lazy>` fallback: the underlying `import()` had resolved,
+but nothing had told React to re-render and pick it up (this environment's Suspense retry does not
+reliably re-fire on its own once timers are involved). Forcing a fresh render pass with
+`router.navigate` to the same path — which re-evaluates `lazy()`, and since its promise is now
+settled, resolves synchronously instead of suspending — is what actually unblocked it. I also
+verified (and reverted) an alternative of doing the initial render + first assertion entirely under
+real timers and only switching to fake timers afterwards: that breaks the test for a different
+reason — `useEventData`'s polling effect arms its own `setTimeout` on mount, so if the initial mount
+happens under real timers, that first interval is a **real** `setTimeout` that `vi.advanceTimersByTimeAsync`
+never touches, and `expect(live).toHaveBeenCalledTimes(1)` after the 15 s advance fails with 0 calls.
+So timers must stay fake for the whole test; only the `import()` resolution needs the real-clock
+`vi.dynamicImportSettled()` + a `router.navigate` poke (done twice, once per nested boundary).
+
+**Fix** (`src/features/events/eventShell.test.tsx:244-259`):
+```ts
+await vi.dynamicImportSettled();
+await act(async () => router.navigate('/eventos/ev1/geral'));
+await vi.dynamicImportSettled();
+await act(async () => router.navigate('/eventos/ev1/geral'));
+await act(() => vi.advanceTimersByTimeAsync(5));
+expect(screen.getByTestId('page-event-general')).toBeInTheDocument();
+```
+(kept `vi.useFakeTimers()` at the top of the test and everything after this block exactly as it was).
+
+**GREEN — isolated**:
+```
+$ MSYS_NO_PATHCONV=1 npx vitest run src/features/events/eventShell.test.tsx -t "polls every 2 s" --reporter=verbose
+ ✓ src/features/events/eventShell.test.tsx > EventLayout > polls every 2 s only on the timing, review and results tabs 103ms
+ Test Files  1 passed (1)
+      Tests  1 passed | 28 skipped (29)
+```
+No act()/console warnings in the output.
+
+**GREEN — full file**:
+```
+$ npx vitest run src/features/events/eventShell.test.tsx --reporter=verbose
+ Test Files  1 passed (1)
+      Tests  29 passed (29)
+```
+
+**Proof every test in the file passes alone** (post-fix isolation sweep, same methodology as the RED
+sweep, all 29 titles, each its own `vitest` invocation):
+```
+[1]  / shows the public home to visitors                                                    1 passed
+[2]  / waits for the session before choosing                                                1 passed
+[3]  / sends organizers to /eventos inside the organizer layout                              1 passed
+[4]  /entrar renders the login page                                                          1 passed
+[5]  /trocar-senha renders the change-password page                                          1 passed
+[6]  admin routes send visitors to /entrar, remembering where they were going                1 passed
+[7]  admin routes explain when the account is not an organizer                                1 passed
+[8]  /eventos renders the events page for organizers, inside the layout                       1 passed
+[9]  /atletas renders the athletes page for organizers, inside the layout                     1 passed
+[10] /atletas/a1 renders the athlete-profile page for organizers, inside the layout           1 passed
+[11] /ajuda renders the help page for organizers, inside the layout                           1 passed
+[12] /config renders the settings page for organizers, inside the layout                      1 passed
+[13] /c/tok123 renders the timekeeper page without a session                                  1 passed
+[14] /p/copa-ebc renders the public-event page without a session                              1 passed
+[15] /atleta/a1 renders the public-athlete page without a session                             1 passed
+[16] unknown paths render NotFound                                                            1 passed
+[17] opens the Geral tab and shows the event header, the tabs and the review badge            1 passed
+[18] colors the review badge as an error when a crossing is missing                           1 passed
+[19] shows no review badge when nothing is pending                                            1 passed
+[20-24] renders the {provas,inscricoes,cronometragem,revisao,resultados} tab (…) under the
+        event header — matched individually as substrings without the parens (see the `-t`-is-a-
+        -regex note above); each                                                              1 passed
+[25] polls every 2 s only on the timing, review and results tabs                              1 passed  <- was RED
+[26] shows the load error and retries                                                         1 passed
+[27] derives the index, timing and classifications from the aggregate                         1 passed
+[28] recomputes only when the aggregate changes or every 10 s                                 1 passed
+[29] refuses to be used outside an event                                                      1 passed
+```
+All 29/29 pass alone; only #25 needed a change (already passing tests #1-24, #26-29 were left
+untouched, confirming the round-1 review's finding was scoped correctly and no other test in the
+file has the same order dependency).
+
+### Important 3 — untested `#/c/` guard
+
+**Finding**: `src/main.tsx:16` (pre-fix) inlined `if (location.hash.startsWith('#/c/')) return;` —
+the one line implementing Ruling 26's "never interrupt the timekeeper" — with no test.
+
+**RED** (predicate did not exist yet):
+```
+$ npx vitest run src/components/UpdatePrompt.test.tsx
+ FAIL  src/components/UpdatePrompt.test.tsx > shouldPromptForUpdate > is false on the timekeeper route
+TypeError: shouldPromptForUpdate is not a function
+ FAIL  src/components/UpdatePrompt.test.tsx > shouldPromptForUpdate > is true everywhere else
+TypeError: shouldPromptForUpdate is not a function
+ Test Files  1 failed (1)
+      Tests  2 failed | 3 passed (5)
+```
+
+**Fix**: moved the decision into an exported pure predicate in the file the review suggested
+(`src/components/UpdatePrompt.tsx:6-13`, next to the component that already owns Ruling 26's UI
+half), rather than a new sibling module — one function, no new file needed:
+```ts
+export function shouldPromptForUpdate(hash: string): boolean {
+  return !hash.startsWith('#/c/');
+}
+```
+`src/main.tsx:8,21` now imports it and calls `if (!shouldPromptForUpdate(location.hash)) return;` —
+behaviour is byte-for-byte identical (same substring check, same early return), only where the
+decision lives changed. Tests added at `src/components/UpdatePrompt.test.tsx:50-61`:
+`shouldPromptForUpdate('#/c/abc')` → `false`; `'#/eventos'`, `'#/'`, `''` → `true` (the exact cases
+the review asked for).
+
+**GREEN**:
+```
+$ npx vitest run src/components/UpdatePrompt.test.tsx --reporter=verbose
+ ✓ UpdatePrompt > renders nothing until a new version is announced 21ms
+ ✓ UpdatePrompt > shows the update toast and calls back into the service worker on click 110ms
+ ✓ UpdatePrompt > ignores the event when rendered without a ToastProvider (nothing to crash) 4ms
+ ✓ shouldPromptForUpdate > is false on the timekeeper route 0ms
+ ✓ shouldPromptForUpdate > is true everywhere else 0ms
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+```
+
+### Full gates (after both fixes)
+
+```
+$ npx vitest run
+ Test Files  35 passed (35)
+      Tests  448 passed (448)
+```
+(35 files / 446 tests baseline + 2 new `shouldPromptForUpdate` tests = 448; no other count changed.)
+
+```
+$ npm run typecheck
+> tsc --noEmit -p tsconfig.json
+```
+(clean, no output)
+
+```
+$ npm run build
+✓ 292 modules transformed.
+...
+dist/manifest.webmanifest   0.31 kB
+dist/assets/index-AG2IusQ7.js   480.50 kB │ gzip: 136.92 kB
+✓ built in 579ms
+PWA v1.3.0
+mode      generateSW
+precache  43 entries (814.01 KiB)
+files generated
+  dist/sw.js
+  dist/workbox-2fbc6a65.js
+```
+`dist/sw.js` and `dist/manifest.webmanifest` present; no `(!) Some chunks are larger than 500 kB`
+warning; largest chunk still the 480.5 kB shared entry.
+
+### Files changed
+
+- `src/features/events/eventShell.test.tsx` — `EventLayout > polls every 2 s…` test only
+  (lines 244-259): settle-then-poke the two nested `lazy()` boundaries under fake timers before the
+  first assertion; nothing else in the file touched (confirmed via the isolation sweep above and via
+  `git diff`, which shows exactly this one hunk).
+- `src/components/UpdatePrompt.tsx` — added the exported `shouldPromptForUpdate` predicate
+  (lines 6-13); no other change.
+- `src/components/UpdatePrompt.test.tsx` — added the `describe('shouldPromptForUpdate', …)` block
+  (lines 50-61) and the new import; did **not** touch the existing "ignores the event…" test title
+  (that rename is a deferred Minor, out of scope this round — I drafted it once by mistake and
+  reverted before running any gate).
+- `src/main.tsx` — `onNeedRefresh` now calls `shouldPromptForUpdate(location.hash)` instead of
+  inlining the `#/c/` check (lines 8, 21); behaviour unchanged.
+
+### Concerns
+
+- None blocking. The `vi.dynamicImportSettled()` + `router.navigate` poke pattern in the polling
+  test is a bit more machinery than a typical `await findByTestId`, but it is scoped to the one test
+  that actually needs it (mixing fake timers with a first-time lazy-route resolution), is fully
+  commented in place, and does not change what the test asserts — only how it gets from "just
+  rendered" to "settled" before asserting. If a future task adds another fake-timer test against a
+  route that has never been rendered earlier in the same file, the same pattern (or simply
+  `await screen.findByTestId(...)` under real timers *before* switching to fake timers, provided that
+  route's data hook does not arm a timer on mount) will be needed again.
+- Confirmed the `-t` pitfalls above (MSYS path-mangling of leading `/`, and literal parens in
+  `it.each` titles needing escaping/avoidance) are environmental to Git Bash on Windows, not bugs in
+  the test file; recording them here so later fix rounds on this task don't rediscover them the hard
+  way.

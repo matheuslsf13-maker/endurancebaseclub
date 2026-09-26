@@ -13,6 +13,7 @@ The project moved from the cloud container to the user's Windows 11 machine (Rul
 - Each worktree has its OWN `node_modules` (already installed with `npm ci`). Never run `npm install`/`npm ci`; if you truly need a new dependency, report NEEDS_CONTEXT.
 - `python3` + openpyxl work (the xlsx tests call `scripts/verify-xlsx.py`).
 - NOT available here: Postgres/WSL. `scripts/test-sql.sh`, `npm run test:integration`, `npm run dev:stack` and the E2E cannot run on this machine — screen tasks do not need them. Gates for screen tasks: focused test file(s), full `npx vitest run`, `npm run typecheck`, `npm run build`.
+- Git Bash rewrites arguments that start with `/` into Windows paths: a vitest `-t "/regex/"` pattern silently matches nothing unless you prefix the command with `MSYS_NO_PATHCONV=1`. `-t` is a regex, so escape literal parentheses in test titles.
 - Other agents may be running vitest at the same time. If the ONLY failures of a full run are the two openpyxl tests (`src/lib/xlsx/writer.test.ts`, `src/domain/workbook.test.ts`) with a timeout, re-run those two files alone and report both outputs.
 
 ## Windows-specific rules
