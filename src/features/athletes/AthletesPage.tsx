@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Link } from 'react-router';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api';
 import { Button, Card, EmptyState, Input, Modal, Select, Spinner, Table, useConfirm, useToast } from '../../components/ui';
@@ -29,7 +29,22 @@ export default function AthletesPage() {
   const [search, setSearch] = useState('');
   const [sexFilter, setSexFilter] = useState('');
   const [modal, setModal] = useState<ModalState>(null);
-  const [importOpen, setImportOpen] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Ruling 51: the Entries tab's import shortcut links here with `?import=1` so the dialog opens
+  // right on arrival — a plain link used to land on this page needing a second click. Read once,
+  // lazily, from the URL the page was reached with (never re-triggers itself while the page stays
+  // mounted, e.g. after the organizer manually closes the dialog).
+  const [importOpen, setImportOpen] = useState(() => searchParams.get('import') === '1');
+
+  // Strips the one-shot `?import=1` from the URL right after consuming it (via `replace`, so it
+  // doesn't add a back-button entry), so reloading or navigating back never force-reopens it.
+  useEffect(() => {
+    if (!searchParams.has('import')) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('import');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once, right after mount
+  }, []);
 
   const athletes = query.data ?? [];
   const filtered = useMemo(() => {
