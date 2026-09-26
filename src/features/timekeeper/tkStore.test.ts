@@ -5,8 +5,8 @@ import {
   iso, makeEntry, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
 } from '../../domain/testing/fixtures';
 import {
-  applyWaveStarts, assignMark, assignmentMessage, burstHead, currentBurst, localToMarkRow, markToInput, mergedMarks, newMark,
-  onCourse, selectedMarkId, selectionAfterMark, sessionIndex, tapTargetId,
+  applyWaveStarts, assignMark, assignmentMessage, burstHead, currentBurst, keepAside, localToMarkRow, markToInput, mergedMarks,
+  newMark, onCourse, selectedMarkId, selectionAfterMark, sessionIndex, tapTargetId,
 } from './tkStore';
 
 const ME = 'tk-me';
@@ -322,15 +322,59 @@ describe('burst selection (Ruling 53)', () => {
     expect(tapTargetId({ mode: 'id', id: 'gone', origin: 'user' }, all, now)).toBe('p0');
   });
 
-  it('MARCAR after a deselection selects the new mark for the timekeeper; a selection from before its burst goes back to auto (Ruling 54)', () => {
+  it('MARCAR after a deselection goes back to the automatic pick; so does a selection from before its burst (Ruling 55)', () => {
     const fresh = { id: 'new', ts: iso(now) };
     expect(selectionAfterMark({ mode: 'auto' }, [p0, p1, p2], fresh)).toEqual({ mode: 'auto' });
-    expect(selectionAfterMark({ mode: 'none' }, [p0, p1, p2], fresh)).toEqual({ mode: 'id', id: 'new', origin: 'user' });
+    // The deselected mark is set aside, so the automatic pick can no longer reach it: the new mark
+    // heads its burst and lapses with it, instead of a `user` selection that never lapses.
+    expect(selectionAfterMark({ mode: 'none' }, [p0, p1, p2], fresh)).toEqual({ mode: 'auto' });
     expect(selectionAfterMark({ mode: 'id', id: 'stale', origin: 'user' }, [stale, p2], fresh)).toEqual({ mode: 'auto' });
     expect(selectionAfterMark({ mode: 'id', id: 'stale', origin: 'app' }, [stale, p2], fresh)).toEqual({ mode: 'auto' });
     expect(selectionAfterMark({ mode: 'id', id: 'edge', origin: 'app' }, [un('edge', 60 * SEC)], fresh))
       .toEqual({ mode: 'id', id: 'edge', origin: 'app' });
     expect(selectionAfterMark({ mode: 'id', id: 'p1', origin: 'user' }, [p0, p1, p2], fresh)).toEqual({ mode: 'id', id: 'p1', origin: 'user' });
+  });
+});
+
+describe('set-aside marks (Ruling 55)', () => {
+  const now = T0 + 10 * MIN;
+  const un = (id: string, agoMs: number) => makeMark({ id, at: now - agoMs, timekeeper_id: ME, entry_id: null, leg_index: null });
+  const stale = un('stale', 3 * MIN);
+  const p0 = un('p0', 70 * SEC);
+  const p1 = un('p1', 40 * SEC);
+  const p2 = un('p2', 10 * SEC);
+  const all = [stale, p0, p1, p2];
+  const aside = (...list: string[]) => new Set(list);
+  const ids = (marks: { id: string }[]) => marks.map(m => m.id);
+
+  it('the burst is computed over the marks not set aside: a set-aside mark neither heads it nor keeps it alive', () => {
+    expect(ids(currentBurst(all, now, aside('p0')))).toEqual(['p1', 'p2']);
+    // With p2 set aside the newest is p1 (40 s): p0 is 30 s older, still in.
+    expect(ids(currentBurst(all, now, aside('p2')))).toEqual(['p0', 'p1']);
+    // Only a stale mark is left once the fresh one is set aside: nothing is picked on its own.
+    expect(currentBurst([stale, p2], now, aside('p2'))).toEqual([]);
+    expect(burstHead(all, now, aside('p0'))?.id).toBe('p1');
+    expect(burstHead([p0], now, aside('p0'))).toBeNull();
+  });
+
+  it('no automatic target reaches a set-aside mark: typed bib, the fallback after an identification, arrival taps', () => {
+    expect(selectedMarkId({ mode: 'auto' }, all, now, aside('p0'))).toBe('p1');
+    expect(selectedMarkId({ mode: 'none' }, all, now, aside('p0'))).toBeNull();
+    // The selected mark was identified: the pick falls back past the set-aside one.
+    expect(selectedMarkId({ mode: 'id', id: 'gone', origin: 'user' }, all, now, aside('p0'))).toBe('p1');
+    expect(selectedMarkId({ mode: 'auto' }, [p0], now, aside('p0'))).toBeNull();
+    expect(tapTargetId({ mode: 'auto' }, all, now, aside('p0'))).toBe('p1');
+    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'app' }, all, now, aside('p0'))).toBe('p1');
+    expect(tapTargetId({ mode: 'id', id: 'gone', origin: 'user' }, [p0], now, aside('p0'))).toBeNull();
+    // An explicit selection is honoured as before.
+    expect(selectedMarkId({ mode: 'id', id: 'p2', origin: 'user' }, all, now, aside('p0'))).toBe('p2');
+    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'user' }, all, now, aside('p0'))).toBe('stale');
+  });
+
+  it('keeps only the set-aside ids of marks still in "Sem atleta"', () => {
+    expect(keepAside(['p0', 'gone', 'p2', 'p0'], [p0, p1, p2])).toEqual(['p0', 'p2']);
+    expect(keepAside([], all)).toEqual([]);
+    expect(keepAside(['p0'], [])).toEqual([]);
   });
 });
 

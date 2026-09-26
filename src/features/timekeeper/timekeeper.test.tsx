@@ -584,6 +584,200 @@ describe('marking', () => {
   });
 });
 
+describe('a deselected mark is set aside (Ruling 55)', () => {
+  const ASIDE_KEY = 'ebc.tk.aside.e1.tk-me';
+  const storedAside = (key = ASIDE_KEY) => JSON.parse(window.localStorage.getItem(key) ?? 'null') as unknown;
+  const pressedIn = (row: HTMLElement) => within(row).queryByRole('button', { pressed: true });
+  const ARRIVAL_HINT = 'Toque na inscrição na hora da passagem: marca e atribui de uma vez.';
+  const PICK_FIRST = 'Toque em MARCAR primeiro, ou selecione a marcação em "Sem atleta"';
+
+  it('once the new mark is identified, the next bib goes to the next arrival, not to the mark set aside', async () => {
+    await renderMain();
+    tapMark(); // A
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // A deselected: set aside
+    await flush(20 * SEC);
+    tapMark(); // C
+    expect(pressedIn(unassignedRows()[1])).toBeInTheDocument();
+    await flush(2 * SEC);
+    tapMark(); // D, 2 s later: C stays the target
+    expect(pressedIn(unassignedRows()[1])).toBeInTheDocument();
+    typeBib('101');
+    submitBib(); // C
+    typeBib('303');
+    submitBib(); // D — not A, 22 s earlier
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(NOW0 + OFFSET + 20 * SEC), 'en1'],
+      [iso(NOW0 + OFFSET + 22 * SEC), 'en3'],
+    ]);
+    expect(unassignedRows()[0]).toHaveTextContent('Deixada de lado');
+  });
+
+  it('MARCAR after a deselection goes back to the automatic pick: the new mark lapses with its burst', async () => {
+    await renderMain();
+    tapMark(); // A
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // set aside
+    await flush(20 * SEC);
+    tapMark(); // C, never identified
+    await flush(2 * MIN);
+    expect(pressedIn(screen.getByTestId('unassigned-list'))).not.toBeInTheDocument();
+    expect(screen.getByText(ARRIVAL_HINT)).toBeInTheDocument();
+    const tappedAt = Date.now();
+    fireEvent.click(within(rowFor('303')).getByRole('button')); // an arrival 2 min later: a new mark
+    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
+      [iso(NOW0 + OFFSET), null],
+      [iso(NOW0 + OFFSET + 20 * SEC), null],
+      [iso(tappedAt + OFFSET), 'en3'],
+    ]);
+  });
+
+  it('a typed number with nothing selected skips a set-aside mark', async () => {
+    await renderMain();
+    tapMark(); // A
+    await flush(3 * SEC);
+    tapMark(); // B
+    expect(pressedIn(unassignedRows()[0])).toBeInTheDocument(); // A heads the burst
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // A deselected
+    expect(pressedIn(screen.getByTestId('unassigned-list'))).not.toBeInTheDocument();
+    typeBib('101');
+    submitBib(); // goes to B
+    expect(stored().map(m => m.entry_id)).toEqual([null, 'en1']);
+    typeBib('303');
+    submitBib(); // only A is left, set aside: nothing takes it on its own
+    expect(screen.getByText(PICK_FIRST)).toBeInTheDocument();
+    expect(stored().map(m => m.entry_id)).toEqual([null, 'en1']);
+    expect(unassignedRows()[0]).toHaveTextContent('Deixada de lado · tocar para selecionar');
+  });
+
+  it('stays set aside after a reload, from the device storage', async () => {
+    const first = await renderMain();
+    tapMark(); // A
+    fireEvent.click(markButtonOf(unassignedRows()[0]));
+    const id = stored()[0].id;
+    expect(storedAside()).toEqual([id]);
+    first.unmount();
+    await flush(5 * SEC);
+
+    await renderMain(); // the page reloaded 5 s later
+    expect(unassignedRows()).toHaveLength(1);
+    expect(pressedIn(unassignedRows()[0])).not.toBeInTheDocument();
+    expect(unassignedRows()[0]).toHaveTextContent('Deixada de lado');
+    typeBib('101');
+    submitBib();
+    expect(screen.getByText(PICK_FIRST)).toBeInTheDocument();
+    fireEvent.click(within(rowFor('303')).getByRole('button')); // an arrival: a new mark, not A
+    expect(stored().map(m => [m.id === id, m.entry_id])).toEqual([[true, null], [false, 'en3']]);
+  });
+
+  it('stays set aside when a waiting tab takes over from the one that set it aside', async () => {
+    const locks = installLocks();
+    const closeOther = locks.otherTab('ebc.tk.e1');
+    window.localStorage.setItem(REG_KEY, JSON.stringify(REG));
+    renderPage();
+    await flush();
+    const ts = iso(NOW0 + OFFSET);
+    const theirs = { id: 'theirs', ts, device_ts: ts, clock_offset_ms: OFFSET, clock_rtt_ms: 100, entry_id: null, leg_index: null, athlete_id: null, discarded: false, local_updated_at: NOW0 };
+    window.localStorage.setItem(OUTBOX_KEY, JSON.stringify({ items: { theirs: { mark: theirs, state: 'pending' } } }));
+    window.localStorage.setItem(ASIDE_KEY, JSON.stringify(['theirs']));
+    closeOther();
+    await flush();
+    expect(unassignedRows()).toHaveLength(1);
+    expect(pressedIn(unassignedRows()[0])).not.toBeInTheDocument();
+    typeBib('101');
+    submitBib();
+    expect(screen.getByText(PICK_FIRST)).toBeInTheDocument();
+    expect(stored()[0].entry_id).toBeNull();
+  });
+
+  it('stays set aside under a new registration of the device', async () => {
+    await renderMain();
+    tapMark();
+    fireEvent.click(markButtonOf(unassignedRows()[0]));
+    const id = stored()[0].id;
+    mocks.sync.mockRejectedValueOnce(new ApiError('Cronometrista não autorizado', 'P0001'));
+    await flush(2 * SEC);
+    mocks.register.mockResolvedValueOnce({ timekeeper_id: 'tk-new', secret: 'n3w' });
+    fireEvent.change(screen.getByTestId('tk-name'), { target: { value: 'Ana TK' } });
+    fireEvent.click(screen.getByTestId('tk-register'));
+    await flush();
+    expect(unassignedRows()).toHaveLength(1);
+    expect(pressedIn(unassignedRows()[0])).not.toBeInTheDocument();
+    expect(storedAside('ebc.tk.aside.e1.tk-new')).toEqual([id]);
+  });
+
+  it('selecting a set-aside mark again makes it a target again, also for the fallback', async () => {
+    await renderMain();
+    tapMark(); // A
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // set aside
+    await flush(5 * SEC);
+    tapMark(); // B heads the burst without A
+    expect(pressedIn(unassignedRows()[1])).toBeInTheDocument();
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // A selected again
+    expect(pressedIn(unassignedRows()[0])).toBeInTheDocument();
+    expect(storedAside()).toEqual([]);
+    fireEvent.click(markButtonOf(unassignedRows()[1])); // then B picked
+    typeBib('101');
+    submitBib(); // B
+    expect(pressedIn(unassignedRows()[0])).toBeInTheDocument(); // the fallback reaches A again
+    typeBib('303');
+    submitBib();
+    expect(stored().map(m => m.entry_id)).toEqual(['en3', 'en1']);
+  });
+
+  it('a discard drops the mark from the set-aside list, and its Desfazer puts it back aside', async () => {
+    await renderMain();
+    tapMark();
+    fireEvent.click(markButtonOf(unassignedRows()[0])); // set aside
+    const id = stored()[0].id;
+    fireEvent.click(within(unassignedRows()[0]).getByRole('button', { name: /Descartar/ }));
+    expect(storedAside()).toEqual([]);
+    fireEvent.click(screen.getByTestId('discard-undo'));
+    expect(unassignedRows()).toHaveLength(1);
+    expect(pressedIn(unassignedRows()[0])).not.toBeInTheDocument();
+    expect(storedAside()).toEqual([id]);
+    typeBib('101');
+    submitBib();
+    expect(screen.getByText(PICK_FIRST)).toBeInTheDocument();
+  });
+
+  it('tapping a mark kept selected after a failed bib makes it the timekeeper\'s own pick instead of deselecting it', async () => {
+    await renderMain();
+    typeBib('999');
+    tapMark(); // M: not found, kept selected by the screen
+    await flush(70 * SEC);
+    expect(screen.getByText(ARRIVAL_HINT)).toBeInTheDocument(); // outside its burst: taps are arrivals
+    fireEvent.click(markButtonOf(unassignedRows()[0]));
+    expect(pressedIn(unassignedRows()[0])).toBeInTheDocument();
+    expect(storedAside() ?? []).toEqual([]);
+    expect(screen.getByText(`Toque na inscrição para atribuir a marcação das ${at(NOW0 + OFFSET)}.`)).toBeInTheDocument();
+    fireEvent.click(within(rowFor('303')).getByRole('button'));
+    expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en3' })]);
+  });
+
+  it('Desfazer picks the mark for the timekeeper: an "Em prova" tap minutes later still identifies it', async () => {
+    await renderMain();
+    tapMark();
+    typeBib('101');
+    submitBib();
+    fireEvent.click(screen.getByTestId('toast-undo'));
+    await flush(70 * SEC); // outside any burst: only a `user` selection still takes a row tap
+    expect(pressedIn(unassignedRows()[0])).toBeInTheDocument();
+    fireEvent.click(within(rowFor('303')).getByRole('button'));
+    expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en3' })]);
+  });
+
+  it('Reatribuir picks the mark for the timekeeper: an "Em prova" tap minutes later still identifies it', async () => {
+    await renderMain();
+    typeBib('101');
+    tapMark(); // identified at once
+    fireEvent.click(within(screen.getByTestId('my-marks')).getByRole('button', { name: `Reatribuir a marcação das ${at(NOW0 + OFFSET)}` }));
+    await flush(70 * SEC);
+    expect(pressedIn(unassignedRows()[0])).toBeInTheDocument();
+    fireEvent.click(within(rowFor('303')).getByRole('button'));
+    expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en3' })]);
+  });
+});
+
 describe('"Em prova" list', () => {
   const handoffAt = NOW0 + OFFSET - 5 * SEC; // another timekeeper marked the relay handoff 5 s ago
   const otherMark = () => makeMark({ id: 'other', at: handoffAt, timekeeper_id: 'tk2', entry_id: 'en2', leg_index: 0, athlete_id: 'a2' });

@@ -230,8 +230,9 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   const toast = useToast();
   const [bib, setBib] = useState('');
   // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (tkStore `Selection`, Rulings 53
-  // and 54): the oldest of the current burst unless one was picked; `none` = deselected, so
-  // "Em prova" taps mark new arrivals.
+  // to 55): the oldest of the current burst unless one was picked; `none` = deselected, so
+  // "Em prova" taps mark new arrivals. Deselected marks are set aside (`tk.aside`, kept on the
+  // device): no automatic target ever reaches them until they are picked again.
   const [sel, setSel] = useState<Selection>({ mode: 'auto' });
   const [legSheet, setLegSheet] = useState<string | null>(null);
   const assignToastId = useRef<string | null>(null);
@@ -239,10 +240,16 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   const rowPress = useRef<RowPress | null>(null);
   const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
   const bibId = useId();
-  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs); // where a typed bib goes
-  const rowTargetId = tapTargetId(sel, tk.unassigned, tk.nowMs); // what an "Em prova" tap identifies
-  const burstIds = new Set(currentBurst(tk.unassigned, tk.nowMs).map(m => m.id));
+  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs, tk.aside); // where a typed bib goes
+  const rowTargetId = tapTargetId(sel, tk.unassigned, tk.nowMs, tk.aside); // what an "Em prova" tap identifies
+  const burstIds = new Set(currentBurst(tk.unassigned, tk.nowMs, tk.aside).map(m => m.id));
   const rowTargetMark = rowTargetId ? tk.unassigned.find(m => m.id === rowTargetId) ?? null : null;
+
+  /** Selects one mark; a mark set aside is taken back (Ruling 55). */
+  function select(id: string, origin: 'user' | 'app') {
+    tk.setAside(id, false);
+    setSel({ mode: 'id', id, origin });
+  }
 
   function showAssigned(r: Extract<AssignResult, { ok: true }>) {
     if (assignToastId.current) toast.dismiss(assignToastId.current);
@@ -271,7 +278,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
               size="sm" variant="secondary" data-testid="toast-undo"
               onClick={act(() => {
                 tk.unassign(markId);
-                setSel({ mode: 'id', id: markId, origin: 'user' });
+                select(markId, 'user');
               })}
             >
               Desfazer
@@ -318,13 +325,13 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       // The bib typed belongs to this mark: select it explicitly, so the corrected bib goes to it
       // — not to an older mark still waiting — however long the correction takes.
       showError(assignment.error);
-      setSel({ mode: 'id', id: markId, origin: 'app' });
+      select(markId, 'app');
       return;
     }
-    // Spec §7.3.2 with Rulings 53 and 54: after a deselection the new mark is selected; otherwise
-    // the automatic pick follows the burst the new mark belongs to — its oldest mark, so bibs typed
-    // in arrival order land on marks 1, 2, 3… A selection tapped before that burst never outlives
-    // a new tap: it would take this arrival's bib.
+    // Spec §7.3.2 with Rulings 53 to 55: the automatic pick follows the burst the new mark belongs
+    // to — its oldest mark not set aside, so bibs typed in arrival order land on marks 1, 2, 3…;
+    // a deselection goes back to it too, since the deselected mark is set aside. A selection
+    // tapped before that burst never outlives a new tap: it would take this arrival's bib.
     setSel(current => selectionAfterMark(current, tk.unassigned, { id: markId, ts }));
   }
 
@@ -358,9 +365,9 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       toast.show({ message: 'Digite o nº de peito' });
       return;
     }
-    // The selected mark, else the oldest of the current burst (Ruling 53) — none once it went
-    // stale: then a mark must be picked.
-    const target = selectedId ?? burstHead(tk.unassigned, tk.nowMs)?.id ?? null;
+    // The selected mark, else the oldest of the current burst (Ruling 53) — never a mark set aside
+    // (Ruling 55), and none once the burst went stale: then a mark must be picked.
+    const target = selectedId ?? burstHead(tk.unassigned, tk.nowMs, tk.aside)?.id ?? null;
     if (!target) {
       toast.show({
         message: tk.unassigned.length > 0
@@ -384,7 +391,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     const { markId: newId } = tk.mark(undefined, stamp); // arrival tap: the instant of the press
     vibrate();
     const r = tk.assign(newId, item.entry.id);
-    if (!r.ok) setSel({ mode: 'id', id: newId, origin: 'app' });
+    if (!r.ok) select(newId, 'app');
     report(r);
   }
 
@@ -432,22 +439,40 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   }
 
   function toggleSelect(id: string) {
-    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id, origin: 'user' });
+    if (id !== selectedId) {
+      select(id, 'user');
+    } else if (sel.mode === 'id' && sel.id === id && sel.origin === 'app') {
+      // Kept selected by the screen (after a failed bib): the tap makes it the timekeeper's own
+      // pick, honoured by "Em prova" taps too, instead of deselecting it (Ruling 55).
+      setSel({ mode: 'id', id, origin: 'user' });
+    } else {
+      // Deselected: set aside, so no automatic target returns to it (Ruling 55).
+      tk.setAside(id, true);
+      setSel({ mode: 'none' });
+    }
   }
 
   function onDiscard(m: MarkRow) {
+    // A discard ends the set-aside; its Desfazer puts the mark back as it was.
+    const wasAside = tk.aside.has(m.id);
     tk.discard(m.id);
     toast.show({
       testid: 'discard-toast',
       message: `Marcação das ${markTime(m)} descartada`,
-      actions: [{ label: 'Desfazer', testid: 'discard-undo', onClick: () => tk.restore(m.id) }],
+      actions: [{
+        label: 'Desfazer', testid: 'discard-undo',
+        onClick: () => {
+          tk.restore(m.id);
+          if (wasAside) tk.setAside(m.id, true);
+        },
+      }],
     });
   }
 
   function onReassign(m: MarkRow) {
     tk.unassign(m.id);
     if (m.discarded) tk.restore(m.id); // a rejected mark discarded here goes back to "Sem atleta"
-    setSel({ mode: 'id', id: m.id, origin: 'user' });
+    select(m.id, 'user');
   }
 
   function onChangeLeg(markId: string, legIndex: number) {
@@ -494,7 +519,10 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
           Marcar
         </button>
 
-        <UnassignedList marks={tk.unassigned} burstIds={burstIds} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
+        <UnassignedList
+          marks={tk.unassigned} burstIds={burstIds} asideIds={tk.aside} selectedId={selectedId}
+          onSelect={toggleSelect} onDiscard={onDiscard}
+        />
 
         <OnCourseList tk={tk} targetMark={rowTargetMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
 
@@ -580,8 +608,9 @@ function SectionTitle({ id, children }: { id: string; children: ReactNode }) {
   return <h2 id={id} className="brand-title text-xs font-semibold text-muted">{children}</h2>;
 }
 
-function UnassignedList({ marks, burstIds, selectedId, onSelect, onDiscard }: {
-  marks: MarkRow[]; burstIds: Set<string>; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
+function UnassignedList({ marks, burstIds, asideIds, selectedId, onSelect, onDiscard }: {
+  marks: MarkRow[]; burstIds: Set<string>; asideIds: ReadonlySet<string>; selectedId: string | null;
+  onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
 }) {
   const titleId = useId();
   return (
@@ -602,7 +631,11 @@ function UnassignedList({ marks, burstIds, selectedId, onSelect, onDiscard }: {
               >
                 <span className="tabular text-lg font-semibold">{markTime(m)}</span>
                 <span className="text-xs text-muted">
-                  {selected ? 'Selecionada' : burstIds.has(m.id) ? 'Tocar para selecionar' : 'Mais de 1 min · tocar para selecionar'}
+                  {selected
+                    ? 'Selecionada'
+                    : asideIds.has(m.id)
+                      ? 'Deixada de lado · tocar para selecionar'
+                      : burstIds.has(m.id) ? 'Tocar para selecionar' : 'Mais de 1 min · tocar para selecionar'}
                 </span>
               </button>
               <button

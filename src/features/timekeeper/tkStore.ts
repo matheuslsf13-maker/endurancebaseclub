@@ -145,6 +145,8 @@ export function applyWaveStarts(session: TkSession, waves: Pick<WaveRow, 'id' | 
 const markMs = (m: MarkRow): number => Date.parse(m.ts);
 const byTs = (a: MarkRow, b: MarkRow): number => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
+const NOTHING_ASIDE: ReadonlySet<string> = new Set();
+
 /**
  * The marks a typed bib or an "Em prova" tap may reach on their own (Ruling 53): the marks still
  * without an athlete tapped at most the unassigned-issue threshold (60 s, spec §8) before the
@@ -152,9 +154,11 @@ const byTs = (a: MarkRow, b: MarkRow): number => (a.ts < b.ts ? -1 : a.ts > b.ts
  * (now − newest ≤ 60 s). Bibs typed in arrival order then land on marks 1, 2, 3… however long the
  * pack takes to identify; a mark left unidentified before the pack never takes one of its bibs.
  * Empty once the newest is older: nothing is picked automatically any more, a mark must be chosen.
+ * Marks the timekeeper set `aside` (deselected, Ruling 55) are not part of it at all: they never
+ * head it and never keep it alive.
  */
-export function currentBurst(unassigned: MarkRow[], nowMs: number): MarkRow[] {
-  const open = unassigned.filter(m => !m.discarded && m.entry_id === null);
+export function currentBurst(unassigned: MarkRow[], nowMs: number, aside: ReadonlySet<string> = NOTHING_ASIDE): MarkRow[] {
+  const open = unassigned.filter(m => !m.discarded && m.entry_id === null && !aside.has(m.id));
   if (open.length === 0) return [];
   const newest = Math.max(...open.map(markMs));
   if (nowMs - newest > UNASSIGNED_ISSUE_AFTER_MS) return [];
@@ -162,51 +166,66 @@ export function currentBurst(unassigned: MarkRow[], nowMs: number): MarkRow[] {
 }
 
 /** The automatic target: the oldest mark of the current burst, or null when there is none. */
-export function burstHead(unassigned: MarkRow[], nowMs: number): MarkRow | null {
-  return currentBurst(unassigned, nowMs)[0] ?? null;
+export function burstHead(unassigned: MarkRow[], nowMs: number, aside: ReadonlySet<string> = NOTHING_ASIDE): MarkRow | null {
+  return currentBurst(unassigned, nowMs, aside)[0] ?? null;
 }
 
 /**
  * Which "Sem atleta" mark a typed bib or an "Em prova" tap goes to. `auto`: the head of the
- * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: one mark, with its origin
+ * current burst (`burstHead`); `none`: the timekeeper deselected — the deselected mark is set
+ * aside (Ruling 55) and "Em prova" taps record new arrivals; `id`: one mark, with its origin
  * (Ruling 54) — `user` when the timekeeper picked it (a tap in "Sem atleta", Desfazer,
- * Reatribuir, or MARCAR's new mark after a deselection), `app` when the screen kept it selected
- * after a failed bib or a failed "Em prova" tap. Either holds until the mark is identified or
- * discarded; an "Em prova" tap honours an `app` one only inside the live burst (`tapTargetId`).
+ * Reatribuir), `app` when the screen kept it selected after a failed bib or a failed "Em prova"
+ * tap. Either holds until the mark is identified or discarded; an "Em prova" tap honours an `app`
+ * one only inside the live burst (`tapTargetId`).
+ *
+ * `aside` — the marks the timekeeper deselected — is kept apart from the selection: those marks
+ * are left out of every automatic target (burst, bib fallback, arrival-tap target) until they are
+ * selected again, identified or discarded.
  */
 export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string; origin: 'user' | 'app' };
 
 /** The mark a typed bib goes to (shown as "Selecionada"), among `unassigned` (this timekeeper's
- * marks without an athlete): an explicit selection of either origin, else the burst head. */
-export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
+ * marks without an athlete): an explicit selection of either origin, else the burst head (never a
+ * mark set aside). */
+export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: number, aside: ReadonlySet<string> = NOTHING_ASIDE): string | null {
   if (sel.mode === 'none') return null;
   if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) return sel.id;
-  return burstHead(unassigned, nowMs)?.id ?? null;
+  return burstHead(unassigned, nowMs, aside)?.id ?? null;
 }
 
 /**
  * The mark an "Em prova" tap identifies; null = the tap records a new mark now (an arrival). A
  * `user` selection is always honoured. An `app` one — kept after a failed bib, and maybe
  * forgotten — only while its mark is in the live burst: past it, a later arrival tap would be
- * filed at that mark's instant, minutes early, so the tap behaves as `auto` instead.
+ * filed at that mark's instant, minutes early, so the tap behaves as `auto` instead. The automatic
+ * target never is a mark set aside.
  */
-export function tapTargetId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
+export function tapTargetId(sel: Selection, unassigned: MarkRow[], nowMs: number, aside: ReadonlySet<string> = NOTHING_ASIDE): string | null {
   if (sel.mode === 'none') return null;
   if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) {
-    if (sel.origin === 'user' || currentBurst(unassigned, nowMs).some(m => m.id === sel.id)) return sel.id;
+    if (sel.origin === 'user' || currentBurst(unassigned, nowMs, aside).some(m => m.id === sel.id)) return sel.id;
   }
-  return burstHead(unassigned, nowMs)?.id ?? null;
+  return burstHead(unassigned, nowMs, aside)?.id ?? null;
+}
+
+/** The set-aside ids still worth keeping: those of marks still in "Sem atleta" (`unassigned`),
+ * once each. A mark identified or discarded is no longer set aside (Ruling 55). */
+export function keepAside(ids: readonly string[], unassigned: MarkRow[]): string[] {
+  const waiting = new Set(unassigned.map(m => m.id));
+  return [...new Set(ids)].filter(id => waiting.has(id));
 }
 
 /**
- * The selection after MARCAR without a bib recorded `mark`. After a deselection the new mark is
- * the selected one (spec §7.3.2 item 2), picked for the timekeeper. A selection whose mark was
- * tapped before the new mark's burst goes back to the automatic pick — it would otherwise take
- * this arrival's bib, and every identification after it would be one arrival off. Otherwise
- * nothing changes: in `auto` the pick follows the burst (the new mark itself when it starts one).
+ * The selection after MARCAR without a bib recorded `mark`. After a deselection it goes back to
+ * the automatic pick (Ruling 55): the deselected mark is set aside, so the pick cannot return to
+ * it, and the new mark heads its burst — selected, and lapsing with the burst like any automatic
+ * pick. A selection whose mark was tapped before the new mark's burst goes back to the automatic
+ * pick too — it would otherwise take this arrival's bib, and every identification after it would
+ * be one arrival off. Otherwise nothing changes: in `auto` the pick follows the burst.
  */
 export function selectionAfterMark(sel: Selection, unassigned: MarkRow[], mark: { id: string; ts: string }): Selection {
-  if (sel.mode === 'none') return { mode: 'id', id: mark.id, origin: 'user' };
+  if (sel.mode === 'none') return { mode: 'auto' };
   if (sel.mode === 'id') {
     const m = unassigned.find(x => x.id === sel.id);
     if (m && markMs(m) < Date.parse(mark.ts) - UNASSIGNED_ISSUE_AFTER_MS) return { mode: 'auto' };

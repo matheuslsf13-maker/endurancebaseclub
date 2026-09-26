@@ -16,7 +16,7 @@ import type { EventIndex } from '../../domain/eventModel';
 import { planBibAssignment } from '../../domain/suggestLeg';
 import type { LegSuggestion } from '../../domain/suggestLeg';
 import {
-  applyWaveStarts, assignMark, assignmentMessage, localToMarkRow, markToInput, memberName, mergedMarks, newMark,
+  applyWaveStarts, assignMark, assignmentMessage, keepAside, localToMarkRow, markToInput, memberName, mergedMarks, newMark,
   onCourse, sessionIndex, withSuggestion,
 } from './tkStore';
 import type { OnCourseItem } from './tkStore';
@@ -36,6 +36,9 @@ const outboxKey = (eventId: string, timekeeperId: string) => `ebc.tk.${eventId}.
 /** Timekeeper ids with an outbox for this event on this device — lets a new registration pick up
  * marks still pending under a registration that stopped working (rotated link, unknown id). */
 const outboxesKey = (eventId: string) => `ebc.tk.outboxes.${eventId}`;
+/** Ids of this timekeeper's marks deselected in "Sem atleta" (set aside, Ruling 55), kept on the
+ * device so a reload or another tab taking over does not make them automatic targets again. */
+const asideKey = (eventId: string, timekeeperId: string) => `ebc.tk.aside.${eventId}.${timekeeperId}`;
 
 /** `other_tab`: another tab of this device has the link open (Ruling 45) — nothing is marked here. */
 export type TkPhase = 'loading' | 'invalid' | 'register' | 'main' | 'disabled' | 'other_tab';
@@ -84,6 +87,8 @@ export interface Timekeeper {
   marks: MarkRow[];
   /** This timekeeper's non-discarded marks without an entry, oldest first. */
   unassigned: MarkRow[];
+  /** Ids of `unassigned` marks the timekeeper deselected (Ruling 55): no automatic target. */
+  aside: ReadonlySet<string>;
   /** This timekeeper's marks with their outbox state, newest first. */
   myMarks: MyMark[];
   onCourse: OnCourseItem[];
@@ -98,6 +103,8 @@ export interface Timekeeper {
   unassign(markId: string): void;
   discard(markId: string): void;
   restore(markId: string): void;
+  /** Sets a mark aside (deselected) or takes it back; kept on the device. */
+  setAside(markId: string, aside: boolean): void;
   /** Loading: try tk_open now. Disabled: try syncing again. */
   retry(): void;
 }
@@ -124,6 +131,11 @@ function readMarksCache(storage: ReturnType<typeof safeLocalStorage>, eventId: s
   const v = readJSON<unknown>(storage, marksKey(eventId), null);
   if (!isRecord(v) || !Array.isArray(v.marks)) return { server_now: null, marks: [] };
   return { server_now: typeof v.server_now === 'string' ? v.server_now : null, marks: v.marks as MarkRow[] };
+}
+
+function readAside(storage: ReturnType<typeof safeLocalStorage>, key: string): string[] {
+  const v = readJSON<unknown>(storage, key, []);
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
 function toInput(m: LocalMark): TkMarkInput {
@@ -178,6 +190,7 @@ export function useTimekeeper(token: string): Timekeeper {
   const deviceRef = useRef(registration);
   const boxRef = useRef<{ key: string; box: Outbox } | null>(null);
   const cacheRef = useRef<{ eventId: string; cache: MarksCache } | null>(null);
+  const asideRef = useRef<{ key: string; ids: string[] } | null>(null);
   const indexRef = useRef<{ session: TkSession; index: EventIndex } | null>(null);
   const inFlight = useRef(false);
   const reopening = useRef(false);
@@ -198,6 +211,13 @@ export function useTimekeeper(token: string): Timekeeper {
   const cacheFor = useCallback((eventId: string): MarksCache => {
     if (cacheRef.current?.eventId !== eventId) cacheRef.current = { eventId, cache: readMarksCache(storage, eventId) };
     return cacheRef.current.cache;
+  }, [storage]);
+
+  /** The set-aside ids as stored for this event and timekeeper (mutated in place, then saved). */
+  const asideFor = useCallback((eventId: string, timekeeperId: string): { key: string; ids: string[] } => {
+    const key = asideKey(eventId, timekeeperId);
+    if (asideRef.current?.key !== key) asideRef.current = { key, ids: readAside(storage, key) };
+    return asideRef.current;
   }, [storage]);
 
   const indexFor = useCallback((s: TkSession): EventIndex => {
@@ -316,6 +336,7 @@ export function useTimekeeper(token: string): Timekeeper {
       // Another tab may have written since this one started: read everything again.
       boxRef.current = null;
       cacheRef.current = null;
+      asideRef.current = null;
       const device = readDevice(storage, token);
       if (device?.timekeeper_id !== deviceRef.current?.timekeeper_id) {
         deviceRef.current = device;
@@ -429,18 +450,25 @@ export function useTimekeeper(token: string): Timekeeper {
     return () => clearInterval(id);
   }, [phase, clock]);
 
-  /** Moves marks still pending under this device's previous registrations into the new outbox. */
+  /** Moves marks still pending under this device's previous registrations into the new outbox —
+   * those set aside stay set aside (Ruling 55). */
   const adoptPending = useCallback((evId: string, timekeeperId: string) => {
     const box = outboxFor(evId, timekeeperId);
+    const aside = asideFor(evId, timekeeperId);
+    const asideBefore = aside.ids.length;
     for (const old of listedOutboxes(evId)) {
       if (old === timekeeperId) continue;
+      const oldAside = new Set(readAside(storage, asideKey(evId, old)));
       for (const it of new Outbox(storage, outboxKey(evId, old)).all()) {
-        if (it.state === 'pending' && !box.get(it.mark.id)) box.upsert(toInput(it.mark));
+        if (it.state !== 'pending' || box.get(it.mark.id)) continue;
+        box.upsert(toInput(it.mark));
+        if (oldAside.has(it.mark.id) && !aside.ids.includes(it.mark.id)) aside.ids = [...aside.ids, it.mark.id];
       }
     }
+    if (aside.ids.length !== asideBefore) writeJSON(storage, aside.key, aside.ids);
     // Adopted outboxes leave the list, so their marks are never picked up twice.
     writeJSON(storage, outboxesKey(evId), [timekeeperId]);
-  }, [storage, outboxFor, listedOutboxes]);
+  }, [storage, outboxFor, asideFor, listedOutboxes]);
 
   const register = useCallback(async (name: string) => {
     const s = sessionRef.current;
@@ -566,6 +594,17 @@ export function useTimekeeper(token: string): Timekeeper {
   const discard = (markId: string) => update(markId, { discarded: true });
   const restore = (markId: string) => update(markId, { discarded: false });
 
+  const setAside = (markId: string, on: boolean) => {
+    const s = sessionRef.current;
+    const device = deviceRef.current;
+    if (!s || !device) return;
+    const a = asideFor(s.event.id, device.timekeeper_id);
+    if (a.ids.includes(markId) === on) return;
+    a.ids = on ? [...a.ids, markId] : a.ids.filter(id => id !== markId);
+    writeJSON(storage, a.key, a.ids);
+    bump();
+  };
+
   const retry = () => {
     if (phase === 'disabled') setPhase('main');
     else if (phase === 'loading') openNow.current();
@@ -576,7 +615,10 @@ export function useTimekeeper(token: string): Timekeeper {
   const derived = useMemo(() => {
     // A tab without the lock never loads the outbox: it would hold a copy that goes stale.
     if (!session || !registration || !active) {
-      return { marks: [] as MarkRow[], unassigned: [] as MarkRow[], myMarks: [] as MyMark[], pendingCount: 0, rejectedCount: 0, storageFailed: false };
+      return {
+        loaded: false, marks: [] as MarkRow[], unassigned: [] as MarkRow[], aside: new Set<string>() as ReadonlySet<string>,
+        myMarks: [] as MyMark[], pendingCount: 0, rejectedCount: 0, storageFailed: false,
+      };
     }
     const evId = session.event.id;
     const me = registration.timekeeper_id;
@@ -592,16 +634,31 @@ export function useTimekeeper(token: string): Timekeeper {
     });
     for (const m of own) if (!inBox.has(m.id)) myMarks.push({ mark: m, state: 'synced', reason: null });
     myMarks.sort((a, b) => byTs(b.mark, a.mark));
+    const unassigned = own.filter(m => !m.discarded && m.entry_id === null).sort(byTs);
     return {
+      loaded: true,
       marks,
-      unassigned: own.filter(m => !m.discarded && m.entry_id === null).sort(byTs),
+      unassigned,
+      aside: new Set(keepAside(asideFor(evId, me).ids, unassigned)) as ReadonlySet<string>,
       myMarks,
       pendingCount: box.pendingCount(),
       rejectedCount: items.filter(it => it.state === 'rejected').length,
       storageFailed: isMemoryOnly(outboxKey(evId, me)),
     };
-    // `rev` stands for the outbox and marks cache, which are mutated in place.
-  }, [session, registration, active, rev, outboxFor, cacheFor]);
+    // `rev` stands for the outbox, marks cache and set-aside ids, which are mutated in place.
+  }, [session, registration, active, rev, outboxFor, cacheFor, asideFor]);
+
+  // A set-aside mark that left "Sem atleta" (identified or discarded, here or by the organization)
+  // is no longer set aside: the stored list keeps only marks still waiting (Ruling 55). Only once
+  // this tab holds the timekeeper's marks — an empty list while loading must not wipe it.
+  useEffect(() => {
+    if (!derived.loaded || !session || !registration) return;
+    const a = asideFor(session.event.id, registration.timekeeper_id);
+    const kept = keepAside(a.ids, derived.unassigned);
+    if (kept.length === a.ids.length) return;
+    a.ids = kept;
+    writeJSON(storage, a.key, kept);
+  }, [derived, session, registration, asideFor, storage]);
 
   const me = registration?.timekeeper_id ?? null;
   const onCourseList = useMemo(
@@ -620,7 +677,8 @@ export function useTimekeeper(token: string): Timekeeper {
     online, synced, syncError, loadError,
     pendingCount: derived.pendingCount, rejectedCount: derived.rejectedCount, storageFailed: derived.storageFailed,
     clockQuality: clock.synced && rtt !== null ? Math.round(rtt / 2) : null,
-    nowMs, marks: derived.marks, unassigned: derived.unassigned, myMarks: derived.myMarks, onCourse: onCourseList,
-    register, stamp, mark, assign, assignBib, changeLeg, unassign, discard, restore, retry,
+    nowMs, marks: derived.marks, unassigned: derived.unassigned, aside: derived.aside, myMarks: derived.myMarks,
+    onCourse: onCourseList,
+    register, stamp, mark, assign, assignBib, changeLeg, unassign, discard, restore, setAside, retry,
   };
 }
