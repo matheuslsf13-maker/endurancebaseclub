@@ -1,0 +1,1863 @@
+# Review package: e70ed55..5342738 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+5342738 fix(timekeeper): burst-scoped auto-selection, robust taps, per-tab lock
+
+## Files changed
+ src/features/timekeeper/TimekeeperPage.tsx  | 211 ++++++++++++++-----
+ src/features/timekeeper/timekeeper.test.tsx | 309 +++++++++++++++++++++++++++-
+ src/features/timekeeper/tkStore.test.ts     |  58 +++++-
+ src/features/timekeeper/tkStore.ts          |  48 ++++-
+ src/features/timekeeper/useTimekeeper.ts    | 121 +++++++++--
+ src/lib/outbox.test.ts                      |  18 ++
+ src/lib/outbox.ts                           |   3 +
+ src/lib/storage.test.ts                     |  14 +-
+ src/lib/storage.ts                          |   6 +
+ 9 files changed, 711 insertions(+), 77 deletions(-)
+
+## Diff
+diff --git a/src/features/timekeeper/TimekeeperPage.tsx b/src/features/timekeeper/TimekeeperPage.tsx
+index 2fe17b0..633ab18 100644
+--- a/src/features/timekeeper/TimekeeperPage.tsx
++++ b/src/features/timekeeper/TimekeeperPage.tsx
+@@ -1,29 +1,29 @@
+ // The timekeeper app (`#/c/:token`, spec §7.3): mobile-first, no admin layout. One big MARCAR
+ // button stamps the synced instant; marks are identified by bib or by tapping the entry in
+ // "Em prova". Everything a timekeeper does is kept on the device first (useTimekeeper).
+ 
+ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+-import type { FormEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
++import type { FormEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
+ import { useParams } from 'react-router';
+ import { Button, Input, Modal, Spinner, useToast } from '../../components/ui';
+ import { Logo } from '../../components/Logo';
+ import { ThemeToggle } from '../../components/ThemeToggle';
+ import type { ClockSync } from '../../lib/clock';
+ import { formatClock, formatDateBR, formatDuration } from '../../lib/format';
+ import { safeLocalStorage } from '../../lib/storage';
+ import type { MarkRow } from '../../lib/types';
+ import { legAthleteId } from '../../domain/eventModel';
+-import { legText, memberName } from './tkStore';
+-import type { OnCourseItem } from './tkStore';
++import { burstHead, isStale, legText, memberName, selectedMarkId } from './tkStore';
++import type { OnCourseItem, Selection } from './tkStore';
+ import { useTimekeeper } from './useTimekeeper';
+-import type { AssignResult, MyMark, Timekeeper } from './useTimekeeper';
++import type { AssignResult, MyMark, TapStamp, Timekeeper } from './useTimekeeper';
+ 
+ export default function TimekeeperPage() {
+   const { token = '' } = useParams();
+   // A different link is a different app state (session, registration, outbox).
+   return <TimekeeperApp key={token} token={token} />;
+ }
+ 
+ /**
+  * Ruling 21: on the timekeeper link the light theme is the default — a dark screen in the sun
+  * turns into a mirror. A theme chosen on this device (`ebc.theme`) always wins; index.html applies
+@@ -81,20 +81,31 @@ function vibrate() {
+   } catch {
+     // Unsupported: the row appearing in "Sem atleta" is the feedback.
+   }
+ }
+ 
+ const clockText = (ms: number) => formatClock(ms, { tenths: true });
+ const markTime = (m: MarkRow) => clockText(Date.parse(m.ts));
+ const qualityFmt = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+ const fold = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+ 
++/** A click this soon after a pointer press on the same control is that press's own click. */
++const CLICK_AFTER_POINTER_MS = 1_000;
++/** A press whose finger moved farther than this is a scroll or a drag, not a tap. */
++const TAP_SLOP_PX = 16;
++
++/** The click a pointer press produces itself (handled on the press): it counts clicks (detail ≥ 1)
++ * and follows the press within a second. Keyboard clicks (detail 0) are never one. */
++function isClickOfPress(e: MouseEvent<HTMLButtonElement>, lastPointerAt: number): boolean {
++  return e.detail > 0 && e.timeStamp - lastPointerAt < CLICK_AFTER_POINTER_MS;
++}
++
+ function TimekeeperApp({ token }: { token: string }) {
+   useLightThemeByDefault();
+   const tk = useTimekeeper(token);
+   useWakeLock(tk.phase === 'main');
+ 
+   switch (tk.phase) {
+     case 'loading':
+       return (
+         <Centered>
+           <Spinner size={32} />
+@@ -106,20 +117,37 @@ function TimekeeperApp({ token }: { token: string }) {
+             </>
+           )}
+         </Centered>
+       );
+     case 'invalid':
+       return (
+         <Centered>
+           <Logo size={64} />
+           <h1 className="brand-title text-lg font-semibold">Link inválido</h1>
+           <p>Link de cronometragem inválido ou desativado. Peça um novo link à organização.</p>
++          {tk.pendingCount > 0 ? (
++            <p className="text-sm text-muted">
++              Suas marcações continuam guardadas neste aparelho ({tk.pendingCount} ainda não {tk.pendingCount === 1 ? 'enviada' : 'enviadas'}).
++              Abra o novo link neste mesmo aparelho para enviá-las.
++            </p>
++          ) : tk.myMarks.length > 0 && (
++            <p className="text-sm text-muted">Suas marcações continuam guardadas neste aparelho.</p>
++          )}
++        </Centered>
++      );
++    case 'other_tab':
++      return (
++        <Centered>
++          <Logo size={64} />
++          <h1 className="brand-title text-lg font-semibold">Link já aberto</h1>
++          <p>Este link já está aberto em outra aba deste aparelho — use aquela aba</p>
++          <p className="text-sm text-muted">Se você fechar a outra aba, esta assume a cronometragem.</p>
+         </Centered>
+       );
+     case 'disabled':
+       return (
+         <Centered>
+           <Logo size={64} />
+           <h1 className="brand-title text-lg font-semibold">Acesso desativado</h1>
+           <p>Seu acesso foi desativado pela organização.</p>
+           <p className="text-sm text-muted">Suas marcações continuam guardadas neste aparelho.</p>
+           <Button variant="secondary" onClick={tk.retry}>Tentar novamente</Button>
+@@ -187,40 +215,38 @@ function RegisterScreen({ tk }: { tk: Timekeeper }) {
+           onChange={e => setName(e.target.value)}
+         />
+         <Button type="submit" size="xl" data-testid="tk-register" loading={busy}>Começar a cronometrar</Button>
+         {formError && <p role="alert" className="text-sm text-danger">{formError}</p>}
+       </form>
+       <p className="text-xs text-muted">Seu nome aparece para a organização junto com as suas marcações.</p>
+     </Centered>
+   );
+ }
+ 
+-/** Which "Sem atleta" mark a bib or an "Em prova" tap goes to. `auto` = the oldest one, so marks
+- * taken in a burst are identified in arrival order; `none` = the user deselected (taps on
+- * "Em prova" then mark new arrivals). */
+-type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string };
+-
+-function selectedMarkId(sel: Selection, unassigned: MarkRow[]): string | null {
+-  if (sel.mode === 'none') return null;
+-  if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) return sel.id;
+-  return unassigned[0]?.id ?? null;
+-}
++/** An "Em prova" tap, fixed when the finger lands: the list may move under it before it lifts. */
++interface RowTap { item: OnCourseItem; stamp: TapStamp; markId: string | null }
++interface RowPress extends RowTap { pointerId: number; x: number; y: number }
+ 
+ function MainScreen({ tk }: { tk: Timekeeper }) {
+   const toast = useToast();
+   const [bib, setBib] = useState('');
++  // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (see tkStore `selectedMarkId`):
++  // the oldest of the current burst unless one was chosen; `none` = deselected, so "Em prova"
++  // taps mark new arrivals.
+   const [sel, setSel] = useState<Selection>({ mode: 'auto' });
+   const [legSheet, setLegSheet] = useState<string | null>(null);
+   const assignToastId = useRef<string | null>(null);
+-  const pointerMarked = useRef(false);
++  const lastMarkPointer = useRef(Number.NEGATIVE_INFINITY);
++  const rowPress = useRef<RowPress | null>(null);
++  const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
+   const bibId = useId();
+-  const selectedId = selectedMarkId(sel, tk.unassigned);
++  const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs);
+   const selectedMark = selectedId ? tk.unassigned.find(m => m.id === selectedId) ?? null : null;
+ 
+   function showAssigned(r: Extract<AssignResult, { ok: true }>) {
+     if (assignToastId.current) toast.dismiss(assignToastId.current);
+     const markId = r.markId;
+     const warned = r.warning !== null || r.suggestion.warning !== null;
+     let id = '';
+     const act = (fn: () => void) => () => {
+       toast.dismiss(id);
+       fn();
+@@ -236,21 +262,21 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+             {warned && <span aria-hidden="true" className="text-warning">⚠ </span>}
+             {r.message}
+           </p>
+           {r.warning && r.warning !== r.message && <p className="text-warning">{r.warning}</p>}
+           <p className="tabular text-xs text-muted">Marcação das {clockText(Date.parse(r.ts))}</p>
+           <div className="mt-1 flex flex-wrap gap-2">
+             <Button
+               size="sm" variant="secondary" data-testid="toast-undo"
+               onClick={act(() => {
+                 tk.unassign(markId);
+-                setSel({ mode: 'id', id: markId });
++                setSel({ mode: 'id', id: markId, chosen: true });
+               })}
+             >
+               Desfazer
+             </Button>
+             {r.race.legs.length > 1 && (
+               <Button size="sm" variant="secondary" data-testid="toast-change-leg" onClick={act(() => setLegSheet(markId))}>
+                 Trocar perna
+               </Button>
+             )}
+           </div>
+@@ -272,99 +298,158 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+     });
+   }
+ 
+   function report(r: AssignResult) {
+     if (r.ok) showAssigned(r);
+     else showError(r.error);
+   }
+ 
+   function doMark() {
+     // useTimekeeper reads the synced clock first thing in mark(): nothing here may run before it.
+-    const { markId, assignment } = tk.mark(bib);
++    const { markId, ts, assignment } = tk.mark(bib);
+     vibrate();
+     if (assignment?.ok) {
+       setBib('');
+       showAssigned(assignment);
+       return;
+     }
+     if (assignment) {
+       // The bib typed belongs to this mark: select it so the corrected bib goes to it, not to an
+       // older mark still waiting.
+       showError(assignment.error);
+-      setSel({ mode: 'id', id: markId });
++      setSel({ mode: 'id', id: markId, chosen: false });
+       return;
+     }
+-    // A burst of taps keeps the oldest selected, so bibs are then typed in arrival order.
+-    if (selectedId === null) setSel({ mode: 'id', id: markId });
++    // Spec §7.3.2: the new mark becomes the selected one — except inside a burst, where the
++    // burst's oldest stays selected so bibs typed in arrival order land on marks 1, 2, 3…
++    // A selection older than the unassigned threshold never outlives a new tap: it would take
++    // this arrival's bib, and every identification after it would be one arrival off.
++    const current = selectedId ? tk.unassigned.find(m => m.id === selectedId) : undefined;
++    if (!current || isStale(current, Date.parse(ts))) setSel({ mode: 'id', id: markId, chosen: false });
+   }
+ 
+   // Marks on pointerdown — the instant the finger lands, and a tap that turns into a slight drag
+-  // still counts. The click that follows the same press is ignored; keyboard presses (detail 0)
+-  // and clicks without a pointerdown still mark.
++  // still counts. The click of the same press is ignored by its time (a press that slid off the
++  // button has no click, and must not swallow a later one); keyboard presses and screen-reader
++  // activations come without a pointer press and mark on click.
+   function onMarkPointerDown(e: PointerEvent<HTMLButtonElement>) {
+     if (e.pointerType === 'mouse' && e.button !== 0) return;
+-    pointerMarked.current = true;
+     doMark();
++    lastMarkPointer.current = e.timeStamp;
++    // Keeps the focus — and the phone keyboard — in the bib field; the click still fires.
++    e.preventDefault();
++  }
++  function onMarkPointerUp(e: PointerEvent<HTMLButtonElement>) {
++    lastMarkPointer.current = e.timeStamp; // a long press: its click comes when the finger lifts
+   }
+   function onMarkClick(e: MouseEvent<HTMLButtonElement>) {
+-    const fromPointer = pointerMarked.current && e.detail > 0;
+-    pointerMarked.current = false;
+-    if (!fromPointer) doMark();
++    if (isClickOfPress(e, lastMarkPointer.current)) return;
++    doMark();
++  }
++  function onMarkKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
++    // A held Enter repeats its click: one press, one mark.
++    if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault();
+   }
+ 
+   function onBibSubmit(e: FormEvent) {
+     e.preventDefault();
+     const text = bib.trim();
+     if (!text) {
+       toast.show({ message: 'Digite o nº de peito' });
+       return;
+     }
+-    const target = selectedId ?? tk.unassigned[0]?.id ?? null;
++    // The selected mark, else the oldest of the current burst — never a stale one unless chosen.
++    const target = selectedId ?? burstHead(tk.unassigned, tk.nowMs)?.id ?? null;
+     if (!target) {
+-      toast.show({ message: 'Toque em MARCAR primeiro' });
++      toast.show({
++        message: tk.unassigned.length > 0
++          ? 'Toque em MARCAR primeiro, ou selecione a marcação em "Sem atleta"'
++          : 'Toque em MARCAR primeiro',
++      });
+       return;
+     }
+     const r = tk.assignBib(target, text);
+     if (r.ok) setBib('');
+     report(r);
+   }
+ 
+-  function onRowTap(item: OnCourseItem) {
++  function commitRowTap({ item, stamp, markId }: RowTap) {
+     // Ruling 10: never pass the row's current athlete — confirming a relay handoff shows the
+     // next athlete as current, and the leg must come from the crossing times.
+-    if (selectedId) {
+-      report(tk.assign(selectedId, item.entry.id));
++    if (markId && tk.unassigned.some(m => m.id === markId)) {
++      report(tk.assign(markId, item.entry.id));
+       return;
+     }
+-    const { markId } = tk.mark(); // arrival tap: marks now, then identifies
++    const { markId: newId } = tk.mark(undefined, stamp); // arrival tap: the instant of the press
+     vibrate();
+-    const r = tk.assign(markId, item.entry.id);
+-    if (!r.ok) setSel({ mode: 'id', id: markId });
++    const r = tk.assign(newId, item.entry.id);
++    if (!r.ok) setSel({ mode: 'id', id: newId, chosen: false });
+     report(r);
+   }
+ 
++  // "Em prova" rows move (pinned crossings arrive with every sync, windows close): what a press
++  // does — the entry, the mark it identifies, the instant — is fixed on pointerdown and committed
++  // on pointerup, wherever the finger is then, if it barely moved (a scroll cancels it).
++  const commitLatest = useRef(commitRowTap);
++  useLayoutEffect(() => {
++    commitLatest.current = commitRowTap;
++  });
++  useEffect(() => {
++    const up = (e: globalThis.PointerEvent) => {
++      const press = rowPress.current;
++      if (!press || e.pointerId !== press.pointerId) return;
++      rowPress.current = null;
++      lastRowPointer.current = e.timeStamp;
++      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > TAP_SLOP_PX) return;
++      commitLatest.current(press);
++    };
++    const cancel = (e: globalThis.PointerEvent) => {
++      if (rowPress.current?.pointerId === e.pointerId) rowPress.current = null;
++    };
++    window.addEventListener('pointerup', up);
++    window.addEventListener('pointercancel', cancel);
++    return () => {
++      window.removeEventListener('pointerup', up);
++      window.removeEventListener('pointercancel', cancel);
++    };
++  }, []);
++
++  function onRowPointerDown(item: OnCourseItem, e: PointerEvent<HTMLButtonElement>) {
++    if (e.pointerType === 'mouse' && e.button !== 0) return;
++    const stamp = tk.stamp(); // the instant the finger landed
++    lastRowPointer.current = e.timeStamp;
++    rowPress.current = { item, stamp, markId: selectedId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
++  }
++  function onRowClick(item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) {
++    // The click of a press already handled when the finger lifted (it may land on another row, or
++    // on none, when the list moved). Keyboard and screen-reader activations tap here.
++    if (isClickOfPress(e, lastRowPointer.current)) return;
++    commitRowTap({ item, stamp: tk.stamp(), markId: selectedId });
++  }
++
+   function toggleSelect(id: string) {
+-    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id });
++    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id, chosen: true });
+   }
+ 
+   function onDiscard(m: MarkRow) {
+     tk.discard(m.id);
+     toast.show({
+       testid: 'discard-toast',
+       message: `Marcação das ${markTime(m)} descartada`,
+       actions: [{ label: 'Desfazer', testid: 'discard-undo', onClick: () => tk.restore(m.id) }],
+     });
+   }
+ 
+   function onReassign(m: MarkRow) {
+     tk.unassign(m.id);
+-    setSel({ mode: 'id', id: m.id });
++    if (m.discarded) tk.restore(m.id); // a rejected mark discarded here goes back to "Sem atleta"
++    setSel({ mode: 'id', id: m.id, chosen: true });
+   }
+ 
+   function onChangeLeg(markId: string, legIndex: number) {
+     setLegSheet(null);
+     report(tk.changeLeg(markId, legIndex));
+   }
+ 
+   return (
+     <div className="min-h-full bg-bg text-fg">
+       <Header tk={tk} />
+@@ -387,30 +472,33 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
+             />
+             <Button type="submit" size="xl" variant="secondary" data-testid="bib-submit">Atribuir</Button>
+           </div>
+           <p className="text-xs text-muted">Com o nº digitado, MARCAR já atribui. Sem nº, marque e identifique depois.</p>
+         </form>
+ 
+         <button
+           type="button"
+           data-testid="mark-button"
+           onPointerDown={onMarkPointerDown}
++          onPointerUp={onMarkPointerUp}
++          onMouseDown={e => e.preventDefault()}
+           onClick={onMarkClick}
++          onKeyDown={onMarkKeyDown}
+           onContextMenu={e => e.preventDefault()}
+           className="brand-title min-h-[35vh] w-full touch-none select-none rounded-2xl bg-accent text-5xl font-bold text-accent-fg shadow-lg transition-transform active:scale-[0.98] focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-accent"
+         >
+           Marcar
+         </button>
+ 
+-        <UnassignedList marks={tk.unassigned} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
++        <UnassignedList marks={tk.unassigned} nowMs={tk.nowMs} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
+ 
+-        <OnCourseList tk={tk} selectedMark={selectedMark} onTap={onRowTap} />
++        <OnCourseList tk={tk} selectedMark={selectedMark} onRowPointerDown={onRowPointerDown} onRowClick={onRowClick} />
+ 
+         <MyMarksList tk={tk} onDiscard={onDiscard} onRestore={id => tk.restore(id)} onReassign={onReassign} onChangeLeg={setLegSheet} />
+       </main>
+ 
+       <LegSheet tk={tk} markId={legSheet} onClose={() => setLegSheet(null)} onPick={onChangeLeg} />
+     </div>
+   );
+ }
+ 
+ function Header({ tk }: { tk: Timekeeper }) {
+@@ -442,20 +530,26 @@ function Header({ tk }: { tk: Timekeeper }) {
+             <span>{text}</span>
+           </p>
+         </div>
+         <ThemeToggle />
+       </div>
+       {tk.rejectedCount > 0 && (
+         <p className="mx-auto max-w-xl px-4 pb-2 text-xs font-medium text-warning">
+           ⚠ {tk.rejectedCount === 1 ? '1 marcação recusada' : `${tk.rejectedCount} marcações recusadas`} — veja “Minhas marcações”
+         </p>
+       )}
++      {tk.storageFailed && (
++        <p role="alert" className="mx-auto max-w-xl px-4 pb-2 text-xs font-semibold text-danger">
++          ⚠ Não foi possível guardar as marcações neste aparelho (memória cheia ou bloqueada) — não feche nem
++          recarregue esta página até tudo sincronizar.
++        </p>
++      )}
+       {tk.syncError && (
+         <p className="mx-auto max-w-xl px-4 pb-2 text-xs font-medium text-danger">
+           Erro ao sincronizar: {tk.syncError} — tentando de novo
+         </p>
+       )}
+     </header>
+   );
+ }
+ 
+ /** The big synced clock; re-renders on its own every 100 ms so the rest of the page does not. */
+@@ -474,62 +568,66 @@ function ClockPanel({ clock, quality }: { clock: ClockSync; quality: number | nu
+         <p className="text-sm font-semibold text-warning">Relógio não sincronizado</p>
+       )}
+     </section>
+   );
+ }
+ 
+ function SectionTitle({ id, children }: { id: string; children: ReactNode }) {
+   return <h2 id={id} className="brand-title text-xs font-semibold text-muted">{children}</h2>;
+ }
+ 
+-function UnassignedList({ marks, selectedId, onSelect, onDiscard }: {
+-  marks: MarkRow[]; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
++function UnassignedList({ marks, nowMs, selectedId, onSelect, onDiscard }: {
++  marks: MarkRow[]; nowMs: number; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
+ }) {
+   const titleId = useId();
+   return (
+     <section aria-labelledby={titleId} className="flex flex-col gap-2">
+       <SectionTitle id={titleId}>Sem atleta ({marks.length})</SectionTitle>
+       <ul data-testid="unassigned-list" className="flex flex-col gap-2">
+         {marks.map(m => {
+           const selected = m.id === selectedId;
+           return (
+             <li key={m.id} className="flex items-stretch gap-2">
+               <button
+                 type="button"
+                 aria-pressed={selected}
+                 onClick={() => onSelect(m.id)}
+                 className={`flex min-h-12 flex-1 items-center justify-between gap-2 rounded-xl border px-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                   selected ? 'border-accent bg-surface-2 ring-2 ring-accent' : 'border-border bg-surface'
+                 }`}
+               >
+                 <span className="tabular text-lg font-semibold">{markTime(m)}</span>
+-                <span className="text-xs text-muted">{selected ? 'Selecionada' : 'Tocar para selecionar'}</span>
++                <span className="text-xs text-muted">
++                  {selected ? 'Selecionada' : isStale(m, nowMs) ? 'Mais de 1 min · tocar para selecionar' : 'Tocar para selecionar'}
++                </span>
+               </button>
+               <button
+                 type="button"
+                 aria-label={`Descartar marcação das ${markTime(m)}`}
+                 onClick={() => onDiscard(m)}
+                 className="inline-flex min-h-12 min-w-12 items-center justify-center rounded-xl border border-border bg-surface text-xl text-muted hover:text-danger focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+               >
+                 <span aria-hidden="true">×</span>
+               </button>
+             </li>
+           );
+         })}
+       </ul>
+       {marks.length === 0 && <p className="text-sm text-muted">Nenhuma marcação sem atleta.</p>}
+     </section>
+   );
+ }
+ 
+-function OnCourseList({ tk, selectedMark, onTap }: {
+-  tk: Timekeeper; selectedMark: MarkRow | null; onTap: (item: OnCourseItem) => void;
++function OnCourseList({ tk, selectedMark, onRowPointerDown, onRowClick }: {
++  tk: Timekeeper; selectedMark: MarkRow | null;
++  onRowPointerDown: (item: OnCourseItem, e: PointerEvent<HTMLButtonElement>) => void;
++  onRowClick: (item: OnCourseItem, e: MouseEvent<HTMLButtonElement>) => void;
+ }) {
+   const titleId = useId();
+   const [query, setQuery] = useState('');
+   const [raceId, setRaceId] = useState<string | null>(null);
+   const races = tk.session?.races ?? [];
+   const multiRace = races.length > 1;
+   const chips: { id: string | null; name: string }[] = [{ id: null, name: 'Todas' }, ...races.map(r => ({ id: r.id, name: r.name }))];
+ 
+   const items = useMemo(() => {
+     const q = fold(query.trim());
+@@ -570,44 +668,56 @@ function OnCourseList({ tk, selectedMark, onTap }: {
+               }`}
+             >
+               {r.name}
+             </button>
+           ))}
+         </div>
+       )}
+       <ul data-testid="oncourse-list" className="flex flex-col gap-2">
+         {items.map(item => (
+           <li key={item.entry.id}>
+-            <OnCourseRow item={item} showRace={multiRace} onTap={() => onTap(item)} />
++            <OnCourseRow
++              item={item} showRace={multiRace}
++              onPointerDown={e => onRowPointerDown(item, e)} onClick={e => onRowClick(item, e)}
++            />
+           </li>
+         ))}
+       </ul>
+       {items.length === 0 && (
+         <p className="text-sm text-muted">
+           {tk.onCourse.length === 0
+             ? 'Ninguém em prova ainda — a lista aparece quando a largada é dada.'
+             : 'Nenhuma inscrição encontrada.'}
+         </p>
+       )}
+     </section>
+   );
+ }
+ 
+-function OnCourseRow({ item, showRace, onTap }: { item: OnCourseItem; showRace: boolean; onTap: () => void }) {
++function OnCourseRow({ item, showRace, onPointerDown, onClick }: {
++  item: OnCourseItem; showRace: boolean;
++  onPointerDown: (e: PointerEvent<HTMLButtonElement>) => void; onClick: (e: MouseEvent<HTMLButtonElement>) => void;
++}) {
+   const { entry, race, confirm } = item;
++  const legTime = confirm && confirm.leg_ms !== null ? ` ${formatDuration(confirm.leg_ms)}` : '';
++  // A crossing this device already counts is not offered again: a second tap would only be a
++  // duplicate of its own mark (Ruling 44 M8).
+   const confirmText = confirm
+-    ? `✓ ${confirm.leg_label}${confirm.leg_ms !== null ? ` ${formatDuration(confirm.leg_ms)}` : ''} — toque para confirmar (${confirm.remaining_s}s)`
++    ? confirm.mine
++      ? `✓ marcada por você · ${confirm.leg_label}${legTime}`
++      : `✓ ${confirm.leg_label}${legTime} — toque para confirmar (${confirm.remaining_s}s)`
+     : null;
+   return (
+     <button
+       type="button"
+-      onClick={onTap}
++      onPointerDown={onPointerDown}
++      onClick={onClick}
+       className={`flex min-h-16 w-full flex-col gap-0.5 rounded-xl border px-3 py-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+         confirm ? 'border-success bg-success/10' : 'border-border bg-surface'
+       }`}
+     >
+       <span className="flex items-baseline justify-between gap-3">
+         <span className="tabular text-2xl font-bold">Nº {entry.bib}</span>
+         {item.legIndex !== null && <span className="tabular text-lg font-semibold">{formatDuration(item.legElapsedMs)}</span>}
+       </span>
+       <span className="truncate text-sm font-medium">
+         {item.displayName}{showRace ? ` · ${race.name}` : ''}
+@@ -632,40 +742,43 @@ function MyMarksList({ tk, onDiscard, onRestore, onReassign, onChangeLeg }: {
+   return (
+     <details data-testid="my-marks" className="rounded-xl border border-border bg-surface">
+       <summary className="flex min-h-12 cursor-pointer items-center px-4 font-semibold">
+         Minhas marcações ({tk.myMarks.length}){tk.rejectedCount > 0 ? ` · ⚠ ${tk.rejectedCount}` : ''}
+       </summary>
+       <ul className="divide-y divide-border border-t border-border">
+         {tk.myMarks.map(({ mark, state, reason }) => {
+           const entry = mark.entry_id ? index?.entriesById.get(mark.entry_id) : undefined;
+           const race = entry ? index?.racesById.get(entry.race_id) : undefined;
+           const time = markTime(mark);
++          // Any rejected mark can be identified again — even one whose entry no longer exists —
++          // except a discard by the organization, which the timekeeper cannot undo.
++          const canReassign = state === 'rejected' ? mark.discarded_by !== 'organizer' : !mark.discarded && !!entry;
+           const what = mark.discarded
+             ? `Descartada${mark.discarded_by === 'organizer' ? ' pela organização' : ''}`
+             : entry && race && mark.leg_index !== null
+               ? `Nº ${entry.bib} · ${legText(race, mark.leg_index)}`
+               : 'Sem atleta';
+           return (
+             <li key={mark.id} className="flex flex-col gap-1.5 px-4 py-3">
+               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                 <span className="tabular font-semibold">{time}</span>
+                 <span className="text-sm">{what}</span>
+                 <span className={`ml-auto text-xs ${state === 'rejected' ? 'text-danger' : 'text-muted'}`}>{STATE_LABEL[state]}</span>
+               </div>
+               {state === 'rejected' && reason && <p className="text-sm text-danger">⚠ {reason}</p>}
+               <div className="flex flex-wrap gap-2">
+                 {!mark.discarded && entry && race && race.legs.length > 1 && (
+                   <Button size="sm" variant="secondary" aria-label={`Trocar perna da marcação das ${time}`} onClick={() => onChangeLeg(mark.id)}>
+                     Perna
+                   </Button>
+                 )}
+-                {!mark.discarded && entry && (
++                {canReassign && (
+                   <Button size="sm" variant="secondary" aria-label={`Reatribuir a marcação das ${time}`} onClick={() => onReassign(mark)}>
+                     Reatribuir
+                   </Button>
+                 )}
+                 {!mark.discarded && (
+                   <Button size="sm" variant="ghost" aria-label={`Descartar marcação das ${time}`} onClick={() => onDiscard(mark)}>
+                     Descartar
+                   </Button>
+                 )}
+                 {mark.discarded && mark.discarded_by !== 'organizer' && (
+diff --git a/src/features/timekeeper/timekeeper.test.tsx b/src/features/timekeeper/timekeeper.test.tsx
+index 800731e..e602d6a 100644
+--- a/src/features/timekeeper/timekeeper.test.tsx
++++ b/src/features/timekeeper/timekeeper.test.tsx
+@@ -1,19 +1,20 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { act, fireEvent, screen, within } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { readFileSync } from 'node:fs';
+ import { resolve } from 'node:path';
+ 
+ import { ApiError } from '../../lib/api';
+ import { ClockSync } from '../../lib/clock';
+ import { formatClock, formatDuration } from '../../lib/format';
++import { safeLocalStorage } from '../../lib/storage';
+ import type { EntryMember, EntryRow, MarkRow, TkMarkInput, TkRegistration, TkSession, TkSyncResult } from '../../lib/types';
+ import { iso, makeEntry, makeMark, makeRace, makeWave, MIN, SEC, T0 } from '../../domain/testing/fixtures';
+ import { renderWithProviders } from '../../test/renderWithProviders';
+ import TimekeeperPage from './TimekeeperPage';
+ 
+ const mocks = vi.hoisted(() => ({
+   open: vi.fn<(token: string) => Promise<TkSession>>(),
+   register: vi.fn<(token: string, name: string, deviceLabel: string) => Promise<TkRegistration>>(),
+   sync: vi.fn<(token: string, tkId: string, secret: string, marks: TkMarkInput[], since: string | null) => Promise<TkSyncResult>>(),
+   serverTime: vi.fn<() => Promise<number>>(),
+@@ -75,20 +76,21 @@ beforeEach(() => {
+   mocks.open.mockReset().mockResolvedValue(session());
+   mocks.register.mockReset().mockResolvedValue({ timekeeper_id: 'tk-me', secret: 's3cret' });
+   mocks.sync.mockReset().mockImplementation(okSync());
+   mocks.serverTime.mockReset().mockImplementation(async () => Date.now() + OFFSET);
+ });
+ 
+ afterEach(() => {
+   vi.clearAllTimers();
+   vi.useRealTimers();
+   vi.unstubAllGlobals();
++  delete (navigator as { locks?: unknown }).locks;
+ });
+ 
+ async function flush(ms = 0) {
+   await act(async () => {
+     await vi.advanceTimersByTimeAsync(ms);
+   });
+ }
+ function renderPage() {
+   return renderWithProviders(<TimekeeperPage />, { route: `/c/${TOKEN}`, path: '/c/:token' });
+ }
+@@ -107,20 +109,62 @@ function storedItems(key = OUTBOX_KEY): StoredItem[] {
+ }
+ const stored = () => storedItems().map(i => i.mark);
+ const status = () => screen.getByTestId('tk-sync-status');
+ const unassignedRows = () => within(screen.getByTestId('unassigned-list')).queryAllByRole('listitem');
+ const onCourseRows = () => within(screen.getByTestId('oncourse-list')).queryAllByRole('listitem');
+ const rowFor = (bib: string) => onCourseRows().find(r => r.textContent?.includes(`Nº ${bib}`))!;
+ const tapMark = () => fireEvent.click(screen.getByTestId('mark-button'));
+ const typeBib = (value: string) => fireEvent.change(screen.getByTestId('bib-input'), { target: { value } });
+ const submitBib = () => fireEvent.click(screen.getByTestId('bib-submit'));
+ const at = (ms: number) => formatClock(ms, { tenths: true });
++const markButtonOf = (row: HTMLElement) => within(row).getAllByRole('button')[0];
++
++/**
++ * A Web Locks stand-in shared by the "tabs" of one test: exclusive names, `ifAvailable`, waiting
++ * requests granted in order when the holder lets go, and `signal` aborts (Ruling 45).
++ */
++function installLocks() {
++  const held = new Set<string>();
++  const waiting: { name: string; grant: () => void }[] = [];
++  const letGo = (name: string) => {
++    held.delete(name);
++    const i = waiting.findIndex(w => w.name === name);
++    if (i >= 0) waiting.splice(i, 1)[0].grant();
++  };
++  const run = (name: string, cb: LockGrantedCallback<unknown>): Promise<unknown> => {
++    held.add(name);
++    return Promise.resolve().then(() => cb({ name, mode: 'exclusive' } as Lock)).finally(() => letGo(name));
++  };
++  const request = vi.fn((name: string, options: LockOptions, cb: LockGrantedCallback<unknown>): Promise<unknown> => {
++    if (!held.has(name)) return run(name, cb);
++    if (options.ifAvailable) return Promise.resolve().then(() => cb(null));
++    return new Promise((resolve, reject) => {
++      const entry = { name, grant: () => void run(name, cb).then(resolve, reject) };
++      waiting.push(entry);
++      options.signal?.addEventListener('abort', () => {
++        const i = waiting.indexOf(entry);
++        if (i >= 0) waiting.splice(i, 1);
++        reject(new DOMException('Aborted', 'AbortError'));
++      });
++    });
++  });
++  Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } });
++  return {
++    request, held,
++    /** Another tab of this device holds `name` until the returned function is called. */
++    otherTab(name: string): () => void {
++      let free: () => void = () => {};
++      void run(name, () => new Promise<void>(resolve => { free = resolve; }));
++      return () => free();
++    },
++  };
++}
+ 
+ describe('registration', () => {
+   it('asks for the name once and opens the main screen', async () => {
+     renderPage();
+     await flush();
+     expect(screen.getByText('Desafio EBC')).toBeInTheDocument();
+     expect(screen.queryByTestId('mark-button')).not.toBeInTheDocument();
+ 
+     fireEvent.change(screen.getByTestId('tk-name'), { target: { value: '  Ana TK ' } });
+     fireEvent.click(screen.getByTestId('tk-register'));
+@@ -279,20 +323,110 @@ describe('marking', () => {
+     vi.setSystemTime(NOW0);
+     await renderMain();
+     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+     await user.click(screen.getByTestId('mark-button'));
+     expect(stored()).toHaveLength(1);
+     screen.getByTestId('mark-button').focus();
+     await user.keyboard('{Enter}');
+     expect(stored()).toHaveLength(2);
+   });
+ 
++  it('a mark left without athlete for 2 min does not take the next identification (review Important 1)', async () => {
++    await renderMain();
++    tapMark(); // never identified
++    await flush(2 * MIN);
++    tapMark(); // the next arrival
++    typeBib('101');
++    submitBib();
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), null],
++      [iso(NOW0 + OFFSET + 2 * MIN), 'en1'],
++    ]);
++  });
++
++  it('a bib with only stale marks waiting asks for MARCAR or an explicit pick, and the picked stale mark takes it', async () => {
++    await renderMain();
++    tapMark();
++    await flush(2 * MIN);
++    typeBib('101');
++    submitBib();
++    expect(screen.getByText('Toque em MARCAR primeiro, ou selecione a marcação em "Sem atleta"')).toBeInTheDocument();
++    expect(stored()[0].entry_id).toBeNull();
++
++    fireEvent.click(markButtonOf(unassignedRows()[0])); // older marks are chosen explicitly
++    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
++    submitBib();
++    expect(stored()[0]).toMatchObject({ ts: iso(NOW0 + OFFSET), entry_id: 'en1' });
++  });
++
++  it('MARCAR selects the new mark when the chosen one is older than the unassigned threshold', async () => {
++    await renderMain();
++    tapMark();
++    await flush(2 * MIN);
++    fireEvent.click(markButtonOf(unassignedRows()[0]));
++    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
++    tapMark();
++    expect(within(unassignedRows()[1]).getByRole('button', { pressed: true })).toBeInTheDocument();
++    typeBib('303');
++    submitBib();
++    expect(stored().map(m => m.entry_id)).toEqual([null, 'en3']);
++  });
++
++  it('a press that slid off MARCAR does not swallow a later screen-reader activation (Ruling 44 M2)', async () => {
++    await renderMain();
++    const button = screen.getByTestId('mark-button');
++    fireEvent.pointerDown(button, { button: 0, pointerType: 'touch' }); // the finger slides off: no click
++    expect(stored()).toHaveLength(1);
++    await flush(2 * SEC);
++    fireEvent.click(button, { detail: 1 }); // VoiceOver/TalkBack activation: a click without a pointerdown
++    expect(stored()).toHaveLength(2);
++  });
++
++  it('a long press on MARCAR records one mark', async () => {
++    await renderMain();
++    const button = screen.getByTestId('mark-button');
++    fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' });
++    await flush(1_500);
++    fireEvent.pointerUp(button, { button: 0, pointerType: 'mouse' });
++    fireEvent.click(button, { detail: 1 });
++    expect(stored()).toHaveLength(1);
++    expect(stored()[0].ts).toBe(iso(NOW0 + OFFSET));
++  });
++
++  it('Space marks once and holding Enter does not repeat marks (Ruling 44 M2)', async () => {
++    vi.useFakeTimers({ shouldAdvanceTime: true });
++    vi.setSystemTime(NOW0);
++    await renderMain();
++    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
++    screen.getByTestId('mark-button').focus();
++    await user.keyboard(' ');
++    expect(stored()).toHaveLength(1);
++    await user.keyboard('{Enter>4/}'); // key held: 1 press + 3 auto-repeats
++    expect(stored()).toHaveLength(2);
++  });
++
++  it('MARCAR keeps the focus (and the phone keyboard) in the bib field (Ruling 44 M10)', async () => {
++    vi.useFakeTimers({ shouldAdvanceTime: true });
++    vi.setSystemTime(NOW0);
++    await renderMain();
++    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
++    const input = screen.getByTestId('bib-input');
++    await user.click(input);
++    await user.click(screen.getByTestId('mark-button'));
++    expect(stored()).toHaveLength(1);
++    expect(input).toHaveFocus();
++    await user.keyboard('303');
++    await user.click(screen.getByTestId('mark-button'));
++    expect(stored().map(m => m.entry_id)).toEqual([null, 'en3']);
++    expect(input).toHaveFocus();
++  });
++
+   it('vibrates for 50 ms when the device can', async () => {
+     const vibrate = vi.fn(() => true);
+     Object.defineProperty(navigator, 'vibrate', { configurable: true, value: vibrate });
+     try {
+       await renderMain();
+       tapMark();
+       expect(vibrate).toHaveBeenCalledWith(50);
+     } finally {
+       delete (navigator as { vibrate?: unknown }).vibrate;
+     }
+@@ -369,44 +503,108 @@ describe('"Em prova" list', () => {
+   });
+ 
+   it('a tap assigns the selected mark instead of creating a new one', async () => {
+     await renderMain();
+     tapMark();
+     await flush(6 * SEC);
+     fireEvent.click(within(rowFor('101')).getByRole('button'));
+     expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en1', leg_index: 0 })]);
+   });
+ 
++  it('an arrival tap marks now instead of using a mark left without athlete for 2 min', async () => {
++    await renderMain();
++    tapMark();
++    await flush(2 * MIN);
++    const tappedAt = Date.now();
++    fireEvent.click(within(rowFor('303')).getByRole('button'));
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), null],
++      [iso(tappedAt + OFFSET), 'en3'],
++    ]);
++  });
++
++  it('an arrival tap is stamped when the finger lands and recorded when it lifts (Ruling 44 M1)', async () => {
++    await renderMain();
++    const pressedAt = Date.now();
++    const target = within(rowFor('303')).getByRole('button');
++    fireEvent.pointerDown(target, { pointerId: 1, pointerType: 'touch', clientX: 50, clientY: 300 });
++    await flush(120);
++    expect(stored()).toEqual([]);
++    fireEvent.pointerUp(target, { pointerId: 1, pointerType: 'touch', clientX: 53, clientY: 304 });
++    fireEvent.click(target, { detail: 1 }); // the click of the same press
++    expect(stored()).toEqual([expect.objectContaining({ ts: iso(pressedAt + OFFSET), entry_id: 'en3', leg_index: 0 })]);
++    expect(screen.getByTestId('assign-toast')).toHaveTextContent('Nº 303');
++  });
++
++  it('a row that moves under the finger still gets the tap it was pressed for (Ruling 44 M1)', async () => {
++    await renderMain();
++    await flush(1_900); // the next sync lands in the middle of the press
++    mocks.sync.mockImplementationOnce(okSync({ marks: [otherMark()] }));
++    const bibsInOrder = () => onCourseRows().map(r => ['101', '202', '303'].find(b => r.textContent?.includes(`Nº ${b}`)));
++    expect(bibsInOrder()).toEqual(['101', '202', '303']);
++    const pressedAt = Date.now();
++    fireEvent.pointerDown(within(rowFor('202')).getByRole('button'), { pointerId: 4, pointerType: 'touch', clientX: 80, clientY: 400 });
++    await flush(200);
++    expect(bibsInOrder()).toEqual(['202', '101', '303']); // pinned on top: 101 is now under the finger
++    const underFinger = within(onCourseRows()[1]).getByRole('button');
++    fireEvent.pointerUp(underFinger, { pointerId: 4, pointerType: 'touch', clientX: 81, clientY: 402 });
++    fireEvent.click(screen.getByTestId('oncourse-list'), { detail: 1 }); // down and up on different rows
++    expect(stored()).toEqual([expect.objectContaining({ ts: iso(pressedAt + OFFSET), entry_id: 'en2', leg_index: 0 })]);
++  });
++
++  it('a press that turns into a scroll or is cancelled records nothing', async () => {
++    await renderMain();
++    const target = within(rowFor('303')).getByRole('button');
++    fireEvent.pointerDown(target, { pointerId: 2, pointerType: 'mouse', button: 0, clientX: 50, clientY: 300 });
++    fireEvent.pointerUp(target, { pointerId: 2, pointerType: 'mouse', button: 0, clientX: 50, clientY: 360 });
++    fireEvent.click(target, { detail: 1 });
++    fireEvent.pointerDown(target, { pointerId: 3, pointerType: 'touch', clientX: 50, clientY: 300 });
++    fireEvent.pointerCancel(target, { pointerId: 3, pointerType: 'touch' });
++    expect(stored()).toEqual([]);
++  });
++
++  it('a crossing this device already marked says so instead of inviting a confirmation (Ruling 44 M8)', async () => {
++    await renderMain();
++    fireEvent.click(within(rowFor('303')).getByRole('button'));
++    const top = onCourseRows()[0];
++    expect(top).toHaveTextContent('Nº 303');
++    expect(top).toHaveTextContent('✓ marcada por você');
++    expect(top).not.toHaveTextContent('toque para confirmar');
++  });
++
+   it('pins a fresh relay handoff on top to confirm, on the same leg (Rulings 22 and 10)', async () => {
+     mocks.sync.mockImplementationOnce(okSync({ marks: [otherMark()] }));
+     await renderMain();
+     const top = onCourseRows()[0];
+     expect(top).toHaveTextContent('Nº 202');
+     expect(top).toHaveTextContent(`✓ Natação ${formatDuration(handoffAt - T0)} — toque para confirmar (25s)`);
+     expect(top).toHaveTextContent('Beto'); // who is running now
+     expect(top).toHaveTextContent('Perna 2/2 · Corrida');
+ 
+     await flush(10 * SEC);
+     expect(onCourseRows()[0]).toHaveTextContent('toque para confirmar (15s)');
+ 
+     // Confirming 15 s after the handoff: no mark selected → a new mark now, filed on the handoff
+     // leg (same crossing) even though the row shows Beto running leg 2.
+     const tappedAt = Date.now();
+     fireEvent.click(within(onCourseRows()[0]).getByRole('button'));
+     expect(stored()).toEqual([expect.objectContaining({ ts: iso(tappedAt + OFFSET), entry_id: 'en2', leg_index: 0, athlete_id: 'a2' })]);
+     expect(screen.getByTestId('assign-toast')).toHaveTextContent('✓ Nº 202 · Ana · fim da perna 1/2 (Natação)');
+ 
++    // Still pinned, but it no longer invites this device to confirm its own crossing (Ruling 44 M8).
++    expect(onCourseRows()[0]).toHaveTextContent('✓ marcada por você · Natação');
++    expect(onCourseRows()[0]).not.toHaveTextContent('toque para confirmar');
+     // The median is now 7.5 s after the first mark: the window closes 37.5 s after it.
+     await flush(22 * SEC);
+-    expect(onCourseRows()[0]).toHaveTextContent('toque para confirmar (1s)');
++    expect(onCourseRows()[0]).toHaveTextContent('✓ marcada por você');
+     await flush(1 * SEC);
+-    expect(screen.getByTestId('oncourse-list')).not.toHaveTextContent('toque para confirmar');
++    expect(screen.getByTestId('oncourse-list')).not.toHaveTextContent('marcada por você');
+   });
+ 
+   it('keeps a finished entry listed until its finish can no longer be confirmed', async () => {
+     const finishAt = NOW0 + OFFSET - 2 * SEC;
+     mocks.sync.mockImplementationOnce(okSync({
+       marks: [
+         makeMark({ id: 'f0', at: T0 + 5 * MIN, timekeeper_id: 'tk2', entry_id: 'en1', leg_index: 0 }),
+         makeMark({ id: 'f1', at: finishAt, timekeeper_id: 'tk2', entry_id: 'en1', leg_index: 1 }),
+       ],
+     }));
+@@ -511,20 +709,93 @@ describe('sync loop', () => {
+     await flush(2 * SEC);
+ 
+     const mine = within(screen.getByTestId('my-marks')).getAllByRole('listitem');
+     expect(mine).toHaveLength(1);
+     expect(mine[0]).toHaveTextContent('⚠');
+     expect(mine[0]).toHaveTextContent('Alterada pela organização');
+     expect(mine[0]).toHaveTextContent('Nº 303');
+     expect(status()).toHaveTextContent('Online · tudo sincronizado');
+   });
+ 
++  it.each([
++    ['accepted', (id: string) => ({ accepted: [id], rejected: [] })],
++    ['rejected', (id: string) => ({ accepted: [], rejected: [{ id, reason: 'Alterada pela organização' }] })],
++  ])('an edit made while its mark is in flight stays pending when the old version is %s (Ruling 44 M3)', async (_label, answerFor) => {
++    await renderMain();
++    tapMark();
++    const id = stored()[0].id;
++    let answer: (r: TkSyncResult) => void = () => {};
++    mocks.sync.mockImplementationOnce(() => new Promise<TkSyncResult>(resolve => { answer = resolve; }));
++    await flush(2 * SEC);
++    expect(mocks.sync.mock.calls[1][3]).toEqual([expect.objectContaining({ id, entry_id: null })]);
++
++    typeBib('101');
++    submitBib(); // identified while the unassigned version is on its way
++    await act(async () => {
++      answer({ ...answerFor(id), server_now: iso(Date.now() + OFFSET), version: 1, marks: [], waves: [] });
++    });
++    expect(storedItems()[0]).toMatchObject({ state: 'pending', mark: { entry_id: 'en1' } });
++    const row = within(screen.getByTestId('my-marks')).getByRole('listitem');
++    expect(row).toHaveTextContent('⏳');
++    expect(row).not.toHaveTextContent('Alterada');
++
++    await flush(2 * SEC);
++    expect(mocks.sync.mock.calls[2][3]).toEqual([expect.objectContaining({ id, entry_id: 'en1' })]);
++    expect(within(screen.getByTestId('my-marks')).getByRole('listitem')).toHaveTextContent('✓');
++  });
++
++  it('warns in the header when the marks cannot be kept on the device (Ruling 44 M5)', async () => {
++    await renderMain();
++    expect(screen.queryByText(/Não foi possível guardar as marcações/)).not.toBeInTheDocument();
++    const setItem = Storage.prototype.setItem;
++    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
++      if (key === OUTBOX_KEY) throw new DOMException('Quota exceeded', 'QuotaExceededError');
++      setItem.call(this, key, value);
++    });
++    try {
++      tapMark();
++      expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível guardar as marcações neste aparelho');
++      expect(unassignedRows()).toHaveLength(1); // marking goes on, in memory
++    } finally {
++      spy.mockRestore();
++      safeLocalStorage().removeItem(OUTBOX_KEY); // leave the in-memory fallback for the next tests
++    }
++  });
++
++  it('the invalid-link screen says the marks stay on the device (Ruling 44 M6)', async () => {
++    await renderMain();
++    tapMark();
++    mocks.sync.mockRejectedValueOnce(new ApiError('Link de cronometragem inválido ou desativado', 'P0001'));
++    await flush(2 * SEC);
++    expect(screen.getByText('Link de cronometragem inválido ou desativado. Peça um novo link à organização.')).toBeInTheDocument();
++    expect(screen.getByText(/Suas marcações continuam guardadas neste aparelho/)).toBeInTheDocument();
++    expect(stored()).toHaveLength(1);
++  });
++
++  it('offers Reatribuir on a rejected mark whose entry is gone (Ruling 44 M7)', async () => {
++    const ts = iso(NOW0 - 5 * MIN);
++    const lost = { id: 'lost', ts, device_ts: ts, clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: 'gone', leg_index: 0, athlete_id: null, discarded: false, local_updated_at: NOW0 - 5 * MIN };
++    window.localStorage.setItem(OUTBOX_KEY, JSON.stringify({ items: { lost: { mark: lost, state: 'pending' } } }));
++    mocks.sync.mockImplementationOnce(okSync({ accepted: [], rejected: [{ id: 'lost', reason: 'Inscrição não encontrada' }] }));
++    await renderMain();
++    const row = within(screen.getByTestId('my-marks')).getByRole('listitem');
++    expect(row).toHaveTextContent('Inscrição não encontrada');
++    expect(unassignedRows()).toHaveLength(0);
++
++    fireEvent.click(within(row).getByRole('button', { name: /Reatribuir/ }));
++    expect(unassignedRows()).toHaveLength(1);
++    expect(within(unassignedRows()[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
++    typeBib('303');
++    submitBib();
++    expect(storedItems()[0]).toMatchObject({ state: 'pending', mark: { id: 'lost', entry_id: 'en3', leg_index: 0 } });
++  });
++
+   it('keeps marks the server neither accepted nor rejected pending and re-sends them (Ruling 28)', async () => {
+     await renderMain();
+     tapMark();
+     const id = stored()[0].id;
+     mocks.sync.mockImplementationOnce(okSync({ accepted: [] }));
+     await flush(2 * SEC);
+     expect(status()).toHaveTextContent('Sincronizando 1…');
+     expect(within(screen.getByTestId('my-marks')).getByRole('listitem')).toHaveTextContent('⏳');
+     await flush(2 * SEC);
+     expect(mocks.sync.mock.calls[2][3]).toEqual([expect.objectContaining({ id })]);
+@@ -585,20 +856,54 @@ describe('sync loop', () => {
+     fireEvent.change(screen.getByTestId('tk-name'), { target: { value: 'Ana TK' } });
+     fireEvent.click(screen.getByTestId('tk-register'));
+     await flush();
+     const last = mocks.sync.mock.calls.at(-1)!;
+     expect(last[1]).toBe('tk-new');
+     expect(last[3]).toEqual([expect.objectContaining({ id, ts: iso(NOW0 + OFFSET) })]);
+     expect(unassignedRows()).toHaveLength(1);
+   });
+ });
+ 
++describe('one active tab per link and device (Ruling 45)', () => {
++  it('holds the Web Lock while open and lets it go when closed', async () => {
++    const locks = installLocks();
++    const { unmount } = await renderMain();
++    expect(locks.request).toHaveBeenCalledWith('ebc.tk.e1', { ifAvailable: true }, expect.any(Function));
++    expect(locks.held.has('ebc.tk.e1')).toBe(true);
++    unmount();
++    await flush();
++    expect(locks.held.has('ebc.tk.e1')).toBe(false);
++  });
++
++  it('does not mark in a second tab, and takes over with what the first one saved when it closes', async () => {
++    const locks = installLocks();
++    const closeOther = locks.otherTab('ebc.tk.e1');
++    window.localStorage.setItem(REG_KEY, JSON.stringify(REG));
++    renderPage();
++    await flush();
++    expect(screen.getByText('Este link já está aberto em outra aba deste aparelho — use aquela aba')).toBeInTheDocument();
++    expect(screen.queryByTestId('mark-button')).not.toBeInTheDocument();
++    await flush(10 * SEC);
++    expect(mocks.sync).not.toHaveBeenCalled();
++
++    // The other tab marked meanwhile, then was closed.
++    const ts = iso(NOW0 + OFFSET + 3 * SEC);
++    const theirs = { id: 'theirs', ts, device_ts: ts, clock_offset_ms: OFFSET, clock_rtt_ms: 100, entry_id: null, leg_index: null, athlete_id: null, discarded: false, local_updated_at: NOW0 + 3 * SEC };
++    window.localStorage.setItem(OUTBOX_KEY, JSON.stringify({ items: { theirs: { mark: theirs, state: 'pending' } } }));
++    closeOther();
++    await flush();
++    expect(screen.getByTestId('mark-button')).toBeInTheDocument();
++    expect(unassignedRows()).toHaveLength(1);
++    expect(mocks.sync.mock.calls[0][3]).toEqual([expect.objectContaining({ id: 'theirs' })]);
++  });
++});
++
+ describe('clock and screen', () => {
+   it('shows the synced Brasília time with tenths and its uncertainty', async () => {
+     await renderMain();
+     expect(screen.getByTestId('tk-clock')).toHaveTextContent(at(NOW0 + OFFSET));
+     await flush(300);
+     expect(screen.getByTestId('tk-clock')).toHaveTextContent(at(NOW0 + OFFSET + 300));
+     expect(screen.getByText(/±0,05 s/)).toBeInTheDocument();
+   });
+ 
+   it('warns when the clock never synced', async () => {
+diff --git a/src/features/timekeeper/tkStore.test.ts b/src/features/timekeeper/tkStore.test.ts
+index 9132e9d..9d40c59 100644
+--- a/src/features/timekeeper/tkStore.test.ts
++++ b/src/features/timekeeper/tkStore.test.ts
+@@ -1,18 +1,19 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import type { EntryRow, MarkRow, TkSession } from '../../lib/types';
+ import type { LocalMark, OutboxItem } from '../../lib/outbox';
+ import {
+   iso, makeEntry, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
+ } from '../../domain/testing/fixtures';
+ import {
+-  applyWaveStarts, assignMark, assignmentMessage, localToMarkRow, markToInput, mergedMarks, newMark, onCourse, sessionIndex,
++  applyWaveStarts, assignMark, assignmentMessage, burstHead, localToMarkRow, markToInput, mergedMarks, newMark, onCourse,
++  selectedMarkId, sessionIndex,
+ } from './tkStore';
+ 
+ const ME = 'tk-me';
+ 
+ // Solo entry (Ana does both legs), with the member name tk_open embeds.
+ const solo = (p: Partial<EntryRow> = {}): EntryRow =>
+   makeEntry({ members: [{ athlete_id: 'a1', position: 0, legs: [0, 1], name: 'Ana Souza' }], ...p });
+ 
+ function session(p: Partial<TkSession> = {}): TkSession {
+   return {
+@@ -192,39 +193,39 @@ describe('onCourse', () => {
+       ],
+     }), [], T0 + 5 * MIN);
+     expect(list.map(i => i.entry.bib)).toEqual(['1']);
+     expect(list[0]).toMatchObject({ legIndex: 0, legLabel: 'Natação', athleteName: 'Ana Souza', legElapsedMs: 5 * MIN });
+   });
+ 
+   it('pins a crossing inside the same-crossing window at the top with the seconds left to confirm', () => {
+     const now = leg0 + 10_200;
+     const list = onCourse(relaySession([relayEntry(), solo({ id: 'solo', race_id: 'r2', wave_id: 'w2', bib: '7' })]), [relayLeg0()], now);
+     expect(list.map(i => i.entry.id)).toEqual(['en-relay', 'solo']);
+-    expect(list[0].confirm).toEqual({ leg_index: 0, leg_label: 'Natação', leg_ms: 10 * MIN, crossing_ms: leg0, remaining_s: 20 });
++    expect(list[0].confirm).toEqual({ leg_index: 0, leg_label: 'Natação', leg_ms: 10 * MIN, crossing_ms: leg0, remaining_s: 20, mine: false });
+     // Still on course: the row keeps showing who is running now.
+     expect(list[0]).toMatchObject({ athleteName: 'Matheus', legIndex: 1, legElapsedMs: 10_200 });
+ 
+     expect(onCourse(relaySession(), [relayLeg0()], leg0 + 29_999)[0].confirm?.remaining_s).toBe(1);
+     expect(onCourse(relaySession(), [relayLeg0()], leg0 + 30_000)[0].confirm).toBeNull();
+   });
+ 
+   it('keeps a finished entry listed while its finish can still be confirmed, then drops it', () => {
+     const finish = T0 + 30 * MIN;
+     const marks = [
+       makeMark({ at: T0 + 10 * MIN, entry_id: 'en1', leg_index: 0 }),
+       makeMark({ at: finish, entry_id: 'en1', leg_index: 1 }),
+     ];
+     const during = onCourse(session(), marks, finish + 10 * SEC);
+     expect(during).toHaveLength(1);
+     expect(during[0].timing.status).toBe('finished');
+     expect(during[0]).toMatchObject({ legIndex: null, legLabel: 'Corrida', athleteName: 'Ana Souza' });
+-    expect(during[0].confirm).toEqual({ leg_index: 1, leg_label: 'Corrida', leg_ms: 20 * MIN, crossing_ms: finish, remaining_s: 20 });
++    expect(during[0].confirm).toEqual({ leg_index: 1, leg_label: 'Corrida', leg_ms: 20 * MIN, crossing_ms: finish, remaining_s: 20, mine: false });
+ 
+     expect(onCourse(session(), marks, finish + 31 * SEC)).toEqual([]);
+   });
+ 
+   it('orders pinned rows by most recent crossing, then the rest by leg time, longest first', () => {
+     const now = T0 + 30 * MIN + 10 * SEC;
+     const s = session({
+       entries: [
+         solo({ id: 'A', bib: '1' }), // leg 0 at 10 min → on the run for 20 min
+         solo({ id: 'B', bib: '2' }), // finished 10 s ago
+@@ -237,20 +238,71 @@ describe('onCourse', () => {
+       makeMark({ at: T0 + 12 * MIN, entry_id: 'B', leg_index: 0 }),
+       makeMark({ at: T0 + 30 * MIN, entry_id: 'B', leg_index: 1 }),
+       makeMark({ at: T0 + 30 * MIN + 5 * SEC, entry_id: 'C', leg_index: 0 }),
+     ];
+     const list = onCourse(s, marks, now);
+     expect(list.map(i => i.entry.id)).toEqual(['C', 'B', 'D', 'A']);
+     expect(list.map(i => i.confirm?.remaining_s ?? null)).toEqual([25, 20, null, null]);
+   });
+ });
+ 
++describe('onCourse: crossings this timekeeper already marked (Ruling 44 M8)', () => {
++  const relaySession = () => session({ races: [relayRace], waves: [relayWave], entries: [relayEntry()] });
++  const leg0 = T0 + 10 * MIN;
++
++  it('flags a pinned crossing that has a mark of this timekeeper', () => {
++    const marks = [
++      makeMark({ id: 'o', at: leg0, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 }),
++      makeMark({ id: 'm', at: leg0 + 2 * SEC, timekeeper_id: ME, entry_id: 'en-relay', leg_index: 0 }),
++    ];
++    expect(onCourse(relaySession(), marks, leg0 + 5 * SEC, ME)[0].confirm).toMatchObject({ leg_index: 0, mine: true });
++  });
++
++  it('does not flag a crossing only other timekeepers (or discarded marks of mine) marked', () => {
++    const marks = [
++      makeMark({ id: 'o', at: leg0, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 }),
++      { ...makeMark({ id: 'm', at: leg0 + 2 * SEC, timekeeper_id: ME, entry_id: 'en-relay', leg_index: 0 }), discarded: true },
++    ];
++    expect(onCourse(relaySession(), marks, leg0 + 5 * SEC, ME)[0].confirm).toMatchObject({ mine: false });
++    expect(onCourse(relaySession(), marks, leg0 + 5 * SEC)[0].confirm).toMatchObject({ mine: false });
++  });
++});
++
++describe('burst selection (review Important 1)', () => {
++  const now = T0 + 10 * MIN;
++  const un = (id: string, agoMs: number) => makeMark({ id, at: now - agoMs, timekeeper_id: ME, entry_id: null, leg_index: null });
++  const stale = un('stale', 2 * MIN);
++  const a = un('a', 20 * SEC);
++  const b = un('b', 10 * SEC);
++
++  it('burstHead is the oldest mark younger than the 60 s unassigned threshold', () => {
++    expect(burstHead([stale, a, b], now)?.id).toBe('a');
++    expect(burstHead([b, a], now)?.id).toBe('a');
++    expect(burstHead([un('edge', 60 * SEC)], now)?.id).toBe('edge');
++    expect(burstHead([un('old', 60 * SEC + 1)], now)).toBeNull();
++    expect(burstHead([stale], now)).toBeNull();
++  });
++
++  it('auto picks the burst head; a stale mark is only used when it was chosen explicitly', () => {
++    expect(selectedMarkId({ mode: 'auto' }, [stale, a, b], now)).toBe('a');
++    expect(selectedMarkId({ mode: 'auto' }, [stale], now)).toBeNull();
++    expect(selectedMarkId({ mode: 'none' }, [stale, a, b], now)).toBeNull();
++    expect(selectedMarkId({ mode: 'id', id: 'b', chosen: false }, [stale, a, b], now)).toBe('b');
++    expect(selectedMarkId({ mode: 'id', id: 'stale', chosen: true }, [stale, a, b], now)).toBe('stale');
++    // Selected by the app (not by the timekeeper): it leaves once stale, like the automatic pick.
++    expect(selectedMarkId({ mode: 'id', id: 'stale', chosen: false }, [stale, a, b], now)).toBe('a');
++    expect(selectedMarkId({ mode: 'id', id: 'stale', chosen: false }, [stale], now)).toBeNull();
++    // A selected mark that got an athlete (or was discarded) hands over to the automatic pick.
++    expect(selectedMarkId({ mode: 'id', id: 'gone', chosen: true }, [stale, a, b], now)).toBe('a');
++  });
++});
++
+ describe('sessionIndex', () => {
+   it('names entries from the member names embedded by tk_open', () => {
+     const idx = sessionIndex(session({ entries: [relayEntry({ team_name: null })] }));
+     expect(idx.athletesById.get('a2')?.name).toBe('Matheus');
+   });
+ });
+ 
+ describe('applyWaveStarts', () => {
+   it('updates the start of known waves and keeps the same session when nothing changed', () => {
+     const s = session({ waves: [makeWave({ id: 'w1', start_at: null }), makeWave({ id: 'w2', race_id: 'r1', start_at: iso(T0) })] });
+diff --git a/src/features/timekeeper/tkStore.ts b/src/features/timekeeper/tkStore.ts
+index b5069e1..a9b9ead 100644
+--- a/src/features/timekeeper/tkStore.ts
++++ b/src/features/timekeeper/tkStore.ts
+@@ -135,25 +135,68 @@ export function applyWaveStarts(session: TkSession, waves: Pick<WaveRow, 'id' |
+   let changed = false;
+   const next = session.waves.map(w => {
+     const start = startById.get(w.id);
+     if (start === undefined || start === w.start_at) return w;
+     changed = true;
+     return { ...w, start_at: start };
+   });
+   return changed ? { ...session, waves: next } : session;
+ }
+ 
++/** A mark still without an athlete this long after its tap becomes an "unassigned" issue (spec §8);
++ * it also leaves the automatic pick below. */
++export const STALE_UNASSIGNED_MS = 60_000;
++
++/** Older than the unassigned-issue threshold at `nowMs` (synced time). */
++export function isStale(mark: MarkRow, nowMs: number): boolean {
++  return nowMs - Date.parse(mark.ts) > STALE_UNASSIGNED_MS;
++}
++
++/**
++ * Which "Sem atleta" mark a typed bib or an "Em prova" tap goes to. `auto`: the oldest mark of the
++ * current burst (`burstHead`); `none`: the timekeeper deselected; `id`: one mark — `chosen` when
++ * the timekeeper picked it (kept however old it gets), otherwise it holds only while it is not
++ * stale, like the automatic pick.
++ */
++export type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string; chosen: boolean };
++
++/**
++ * The oldest unassigned mark younger than the unassigned-issue threshold. FIFO only within a
++ * burst: after four arrivals the bibs typed in arrival order go to marks 1..4, but a mark left
++ * unidentified for longer never takes a later arrival's bib (every identification after it
++ * would be one arrival off). Older marks are used only when chosen explicitly.
++ */
++export function burstHead(unassigned: MarkRow[], nowMs: number): MarkRow | null {
++  let head: MarkRow | null = null;
++  for (const m of unassigned) {
++    if (!isStale(m, nowMs) && (head === null || m.ts < head.ts || (m.ts === head.ts && m.id < head.id))) head = m;
++  }
++  return head;
++}
++
++/** The mark `sel` points at among `unassigned` (this timekeeper's marks without an athlete). */
++export function selectedMarkId(sel: Selection, unassigned: MarkRow[], nowMs: number): string | null {
++  if (sel.mode === 'none') return null;
++  if (sel.mode === 'id') {
++    const m = unassigned.find(x => x.id === sel.id);
++    if (m && (sel.chosen || !isStale(m, nowMs))) return m.id;
++  }
++  return burstHead(unassigned, nowMs)?.id ?? null;
++}
++
+ /** A crossing other timekeepers can still confirm: shown pinned on top of "Em prova" (Ruling 22). */
+ export interface ConfirmInfo {
+   leg_index: number; leg_label: string; leg_ms: number | null; crossing_ms: number;
+   /** Whole seconds left in the same-crossing window (1..window). */
+   remaining_s: number;
++  /** This timekeeper already has a mark in the crossing: a tap would only duplicate it. */
++  mine: boolean;
+ }
+ 
+ export interface OnCourseItem {
+   entry: EntryRow; race: RaceRow; timing: EntryTiming;
+   /** Team name or member names. */
+   displayName: string;
+   /** Leg being done now; null for a finished entry (listed only while `confirm` is set). */
+   legIndex: number | null;
+   /** Label and athlete of the current leg (of the last leg once finished). */
+   legLabel: string; athleteName: string;
+@@ -163,22 +206,23 @@ export interface OnCourseItem {
+ }
+ 
+ const bibCollator = new Intl.Collator('pt-BR', { numeric: true });
+ 
+ /**
+  * The "Em prova" list: entries on course (their wave started or a crossing is already known),
+  * sorted by time on the current leg, longest first (the next ones to arrive). An entry whose
+  * latest crossing is still inside the same-crossing window — a relay handoff or a finish — is
+  * pinned on top, most recent first, and stays listed even once finished until the window closes,
+  * so the card just tapped does not jump away and the other timekeepers can confirm it (Ruling 22).
++ * With `timekeeperId`, a pinned crossing that already counts one of its marks is flagged `mine`.
+  */
+-export function onCourse(session: TkSession, marks: MarkRow[], nowMs: number): OnCourseItem[] {
++export function onCourse(session: TkSession, marks: MarkRow[], nowMs: number, timekeeperId: string | null = null): OnCourseItem[] {
+   const idx = sessionIndex(session);
+   const marksByEntry = new Map<string, MarkRow[]>();
+   for (const m of marks) {
+     if (m.entry_id === null) continue;
+     const list = marksByEntry.get(m.entry_id);
+     if (list) list.push(m);
+     else marksByEntry.set(m.entry_id, [m]);
+   }
+ 
+   const items: OnCourseItem[] = [];
+@@ -193,20 +237,22 @@ export function onCourse(session: TkSession, marks: MarkRow[], nowMs: number): O
+     for (const lt of timing.legs) {
+       const at = lt.crossing.median_ms;
+       if (at !== null && (latest === null || at > latest.at)) latest = { leg: lt.leg_index, at };
+     }
+     const windowMs = race.config.same_crossing_window_s * 1000;
+     const confirm: ConfirmInfo | null = latest !== null && nowMs - latest.at < windowMs && latest.at - nowMs <= windowMs
+       ? {
+           leg_index: latest.leg, leg_label: race.legs[latest.leg].label, leg_ms: timing.legs[latest.leg].leg_ms,
+           crossing_ms: latest.at,
+           remaining_s: Math.min(race.config.same_crossing_window_s, Math.ceil((latest.at + windowMs - nowMs) / 1000)),
++          // Each timekeeper's earliest mark of a crossing is one of its candidates (spec §8).
++          mine: timekeeperId !== null && timing.legs[latest.leg].crossing.candidates.some(c => c.timekeeper_id === timekeeperId),
+         }
+       : null;
+     if (!running && confirm === null) continue;
+ 
+     const displayName = entryDisplayName(entry, idx);
+     const leg = running ? (timing.current_leg as number) : race.legs.length - 1;
+     items.push({
+       entry, race, timing, displayName,
+       legIndex: running ? leg : null,
+       legLabel: race.legs[leg].label,
+diff --git a/src/features/timekeeper/useTimekeeper.ts b/src/features/timekeeper/useTimekeeper.ts
+index 2b87840..510f81b 100644
+--- a/src/features/timekeeper/useTimekeeper.ts
++++ b/src/features/timekeeper/useTimekeeper.ts
+@@ -1,21 +1,21 @@
+ // State and side effects of the timekeeper app (spec §7): the cached tk_open session, the device
+ // registration, the offline outbox and the single-flight sync loop. Every tap is written to the
+ // outbox (localStorage) synchronously before anything else happens, so a mark survives a lost
+ // connection, a slow server and a page reload.
+ 
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { api, ApiError } from '../../lib/api';
+-import type { ClockSync } from '../../lib/clock';
++import type { ClockState, ClockSync } from '../../lib/clock';
+ import { Outbox } from '../../lib/outbox';
+ import type { LocalMark, OutboxState } from '../../lib/outbox';
+-import { readJSON, safeLocalStorage, writeJSON } from '../../lib/storage';
++import { isMemoryOnly, readJSON, safeLocalStorage, writeJSON } from '../../lib/storage';
+ import type { EntryRow, MarkRow, RaceRow, TkMarkInput, TkSession, TkSyncResult } from '../../lib/types';
+ import { useClock } from '../../hooks/useClock';
+ import { entryDisplayName, legAthleteId, mergeById } from '../../domain/eventModel';
+ import type { EventIndex } from '../../domain/eventModel';
+ import { planBibAssignment } from '../../domain/suggestLeg';
+ import type { LegSuggestion } from '../../domain/suggestLeg';
+ import {
+   applyWaveStarts, assignMark, assignmentMessage, localToMarkRow, markToInput, memberName, mergedMarks, newMark,
+   onCourse, sessionIndex, withSuggestion,
+ } from './tkStore';
+@@ -30,21 +30,25 @@ const BATCH_SIZE = 200;
+ const OPEN_RETRY_MS = 5_000;
+ 
+ const sessionKey = (token: string) => `ebc.tk.session.${token}`;
+ const regKey = (token: string) => `ebc.tk.reg.${token}`;
+ const marksKey = (eventId: string) => `ebc.tk.marks.${eventId}`;
+ const outboxKey = (eventId: string, timekeeperId: string) => `ebc.tk.${eventId}.${timekeeperId}`;
+ /** Timekeeper ids with an outbox for this event on this device — lets a new registration pick up
+  * marks still pending under a registration that stopped working (rotated link, unknown id). */
+ const outboxesKey = (eventId: string) => `ebc.tk.outboxes.${eventId}`;
+ 
+-export type TkPhase = 'loading' | 'invalid' | 'register' | 'main' | 'disabled';
++/** `other_tab`: another tab of this device has the link open (Ruling 45) — nothing is marked here. */
++export type TkPhase = 'loading' | 'invalid' | 'register' | 'main' | 'disabled' | 'other_tab';
++
++/** The synced instant of a tap and the clock state behind it, read when the finger landed. */
++export interface TapStamp { tapMs: number; deviceMs: number; clock: ClockState | null }
+ 
+ /** What the device keeps after `tk_register` (`ebc.tk.reg.<token>`). */
+ export interface TkDevice { timekeeper_id: string; secret: string; name: string }
+ 
+ export type AssignResult =
+   | {
+       ok: true; markId: string; ts: string; entry: EntryRow; race: RaceRow; suggestion: LegSuggestion;
+       /** `✓ Nº 101 · Matheus · fim da perna 2/2 (Corrida)` (or the already-finished form). */
+       message: string;
+       /** Bib warning (DNS/DSQ) or already-finished notice from `planBibAssignment`. */
+@@ -63,34 +67,38 @@ export interface Timekeeper {
+   /** False after a network failure (or the browser's "offline" event) until a sync succeeds. */
+   online: boolean;
+   /** At least one sync succeeded since the page opened. */
+   synced: boolean;
+   /** Last non-network sync failure (pt-BR server message), cleared by the next success. */
+   syncError: string | null;
+   /** Why tk_open failed while loading. */
+   loadError: string | null;
+   pendingCount: number;
+   rejectedCount: number;
++  /** The outbox could not be written to the device storage: marks live only in this page. */
++  storageFailed: boolean;
+   /** ± uncertainty of the synced clock in ms (half the best round trip), null if never synced. */
+   clockQuality: number | null;
+   /** Synced now, refreshed every second and after every action. */
+   nowMs: number;
+   /** Every known mark (server copies merged with this device's). */
+   marks: MarkRow[];
+   /** This timekeeper's non-discarded marks without an entry, oldest first. */
+   unassigned: MarkRow[];
+   /** This timekeeper's marks with their outbox state, newest first. */
+   myMarks: MyMark[];
+   onCourse: OnCourseItem[];
+   register(name: string): Promise<void>;
+-  /** Records a mark at the synced instant of the call; with a bib, also assigns it. */
+-  mark(bibText?: string): { markId: string; assignment: AssignResult | null };
++  /** The synced instant now, to record a mark later at the moment a press began. */
++  stamp(): TapStamp;
++  /** Records a mark at the synced instant of the call (or at `at`); with a bib, also assigns it. */
++  mark(bibText?: string, at?: TapStamp): { markId: string; ts: string; assignment: AssignResult | null };
+   assign(markId: string, entryId: string, athleteId?: string | null): AssignResult;
+   assignBib(markId: string, bibText: string): AssignResult;
+   changeLeg(markId: string, legIndex: number): AssignResult;
+   unassign(markId: string): void;
+   discard(markId: string): void;
+   restore(markId: string): void;
+   /** Loading: try tk_open now. Disabled: try syncing again. */
+   retry(): void;
+ }
+ 
+@@ -132,35 +140,45 @@ function classify(e: unknown): { kind: Failure; message: string } {
+   if (message.includes('Cronometrista não autorizado')) return { kind: 'unauthorized', message };
+   if (message.includes('Seu acesso foi desativado')) return { kind: 'disabled', message };
+   if (message.includes('Link de cronometragem inválido')) return { kind: 'invalid', message };
+   return { kind: 'other', message };
+ }
+ 
+ function deviceLabel(): string {
+   return typeof navigator === 'undefined' ? '' : navigator.userAgent.slice(0, 200);
+ }
+ 
++/** The browser's Web Locks, or null where they do not exist (insecure origin, old browser). */
++function webLocks(): LockManager | null {
++  const locks = typeof navigator === 'undefined' ? undefined : (navigator as Navigator & { locks?: LockManager }).locks;
++  return locks && typeof locks.request === 'function' ? locks : null;
++}
++
++/** Ruling 45: `held` = this tab may time; `busy` = another tab of this device has the link open. */
++type LockState = 'pending' | 'held' | 'busy';
++
+ export function useTimekeeper(token: string): Timekeeper {
+   const storage = useMemo(() => safeLocalStorage(), []);
+   const clock = useClock();
+ 
+   const [session, setSessionState] = useState<TkSession | null>(() => readSession(storage, token));
+   const [registration, setRegistration] = useState<TkDevice | null>(() => readDevice(storage, token));
+   // With something cached the screen opens at once — a phone reloading without signal must not
+   // sit on a spinner while tk_open times out.
+   const [phase, setPhase] = useState<TkPhase>(() => (session ? (registration ? 'main' : 'register') : 'loading'));
+   const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine !== false);
+   const [synced, setSynced] = useState(false);
+   const [syncError, setSyncError] = useState<string | null>(null);
+   const [loadError, setLoadError] = useState<string | null>(null);
+   const [rev, setRev] = useState(0);
+   const [nowMs, setNowMs] = useState(() => clock.now());
++  const [lock, setLock] = useState<LockState>(() => (webLocks() ? 'pending' : 'held'));
+ 
+   // The async loops and the tap handlers read the latest values from refs, never from a stale render.
+   const sessionRef = useRef(session);
+   const deviceRef = useRef(registration);
+   const boxRef = useRef<{ key: string; box: Outbox } | null>(null);
+   const cacheRef = useRef<{ eventId: string; cache: MarksCache } | null>(null);
+   const indexRef = useRef<{ session: TkSession; index: EventIndex } | null>(null);
+   const inFlight = useRef(false);
+   const reopening = useRef(false);
+   const openNow = useRef<() => void>(() => {});
+@@ -276,25 +294,73 @@ export function useTimekeeper(token: string): Timekeeper {
+     if (!listed.includes(timekeeperId)) writeJSON(storage, outboxesKey(evId), [...listed, timekeeperId]);
+   }, [storage, listedOutboxes]);
+ 
+   const dropRegistration = useCallback(() => {
+     storage.removeItem(regKey(token));
+     deviceRef.current = null;
+     setRegistration(null);
+     setPhase('register');
+   }, [storage, token]);
+ 
++  // Ruling 45: one active tab per link and device. Two tabs would each keep their own outbox in
++  // memory and overwrite each other's unsynced marks in storage, so only the tab holding the
++  // Web Lock times; a second tab waits and takes over when the first one closes. Without Web
++  // Locks the app runs as before.
++  const eventId = session?.event.id ?? null;
++  useEffect(() => {
++    const locks = webLocks();
++    if (!eventId || !locks) return;
++    const name = `ebc.tk.${eventId}`;
++    const abort = new AbortController();
++    let letGo: () => void = () => {};
++    const take = () => {
++      // Another tab may have written since this one started: read everything again.
++      boxRef.current = null;
++      cacheRef.current = null;
++      const device = readDevice(storage, token);
++      if (device?.timekeeper_id !== deviceRef.current?.timekeeper_id) {
++        deviceRef.current = device;
++        setRegistration(device);
++        setPhase(p => (device ? (p === 'register' ? 'main' : p) : (p === 'main' ? 'register' : p)));
++      }
++      setLock('held');
++      bump();
++      return new Promise<void>(resolve => { letGo = resolve; });
++    };
++    // Web Locks refused here (e.g. an opaque-origin frame): run as without them.
++    const runWithout = () => {
++      if (!abort.signal.aborted) setLock('held');
++    };
++    try {
++      locks.request(name, { ifAvailable: true }, held => {
++        if (abort.signal.aborted) return undefined;
++        if (held) return take();
++        setLock('busy');
++        locks.request(name, { signal: abort.signal }, () => (abort.signal.aborted ? undefined : take())).catch(() => {
++          // Aborted on close, or refused: this tab stays out.
++        });
++        return undefined;
++      }).catch(runWithout);
++    } catch {
++      runWithout();
++    }
++    return () => {
++      abort.abort();
++      letGo();
++    };
++  }, [eventId, storage, token, bump]);
++  const active = lock === 'held';
++
+   // The sync loop: single-flight (never two tk_sync requests out, or acks could be misapplied),
+   // every 2 s, ×2 backoff up to 10 s on failures, paused while the page is hidden.
+-  const eventId = session?.event.id ?? null;
+   useEffect(() => {
+-    if (phase !== 'main' || !registration || !eventId) return;
++    if (phase !== 'main' || !active || !registration || !eventId) return;
+     const device = registration;
+     const box = outboxFor(eventId, device.timekeeper_id);
+     rememberOutbox(eventId, device.timekeeper_id);
+     let cancelled = false;
+     let timer: ReturnType<typeof setTimeout> | undefined;
+     let delay = SYNC_INTERVAL_MS;
+ 
+     const schedule = () => {
+       clearTimeout(timer);
+       if (!cancelled) timer = setTimeout(() => void tick(), delay);
+@@ -347,21 +413,21 @@ export function useTimekeeper(token: string): Timekeeper {
+     document.addEventListener('visibilitychange', onVisibility);
+     window.addEventListener('online', resume);
+     window.addEventListener('offline', onOffline);
+     return () => {
+       cancelled = true;
+       clearTimeout(timer);
+       document.removeEventListener('visibilitychange', onVisibility);
+       window.removeEventListener('online', resume);
+       window.removeEventListener('offline', onOffline);
+     };
+-  }, [phase, registration, eventId, token, outboxFor, cacheFor, applySyncResult, dropRegistration, bump, rememberOutbox]);
++  }, [phase, active, registration, eventId, token, outboxFor, cacheFor, applySyncResult, dropRegistration, bump, rememberOutbox]);
+ 
+   // Leg timers and confirmation countdowns.
+   useEffect(() => {
+     if (phase !== 'main') return;
+     const id = setInterval(() => setNowMs(clock.now()), 1_000);
+     return () => clearInterval(id);
+   }, [phase, clock]);
+ 
+   /** Moves marks still pending under this device's previous registrations into the new outbox. */
+   const adoptPending = useCallback((evId: string, timekeeperId: string) => {
+@@ -423,38 +489,43 @@ export function useTimekeeper(token: string): Timekeeper {
+     const plan = planBibAssignment({
+       entries: c.s.entries, racesById: c.index.racesById, marks: c.marks(), markId: base.id,
+       tsMs: Date.parse(base.ts), bibText,
+     });
+     if ('error' in plan) return { ok: false, markId: base.id, error: plan.error };
+     const next = withSuggestion(base, plan.entry.id, plan.suggestion);
+     c.box.upsert(next);
+     return success(c, next, plan.entry, plan.race, plan.suggestion, plan.warning);
+   };
+ 
+-  const mark = (bibText?: string) => {
+-    // The tap instant, read before anything else can delay it.
++  const stamp = (): TapStamp => {
++    // The tap instant first: nothing may delay it.
+     const tapMs = clock.now();
+-    const deviceMs = Date.now();
+-    const input = newMark(tapMs, deviceMs, clock.state());
++    return { tapMs, deviceMs: Date.now(), clock: clock.state() };
++  };
++
++  const mark = (bibText?: string, at?: TapStamp) => {
++    // The tap instant, read before anything else can delay it (or taken when the press began).
++    const t = at ?? stamp();
++    const input = newMark(t.tapMs, t.deviceMs, t.clock);
+     const c = context();
+     // Stored unassigned first, so the tap survives whatever happens while assigning it.
+     c.box.upsert(input);
+     let assignment: AssignResult | null = null;
+     if (bibText !== undefined && bibText.trim() !== '') {
+       try {
+         assignment = assignByBib(c, input, bibText);
+       } catch {
+         assignment = { ok: false, markId: input.id, error: 'Não foi possível atribuir — a marcação ficou em "Sem atleta"' };
+       }
+     }
+     bump();
+-    return { markId: input.id, assignment };
++    return { markId: input.id, ts: input.ts, assignment };
+   };
+ 
+   const withMark = (markId: string, fn: (c: Ctx, base: TkMarkInput) => AssignResult): AssignResult => {
+     const c = context();
+     const base = mine(c, markId);
+     if (!base) return { ok: false, markId, error: 'Marcação não encontrada' };
+     const r = fn(c, base);
+     bump();
+     return r;
+   };
+@@ -496,22 +567,23 @@ export function useTimekeeper(token: string): Timekeeper {
+   const restore = (markId: string) => update(markId, { discarded: false });
+ 
+   const retry = () => {
+     if (phase === 'disabled') setPhase('main');
+     else if (phase === 'loading') openNow.current();
+   };
+ 
+   // ---- derived state ----
+ 
+   const derived = useMemo(() => {
+-    if (!session || !registration) {
+-      return { marks: [] as MarkRow[], unassigned: [] as MarkRow[], myMarks: [] as MyMark[], pendingCount: 0, rejectedCount: 0 };
++    // A tab without the lock never loads the outbox: it would hold a copy that goes stale.
++    if (!session || !registration || !active) {
++      return { marks: [] as MarkRow[], unassigned: [] as MarkRow[], myMarks: [] as MyMark[], pendingCount: 0, rejectedCount: 0, storageFailed: false };
+     }
+     const evId = session.event.id;
+     const me = registration.timekeeper_id;
+     const box = outboxFor(evId, me);
+     const items = box.all();
+     const marks = mergedMarks(cacheFor(evId).marks, items, evId, me);
+     const own = marks.filter(m => m.timekeeper_id === me);
+     const byId = new Map(marks.map((m): [string, MarkRow] => [m.id, m]));
+     const inBox = new Set<string>();
+     const myMarks: MyMark[] = items.map(it => {
+@@ -519,29 +591,36 @@ export function useTimekeeper(token: string): Timekeeper {
+       return { mark: byId.get(it.mark.id) ?? localToMarkRow(it.mark, evId, me), state: it.state, reason: it.reason ?? null };
+     });
+     for (const m of own) if (!inBox.has(m.id)) myMarks.push({ mark: m, state: 'synced', reason: null });
+     myMarks.sort((a, b) => byTs(b.mark, a.mark));
+     return {
+       marks,
+       unassigned: own.filter(m => !m.discarded && m.entry_id === null).sort(byTs),
+       myMarks,
+       pendingCount: box.pendingCount(),
+       rejectedCount: items.filter(it => it.state === 'rejected').length,
++      storageFailed: isMemoryOnly(outboxKey(evId, me)),
+     };
+     // `rev` stands for the outbox and marks cache, which are mutated in place.
+-  }, [session, registration, rev, outboxFor, cacheFor]);
++  }, [session, registration, active, rev, outboxFor, cacheFor]);
+ 
++  const me = registration?.timekeeper_id ?? null;
+   const onCourseList = useMemo(
+-    () => (session ? onCourse(session, derived.marks, nowMs) : []),
+-    [session, derived.marks, nowMs],
++    () => (session ? onCourse(session, derived.marks, nowMs, me) : []),
++    [session, derived.marks, nowMs, me],
+   );
+ 
++  // Timing screens wait for the lock; the others (invalid, disabled, loading) show as they are.
++  const shownPhase: TkPhase = !active && (phase === 'main' || phase === 'register')
++    ? (lock === 'busy' ? 'other_tab' : 'loading')
++    : phase;
++
+   const rtt = clock.rttMs;
+   return {
+-    phase, session, index: session ? indexFor(session) : null, registration, clock,
++    phase: shownPhase, session, index: session ? indexFor(session) : null, registration, clock,
+     online, synced, syncError, loadError,
+-    pendingCount: derived.pendingCount, rejectedCount: derived.rejectedCount,
++    pendingCount: derived.pendingCount, rejectedCount: derived.rejectedCount, storageFailed: derived.storageFailed,
+     clockQuality: clock.synced && rtt !== null ? Math.round(rtt / 2) : null,
+     nowMs, marks: derived.marks, unassigned: derived.unassigned, myMarks: derived.myMarks, onCourse: onCourseList,
+-    register, mark, assign, assignBib, changeLeg, unassign, discard, restore, retry,
++    register, stamp, mark, assign, assignBib, changeLeg, unassign, discard, restore, retry,
+   };
+ }
+diff --git a/src/lib/outbox.test.ts b/src/lib/outbox.test.ts
+index ad16d53..abb71e1 100644
+--- a/src/lib/outbox.test.ts
++++ b/src/lib/outbox.test.ts
+@@ -26,20 +26,38 @@ describe('Outbox', () => {
+   it('records rejections and re-queues on edit', () => {
+     const s = memoryStorage(); let t = 1; const o = new Outbox(s, 'k', () => t++);
+     o.upsert({ id: 'm1', ...base });
+     o.markSent(o.pending());
+     o.applyResult([], [{ id: 'm1', reason: 'Perna inválida' }]);
+     expect(o.get('m1')).toMatchObject({ state: 'rejected', reason: 'Perna inválida' });
+     expect(o.pendingCount()).toBe(0);
+     o.upsert({ id: 'm1', ...base, discarded: true });
+     expect(o.get('m1')!.state).toBe('pending');
+   });
++  it('ignores the rejection of a version edited while it was in flight: the edit goes next', () => {
++    const s = memoryStorage(); let t = 1; const o = new Outbox(s, 'k', () => t++);
++    o.upsert({ id: 'm1', ...base });
++    o.markSent(o.pending());
++    o.upsert({ id: 'm1', ...base, entry_id: 'en1', leg_index: 0 });
++    o.applyResult([], [{ id: 'm1', reason: 'Alterada pela organização' }]);
++    expect(o.get('m1')!.state).toBe('pending');
++    expect(o.get('m1')!.reason).toBeUndefined();
++    expect(o.pending().map(m => m.entry_id)).toEqual(['en1']);
++  });
++  it('keeps an edit made in the same millisecond as the version in flight pending', () => {
++    const s = memoryStorage(); const o = new Outbox(s, 'k', () => 5);
++    o.upsert({ id: 'm1', ...base });
++    o.markSent(o.pending());
++    o.upsert({ id: 'm1', ...base, entry_id: 'en1', leg_index: 0 });
++    o.applyResult(['m1'], []);
++    expect(o.get('m1')!.state).toBe('pending');
++  });
+   it('orders by ts and honors limits', () => {
+     const s = memoryStorage(); const o = new Outbox(s, 'k');
+     o.upsert({ id: 'late', ...base, ts: '2026-10-11T11:20:00.000Z' });
+     o.upsert({ id: 'early', ...base, ts: '2026-10-11T11:00:00.000Z' });
+     expect(o.all().map(i => i.mark.id)).toEqual(['early', 'late']);
+     expect(o.pending(1).map(m => m.id)).toEqual(['early']);
+   });
+   it('survives corrupted storage', () => {
+     const s = memoryStorage(); s.setItem('k', '{oops');
+     expect(new Outbox(s, 'k').all()).toEqual([]);
+diff --git a/src/lib/outbox.ts b/src/lib/outbox.ts
+index 4e84e59..898766d 100644
+--- a/src/lib/outbox.ts
++++ b/src/lib/outbox.ts
+@@ -99,20 +99,23 @@ export class Outbox {
+     for (const id of accepted) {
+       const item = this.items[id];
+       if (!item) continue;
+       if (item.mark.local_updated_at === item.sent_at_version) {
+         item.state = 'synced';
+       }
+     }
+     for (const r of rejected) {
+       const item = this.items[r.id];
+       if (!item) continue;
++      // Like an ack, a rejection only concerns the version that was sent: an edit made while it
++      // was in flight stays pending and goes on the next sync (the server judges it on its own).
++      if (item.mark.local_updated_at !== item.sent_at_version) continue;
+       item.state = 'rejected';
+       item.reason = r.reason;
+     }
+     this.persist();
+   }
+ 
+   pendingCount(): number {
+     return Object.values(this.items).filter((item) => item.state === 'pending').length;
+   }
+ }
+diff --git a/src/lib/storage.test.ts b/src/lib/storage.test.ts
+index c790d0a..ebbd652 100644
+--- a/src/lib/storage.test.ts
++++ b/src/lib/storage.test.ts
+@@ -1,23 +1,35 @@
+ import { describe, it, expect, vi } from 'vitest';
+-import { memoryStorage, readJSON, writeJSON, safeLocalStorage } from './storage';
++import { isMemoryOnly, memoryStorage, readJSON, writeJSON, safeLocalStorage } from './storage';
+ 
+ describe('storage', () => {
+   it('memory roundtrip and JSON helpers', () => {
+     const s = memoryStorage();
+     writeJSON(s, 'k', { a: 1 });
+     expect(readJSON(s, 'k', null)).toEqual({ a: 1 });
+     s.setItem('bad', '{not json');
+     expect(readJSON(s, 'bad', 'fallback')).toBe('fallback');
+     expect(readJSON(s, 'missing', 7)).toBe(7);
+   });
+   it('safeLocalStorage works and survives a throwing localStorage', () => {
+     const s = safeLocalStorage();
+     s.setItem('x', '1');
+     expect(s.getItem('x')).toBe('1');
+     const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota'); });
+     const s2 = safeLocalStorage();
+     expect(() => s2.setItem('y', '2')).not.toThrow();
+     expect(s2.getItem('y')).toBe('2'); // served from the in-memory fallback
+     spy.mockRestore();
+   });
++  it('tells which keys only live in memory after localStorage refused them', () => {
++    const s = safeLocalStorage();
++    s.setItem('mem.ok', '1');
++    expect(isMemoryOnly('mem.ok')).toBe(false);
++    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota'); });
++    s.setItem('mem.full', '2');
++    spy.mockRestore();
++    expect(isMemoryOnly('mem.full')).toBe(true);
++    expect(isMemoryOnly('mem.ok')).toBe(false);
++    s.removeItem('mem.full');
++    expect(isMemoryOnly('mem.full')).toBe(false);
++  });
+ });
+diff --git a/src/lib/storage.ts b/src/lib/storage.ts
+index a0e7747..f66cab3 100644
+--- a/src/lib/storage.ts
++++ b/src/lib/storage.ts
+@@ -56,20 +56,26 @@ export function safeLocalStorage(): KeyValueStorage {
+       try {
+         window.localStorage.removeItem(k);
+       } catch {
+         fallbackKeys.add(k);
+         fallback.removeItem(k);
+       }
+     },
+   };
+ }
+ 
++/** True when `k` could not be kept in window.localStorage and lives only in this page's memory
++ * (lost on reload) — lets a screen warn that what it keeps is not persisted. */
++export function isMemoryOnly(k: string): boolean {
++  return fallbackKeys.has(k);
++}
++
+ export function readJSON<T>(s: KeyValueStorage, key: string, fallbackValue: T): T {
+   try {
+     const raw = s.getItem(key);
+     if (raw === null) return fallbackValue;
+     return JSON.parse(raw) as T;
+   } catch {
+     return fallbackValue;
+   }
+ }
+ 
