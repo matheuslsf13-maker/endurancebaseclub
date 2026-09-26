@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { makeEntry, makeRace } from '../../domain/testing/fixtures';
+import { formatDuration } from '../../lib/format';
 import {
   emptyEntryForm,
   entryToForm,
   foldAccents,
-  formatPenaltyMs,
   parsePenaltyMs,
   setLegOwner,
   setMember,
   setRace,
   toSavePayload,
   validateEntryForm,
-} from './entryForm';
+} from './entryFormState';
 
 const teamRace2legs = makeRace({ id: 'r1', team_size: 2, legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }] });
 const soloRace = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
@@ -180,7 +180,7 @@ describe('toSavePayload', () => {
   });
 });
 
-describe('penalty m:ss parsing/formatting', () => {
+describe('penalty m:ss parsing', () => {
   it('parses minutes:seconds into milliseconds', () => {
     expect(parsePenaltyMs('1:30')).toBe(90_000);
     expect(parsePenaltyMs('0:05')).toBe(5_000);
@@ -198,10 +198,10 @@ describe('penalty m:ss parsing/formatting', () => {
     expect(parsePenaltyMs('1:30:00')).toBeNull();
   });
 
-  it('formats milliseconds back to m:ss', () => {
-    expect(formatPenaltyMs(90_000)).toBe('1:30');
-    expect(formatPenaltyMs(5_000)).toBe('0:05');
-    expect(formatPenaltyMs(0)).toBe('0:00');
+  it('the display value comes from the shared formatDuration, e.g. 90000 -> "1:30"', () => {
+    expect(formatDuration(90_000)).toBe('1:30');
+    expect(formatDuration(5_000)).toBe('0:05');
+    expect(formatDuration(0)).toBe('0:00');
   });
 });
 

@@ -4,7 +4,7 @@ import { Button, EmptyState, Input, Modal, Select, useToast } from '../../compon
 import { api, ApiError } from '../../lib/api';
 import type { EntryRow } from '../../lib/types';
 import { useEventContext } from '../events/EventContext';
-import { foldAccents } from './entryForm';
+import { foldAccents } from './entryFormState';
 
 export interface BulkEntryDialogProps {
   open: boolean;

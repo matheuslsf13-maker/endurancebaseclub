@@ -385,6 +385,15 @@ describe('AthletesPage', () => {
     await user.click(screen.getByTestId('import-athletes'));
     expect(screen.getByTestId('import-file')).toBeInTheDocument();
   });
+
+  // Ruling 51: the Entries tab's import shortcut navigates to /atletas?import=1 so it lands with
+  // the dialog already open, instead of a plain link that only reached the page.
+  it('opens the import dialog on arrival when asked via ?import=1 (Ruling 51)', async () => {
+    renderWithProviders(<AthletesPage />, { route: '/atletas?import=1' });
+    await screen.findByText('Ana Souza');
+
+    expect(screen.getByTestId('import-file')).toBeInTheDocument();
+  });
 });
 
 describe('AthleteProfilePage', () => {

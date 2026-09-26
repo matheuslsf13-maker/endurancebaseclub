@@ -171,13 +171,4 @@ export function parsePenaltyMs(text: string): number | null {
   return (minutes * 60 + seconds) * 1000;
 }
 
-/** The inverse of `parsePenaltyMs`, e.g. `90000` → `'1:30'` — used to prefill the status modal
- * with whatever penalty is already on the entry. */
-export function formatPenaltyMs(ms: number): string {
-  const totalSeconds = Math.round(Math.max(0, ms) / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
-}
-
 export const ENTRY_STATUS_OPTIONS: EntryStatus[] = ['ok', 'dns', 'dnf', 'dsq'];

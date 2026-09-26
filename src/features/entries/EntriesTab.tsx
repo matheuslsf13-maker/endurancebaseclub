@@ -1,16 +1,17 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router';
+import { useNavigate } from 'react-router';
 import { Badge, Button, Card, EmptyState, Input, Modal, Select, Table, Textarea, useConfirm, useToast } from '../../components/ui';
 import { entryCategory, groupLabel } from '../../domain/categories';
 import { entryDisplayName, entryWave, legAthleteId } from '../../domain/eventModel';
 import type { EventIndex } from '../../domain/eventModel';
 import { ENTRY_STATUS_LABEL } from '../../domain/labels';
 import { api, ApiError } from '../../lib/api';
+import { formatDuration } from '../../lib/format';
 import type { AthleteRow, EntryRow, EntryStatus, RaceRow } from '../../lib/types';
 import { useEventContext } from '../events/EventContext';
 import { BulkEntryDialog } from './BulkEntryDialog';
 import { EntryForm } from './EntryForm';
-import { ENTRY_STATUS_OPTIONS, foldAccents, formatPenaltyMs, parsePenaltyMs } from './entryForm';
+import { ENTRY_STATUS_OPTIONS, foldAccents, parsePenaltyMs } from './entryFormState';
 
 type EditModalState = 'new' | EntryRow | null;
 
@@ -44,7 +45,7 @@ interface EntryStatusModalProps {
 function EntryStatusModal({ entry, onClose, onSaved }: EntryStatusModalProps) {
   const { refresh } = useEventContext();
   const [status, setStatus] = useState<EntryStatus>(entry.status);
-  const [penaltyText, setPenaltyText] = useState(formatPenaltyMs(entry.penalty_ms));
+  const [penaltyText, setPenaltyText] = useState(formatDuration(entry.penalty_ms));
   const [notes, setNotes] = useState(entry.notes);
   const [penaltyError, setPenaltyError] = useState<string | undefined>();
   const [formError, setFormError] = useState<string | null>(null);
@@ -125,6 +126,7 @@ export default function EntriesTab() {
   const { agg, index, refresh } = useEventContext();
   const toast = useToast();
   const confirm = useConfirm();
+  const navigate = useNavigate();
 
   const [raceFilter, setRaceFilter] = useState('');
   const [search, setSearch] = useState('');
@@ -192,12 +194,16 @@ export default function EntriesTab() {
             <Input label="Buscar" placeholder="Nome, equipe ou número" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
 
-          <Card className="text-sm text-muted">
-            Prefere importar de uma planilha?{' '}
-            <Link to="/atletas" className="underline underline-offset-2 text-fg">
-              Importe atletas
-            </Link>{' '}
-            — a coluna Prova inscreve automaticamente em provas individuais.
+          {/* Ruling 51: a real Button (not a plain text link) navigating to /atletas asking it
+              to open ImportDialog on arrival (`?import=1`, read by AthletesPage) — a click used
+              to land on the athletes page without the dialog open, needing a second click. */}
+          <Card className="flex flex-col items-start gap-3 text-sm text-muted sm:flex-row sm:items-center sm:justify-between">
+            <p>
+              Prefere importar de uma planilha? — a coluna Prova inscreve automaticamente em provas individuais.
+            </p>
+            <Button variant="secondary" onClick={() => navigate('/atletas?import=1')}>
+              Importar atletas
+            </Button>
           </Card>
 
           {filtered.length === 0 ? (
@@ -234,7 +240,7 @@ export default function EntriesTab() {
                       <td className="px-3 py-2">
                         <Badge tone={STATUS_BADGE_TONE[entry.status]}>{ENTRY_STATUS_LABEL[entry.status]}</Badge>
                       </td>
-                      <td className="px-3 py-2 tabular">{entry.penalty_ms > 0 ? formatPenaltyMs(entry.penalty_ms) : '—'}</td>
+                      <td className="px-3 py-2 tabular">{entry.penalty_ms > 0 ? formatDuration(entry.penalty_ms) : '—'}</td>
                       <td className="px-3 py-2">
                         <div className="flex flex-wrap justify-end gap-2">
                           <Button variant="ghost" size="sm" onClick={() => setModal(entry)}>

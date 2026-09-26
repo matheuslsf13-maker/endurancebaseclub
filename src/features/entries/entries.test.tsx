@@ -43,12 +43,12 @@ function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
 }
 
 function renderTab(agg: EventAggregate, refresh = vi.fn(async () => {})) {
-  renderWithProviders(
+  const { router } = renderWithProviders(
     <EventProvider eventId="ev1" agg={agg} refresh={refresh} patchAgg={vi.fn()}>
       <EntriesTab />
     </EventProvider>,
   );
-  return { refresh };
+  return { refresh, router };
 }
 
 beforeEach(() => {
@@ -171,6 +171,67 @@ describe('creating a team entry', () => {
     expect(screen.getByTestId('entry-save')).toBeInTheDocument(); // modal stayed open
   });
 
+  it('selects a member with the keyboard (ArrowDown + Enter) and exposes combobox ARIA', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('new-entry'));
+    const input = screen.getByTestId('entry-member-0');
+    expect(input).toHaveAttribute('role', 'combobox');
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+
+    await user.type(input, 'Ana');
+    expect(input).toHaveAttribute('aria-expanded', 'true');
+    expect(await screen.findByRole('listbox')).toBeInTheDocument();
+
+    await user.keyboard('{ArrowDown}');
+    const option = screen.getByTestId('entry-member-0-option-a1');
+    expect(option).toHaveAttribute('aria-selected', 'true');
+    expect(input).toHaveAttribute('aria-activedescendant', option.id);
+
+    await user.keyboard('{Enter}');
+    expect(input).toHaveValue('Ana Souza');
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+
+  it('closes the suggestion list on Escape without picking anything', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('new-entry'));
+    const input = screen.getByTestId('entry-member-0');
+    await user.type(input, 'Ana');
+    expect(await screen.findByRole('listbox')).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+    expect(input).toHaveValue('');
+    // Escape closed only the popup, not the whole "Nova inscrição" dialog.
+    expect(screen.getByTestId('entry-save')).toBeInTheDocument();
+  });
+
+  it('reaches "+ Novo atleta" by keyboard and opens the inline athlete form', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('new-entry'));
+    const input = screen.getByTestId('entry-member-0');
+    await user.type(input, 'Carla'); // matches neither Ana nor Beto
+    await screen.findByRole('listbox');
+
+    await user.keyboard('{ArrowDown}');
+    const createOption = screen.getByText('+ Novo atleta');
+    expect(createOption).toHaveAttribute('aria-selected', 'true');
+
+    await user.keyboard('{Enter}');
+    expect(await screen.findByTestId('athlete-name')).toBeInTheDocument();
+  });
+
   it('creates a new athlete inline from the member picker and saves the entry with its id', async () => {
     const user = userEvent.setup();
     saveAthlete.mockResolvedValue(makeAthlete({ id: 'a9', name: 'Carla Nova', sex: 'F' }));
@@ -280,5 +341,20 @@ describe('bulk entry dialog', () => {
     await user.click(screen.getByTestId('bulk-entries'));
     expect(screen.getByText(/nenhuma prova individual/i)).toBeInTheDocument();
     expect(screen.getByTestId('bulk-confirm')).toBeDisabled();
+  });
+});
+
+describe('import shortcut (Ruling 51)', () => {
+  it('keeps the exact hint text and navigates to /atletas asking it to open the import dialog', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r1', team_size: 1 });
+    const { router } = renderTab(makeAgg({ races: [race] }));
+
+    expect(screen.getByText(/a coluna Prova inscreve automaticamente em provas individuais/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Importar atletas' }));
+
+    expect(router.state.location.pathname).toBe('/atletas');
+    expect(router.state.location.search).toBe('?import=1');
   });
 });

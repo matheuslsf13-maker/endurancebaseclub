@@ -1,13 +1,13 @@
 import { useId, useState } from 'react';
-import type { ChangeEvent } from 'react';
+import type { ChangeEvent, KeyboardEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Input, Modal, Select, Textarea } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import type { AthleteRow, EntryRow, RaceRow } from '../../lib/types';
 import { useEventContext } from '../events/EventContext';
 import { AthleteForm } from '../athletes/AthleteForm';
-import { emptyEntryForm, entryToForm, foldAccents, setLegOwner, setMember, setRace, toSavePayload, validateEntryForm } from './entryForm';
-import type { EntryFormState } from './entryForm';
+import { emptyEntryForm, entryToForm, foldAccents, setLegOwner, setMember, setRace, toSavePayload, validateEntryForm } from './entryFormState';
+import type { EntryFormState } from './entryFormState';
 
 export interface EntryFormProps {
   /** Present when editing an existing entry. */
@@ -29,9 +29,10 @@ interface MemberPickerProps {
   onCreateNew(): void;
 }
 
-/** A searchable athlete combobox: a text field that filters `athletes` (diacritic-insensitive)
- * as the organizer types, plus a "+ Novo atleta" row to create one on the fly. Kept local to this
- * form — no other screen needs an athlete-picking combobox.
+/** A searchable athlete combobox following the WAI-ARIA "combobox with listbox popup" pattern: a
+ * text field that filters `athletes` (diacritic-insensitive) as the organizer types, plus a
+ * "+ Novo atleta" row to create one on the fly. Kept local to this form — no other screen needs
+ * an athlete-picking combobox.
  *
  * The field shows the *resolved* selected name (looked up from `athletes` + `value`) whenever the
  * dropdown is closed, and free-typed search text while it's open — never a copy of the name held
@@ -39,26 +40,101 @@ interface MemberPickerProps {
  * mount, then only re-seeding when `value` itself changed, left an editor's picker blank forever
  * whenever the athlete list was still loading at mount (the common case — `value` never changes
  * again once an existing entry is being edited, so the name was never picked up once the list
- * arrived). */
+ * arrived).
+ *
+ * Keyboard: ArrowDown/ArrowUp move a highlighted item (visually and via `aria-activedescendant`;
+ * the "+ Novo atleta" row is the last item, so it is always reachable), Enter activates whatever
+ * is highlighted (an athlete or "+ Novo atleta"), Escape closes the popup. Mouse selection
+ * (onMouseDown-guarded so it survives the input's blur) keeps working exactly as before. */
 function MemberPicker({ index, label, athletes, value, onChange, onCreateNew }: MemberPickerProps) {
   const fieldId = useId();
+  const listboxId = useId();
   const [open, setOpen] = useState(false);
   const [searchText, setSearchText] = useState('');
+  const [highlighted, setHighlighted] = useState(-1);
 
   const selectedName = athletes.find((a) => a.id === value)?.name ?? '';
   const displayValue = open ? searchText : selectedName;
 
   const term = foldAccents(searchText.trim());
   const matches = (term ? athletes.filter((a) => foldAccents(a.name).includes(term)) : athletes).slice(0, MAX_SUGGESTIONS);
+  // "+ Novo atleta" is always the last item in the list, so keyboard nav can always reach it.
+  const createIndex = matches.length;
+  const itemCount = matches.length + 1;
+
+  function optionId(i: number) {
+    return `${listboxId}-option-${i}`;
+  }
+
+  function openList() {
+    setSearchText('');
+    setOpen(true);
+    setHighlighted(-1);
+  }
+
+  function closeList() {
+    setOpen(false);
+    setHighlighted(-1);
+  }
 
   function handleChange(e: ChangeEvent<HTMLInputElement>) {
     setSearchText(e.target.value);
+    setHighlighted(-1);
   }
 
   function pick(a: AthleteRow) {
     onChange(a.id);
-    setOpen(false);
+    closeList();
   }
+
+  function activateCreate() {
+    closeList();
+    onCreateNew();
+  }
+
+  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        if (!open) {
+          setOpen(true);
+          setHighlighted(0);
+        } else {
+          setHighlighted((h) => (h + 1) % itemCount);
+        }
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        if (!open) {
+          setOpen(true);
+          setHighlighted(itemCount - 1);
+        } else {
+          setHighlighted((h) => (h <= 0 ? itemCount - 1 : h - 1));
+        }
+        break;
+      case 'Enter':
+        if (!open || highlighted < 0) return;
+        e.preventDefault();
+        if (highlighted === createIndex) activateCreate();
+        else pick(matches[highlighted]);
+        break;
+      case 'Escape':
+        if (open) {
+          e.preventDefault();
+          // Also stops the kit Modal's own document-level Escape listener (Modal.tsx) from
+          // seeing this key: without it, Escape would close the popup *and* the whole dialog
+          // in the same keystroke, since that listener sits on `document` too and
+          // `stopPropagation` alone does not block another listener on the same node.
+          e.nativeEvent.stopImmediatePropagation();
+          closeList();
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  const activeDescendant = open && highlighted >= 0 ? optionId(highlighted) : undefined;
 
   return (
     <div className="relative flex flex-col gap-1.5">
@@ -68,25 +144,36 @@ function MemberPicker({ index, label, athletes, value, onChange, onCreateNew }: 
       <input
         id={fieldId}
         data-testid={`entry-member-${index}`}
+        role="combobox"
+        aria-expanded={open}
+        aria-controls={listboxId}
+        aria-autocomplete="list"
+        aria-activedescendant={activeDescendant}
         className="w-full min-h-11 rounded-xl border border-border bg-surface px-3 py-2 text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         placeholder="Buscar atleta"
         autoComplete="off"
         value={displayValue}
         onChange={handleChange}
-        onFocus={() => {
-          setSearchText('');
-          setOpen(true);
-        }}
-        onBlur={() => setOpen(false)}
+        onFocus={openList}
+        onBlur={closeList}
+        onKeyDown={handleKeyDown}
       />
       {open && (
-        <div className="absolute top-full z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-border bg-surface shadow-lg">
-          {matches.map((a) => (
+        <div
+          id={listboxId}
+          role="listbox"
+          aria-label={label}
+          className="absolute top-full z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-border bg-surface shadow-lg"
+        >
+          {matches.map((a, i) => (
             <button
               key={a.id}
+              id={optionId(i)}
               type="button"
+              role="option"
+              aria-selected={highlighted === i}
               data-testid={`entry-member-${index}-option-${a.id}`}
-              className="block w-full px-3 py-2 text-left text-sm hover:bg-surface-2"
+              className={`block w-full px-3 py-2 text-left text-sm ${highlighted === i ? 'bg-surface-2' : 'hover:bg-surface-2'}`}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => pick(a)}
             >
@@ -95,13 +182,13 @@ function MemberPicker({ index, label, athletes, value, onChange, onCreateNew }: 
           ))}
           {matches.length === 0 && <p className="px-3 py-2 text-sm text-muted">Nenhum atleta encontrado</p>}
           <button
+            id={optionId(createIndex)}
             type="button"
-            className="block w-full border-t border-border px-3 py-2 text-left text-sm font-semibold text-fg hover:bg-surface-2"
+            role="option"
+            aria-selected={highlighted === createIndex}
+            className={`block w-full border-t border-border px-3 py-2 text-left text-sm font-semibold text-fg ${highlighted === createIndex ? 'bg-surface-2' : 'hover:bg-surface-2'}`}
             onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              setOpen(false);
-              onCreateNew();
-            }}
+            onClick={activateCreate}
           >
             + Novo atleta
           </button>
