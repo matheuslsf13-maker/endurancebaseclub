@@ -511,6 +511,29 @@ describe('ThemeToggle', () => {
     expect(window.localStorage.getItem('ebc.theme')).toBe('dark');
   });
 
+  it('C-Minor-19: keeps the theme-color meta tag in sync with the active theme', async () => {
+    const user = userEvent.setup();
+    const meta = document.createElement('meta');
+    meta.setAttribute('name', 'theme-color');
+    meta.setAttribute('content', '#191513');
+    document.head.appendChild(meta);
+
+    render(<ThemeToggle />);
+    await user.click(screen.getByRole('button'));
+    expect(meta.getAttribute('content')).toBe('#F4F1EC');
+
+    await user.click(screen.getByRole('button'));
+    expect(meta.getAttribute('content')).toBe('#191513');
+
+    meta.remove();
+  });
+
+  it('C-Minor-17: the label names the action, not the current mode (no ambiguous aria-pressed)', () => {
+    render(<ThemeToggle />);
+    // dark is active (beforeEach) — the action is "switch to day mode".
+    expect(screen.getByRole('button', { name: 'Modo sol' })).not.toHaveAttribute('aria-pressed');
+  });
+
   it('each theme declares its color-scheme, so native controls follow it (Task 28 E2E)', () => {
     // Without it the dark theme kept light native widgets: white scrollbars and a dark calendar
     // icon on the dark date field. jsdom does not apply stylesheets, so the rule is read from
