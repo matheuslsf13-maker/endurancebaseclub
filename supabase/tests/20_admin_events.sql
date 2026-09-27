@@ -154,6 +154,49 @@ do $$ declare r4 jsonb; begin
     'an explicit "waves": null must behave exactly like an absent key (Ruling 12)';
 end $$;
 
+-- C-I3: a wave that already started, or that still has entries, is never deleted by a save that
+-- leaves it out -- the recorded start (and every entry's leg-1 time) would silently vanish. The
+-- refusal names the wave.
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object(
+  'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
+  'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'waves', '[]'::jsonb
+))$$, 'P0001', 'Não é possível remover a onda "Largada geral" porque ela já largou');
+do $$ declare r6 jsonb; begin
+  r6 := public.admin_save_race(jsonb_build_object(
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'waves', jsonb_build_array(
+      jsonb_build_object('id', tests.get('wave'), 'name', 'Largada geral', 'position', 0),
+      jsonb_build_object('name', 'Onda 2', 'position', 1))
+  ));
+  assert jsonb_array_length(r6 -> 'waves') = 2;
+  perform tests.set('wave2', r6 -> 'waves' -> 1 ->> 'id');
+end $$;
+reset role;
+update public.entries set wave_id = tests.get('wave2')::uuid where race_id = tests.get('race')::uuid;
+select tests.as_user(tests.get('owner')::uuid);
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object(
+  'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
+  'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'waves', jsonb_build_array(jsonb_build_object('id', tests.get('wave'), 'name', 'Largada geral', 'position', 0))
+))$$, 'P0001', 'Não é possível remover a onda "Onda 2" porque ela tem 1 inscrição');
+-- once its entry moves back to the first wave, "Onda 2" (no start, no entries) can be removed.
+reset role;
+update public.entries set wave_id = null where race_id = tests.get('race')::uuid;
+select tests.as_user(tests.get('owner')::uuid);
+do $$ declare r7 jsonb; begin
+  r7 := public.admin_save_race(jsonb_build_object(
+    'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'waves', jsonb_build_array(jsonb_build_object('id', tests.get('wave'), 'name', 'Largada geral', 'position', 0))
+  ));
+  assert jsonb_array_length(r7 -> 'waves') = 1 and (r7 -> 'waves' -> 0 ->> 'id') = tests.get('wave'),
+    'a wave with no start and no entries is still removed by a save that leaves it out';
+  -- clear the recorded start so the next block can exercise the "zero waves" path.
+  perform public.admin_set_wave_start(tests.get('wave')::uuid, null);
+end $$;
+
 -- A present, non-empty waves array still upserts by id and deletes waves missing from it; when
 -- it ends with zero waves, a fresh "Largada geral" is created (unlike the absent/null cases above).
 do $$ declare r5 jsonb; begin
@@ -167,6 +210,164 @@ do $$ declare r5 jsonb; begin
     and (r5 -> 'waves' -> 0 ->> 'start_at') is null,
     'a present empty waves array must delete existing waves and create a fresh default, unlike an absent/null key';
 end $$;
+
+-- A-M8: the wave upsert never re-parents another race's wave (with its start_at), and an UPDATE
+-- never moves a race to another event.
+do $$ declare other jsonb; begin
+  other := public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'Outra prova',
+    'legs', '[{"modality":"run","label":"Corrida","distance_m":3000}]'::jsonb));
+  perform tests.set('race_other', other -> 'race' ->> 'id');
+  perform tests.set('wave_other', other -> 'waves' -> 0 ->> 'id');
+end $$;
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object(
+  'id', tests.get('race'), 'event_id', tests.get('ev'), 'name', 'Revezamento (renomeada 2)', 'team_size', 2,
+  'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'waves', jsonb_build_array(jsonb_build_object('id', tests.get('wave_other'), 'name', 'Roubada', 'position', 0))
+))$$, 'P0001', 'Onda inválida');
+do $$ declare agg jsonb; begin
+  agg := public.admin_get_event(tests.get('ev')::uuid);
+  assert exists (
+    select 1 from jsonb_array_elements(agg -> 'waves') w
+    where w ->> 'id' = tests.get('wave_other') and w ->> 'race_id' = tests.get('race_other') and w ->> 'name' = 'Largada geral'
+  ), 'another race''s wave must stay where it was, untouched';
+end $$;
+do $$ declare ev_b jsonb; begin
+  ev_b := public.admin_save_event('{"name":"Outro evento","date":"2026-12-01"}');
+  perform tests.set('ev_b', ev_b ->> 'id');
+end $$;
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object(
+  'id', tests.get('race_other'), 'event_id', tests.get('ev_b'), 'name', 'Outra prova',
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":3000}]'::jsonb
+))$$, 'P0001', 'Não é possível mover a prova para outro evento');
+
+-- A-I1: a duplicated event has no timekeepers, so a copied race must not keep the source event's
+-- reference timekeeper (not even a stale one left behind after switching back to the median) --
+-- otherwise every later save of the copy, which always sends the full config (Ruling 14), fails.
+do $$ declare ev jsonb; reg jsonb; dup uuid; agg jsonb; rc jsonb; rr jsonb; begin
+  ev := public.admin_save_event('{"name":"Copa Referência","date":"2026-10-18"}');
+  reg := public.tk_register(ev ->> 'tk_token', 'Ana', 'iPhone');
+  perform tests.set('tk_ref', reg ->> 'timekeeper_id');
+  perform public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'A Referência', 'position', 0,
+    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'config', jsonb_build_object('time_source', 'reference', 'reference_timekeeper_id', reg ->> 'timekeeper_id')));
+  perform public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'B Mediana', 'position', 1,
+    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'config', jsonb_build_object('time_source', 'median', 'reference_timekeeper_id', reg ->> 'timekeeper_id')));
+
+  dup := public.admin_duplicate_event((ev ->> 'id')::uuid, 'Copa Referência 2027', '2027-10-17');
+  perform tests.set('ev_dup', dup::text);
+  agg := public.admin_get_event(dup);
+  assert jsonb_array_length(agg -> 'races') = 2;
+  for rr in select el from jsonb_array_elements(agg -> 'races') as t(el) loop
+    rc := rr -> 'config';
+    assert (rc -> 'reference_timekeeper_id') = 'null'::jsonb,
+      'the copy must not keep the source event''s reference timekeeper, got ' || coalesce(rc ->> 'reference_timekeeper_id', '<null>');
+    assert rc ->> 'time_source' = 'median', 'a copied "reference" race falls back to the median, got ' || (rc ->> 'time_source');
+    -- the copied race saves again exactly as the race editor sends it (full config).
+    perform public.admin_save_race(jsonb_build_object('id', rr ->> 'id', 'event_id', dup, 'name', rr ->> 'name',
+      'team_size', (rr ->> 'team_size')::int, 'legs', rr -> 'legs', 'config', rc));
+  end loop;
+end $$;
+-- the reference timekeeper is validated only when the time source actually uses it.
+do $$ declare r jsonb; begin
+  r := public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_dup'), 'name', 'C Mediana',
+    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'config', jsonb_build_object('time_source', 'median', 'reference_timekeeper_id', tests.get('tk_ref'))));
+  assert r -> 'race' -> 'config' ->> 'time_source' = 'median';
+end $$;
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_dup'), 'name', 'D Referência',
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'config', jsonb_build_object('time_source', 'reference', 'reference_timekeeper_id', tests.get('tk_ref'))))$$,
+  'P0001', 'Cronometrista de referência inválido');
+
+-- B1-I2: entry_members.legs are materialized when an entry is created, so a race's format cannot
+-- silently drift away from them. Individual race: a leg-count change rewrites every entry's lone
+-- member to cover legs 0..N-1. Team size, and a team race's leg count, cannot change with entries.
+do $$ declare ev jsonb; ri jsonb; a1 jsonb; a2 jsonb; agg jsonb; begin
+  ev := public.admin_save_event('{"name":"Copa Formato","date":"2026-10-25"}');
+  perform tests.set('ev_fmt', ev ->> 'id');
+  ri := public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'Corrida 5 km', 'team_size', 1,
+        'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb));
+  perform tests.set('race_fmt', ri -> 'race' ->> 'id');
+  a1 := public.admin_save_athlete('{"name":"Formato Um","sex":"F"}'::jsonb);
+  a2 := public.admin_save_athlete('{"name":"Formato Dois","sex":"M"}'::jsonb);
+  perform tests.set('ath_fmt_1', a1 ->> 'id');
+  perform tests.set('ath_fmt_2', a2 ->> 'id');
+  perform public.admin_bulk_create_entries((ri -> 'race' ->> 'id')::uuid, array[(a1 ->> 'id')::uuid, (a2 ->> 'id')::uuid]);
+
+  perform public.admin_save_race(jsonb_build_object('id', tests.get('race_fmt'), 'event_id', ev ->> 'id', 'name', 'Duathlon', 'team_size', 1,
+    'legs', '[{"modality":"run","label":"Corrida 1","distance_m":2500},{"modality":"bike","label":"Ciclismo","distance_m":10000},{"modality":"run","label":"Corrida 2","distance_m":2500}]'::jsonb));
+  agg := public.admin_get_event((ev ->> 'id')::uuid);
+  assert jsonb_array_length(agg -> 'entries') = 2;
+  assert not exists (
+    select 1 from jsonb_array_elements(agg -> 'entries') en, jsonb_array_elements(en -> 'members') m
+    where m -> 'legs' <> '[0, 1, 2]'::jsonb
+  ), 'an individual race going from 1 to 3 legs must give every lone member legs [0,1,2], got ' || (agg -> 'entries')::text;
+
+  perform public.admin_save_race(jsonb_build_object('id', tests.get('race_fmt'), 'event_id', ev ->> 'id', 'name', 'Corrida', 'team_size', 1,
+    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000},{"modality":"run","label":"Volta extra","distance_m":1000}]'::jsonb));
+  agg := public.admin_get_event((ev ->> 'id')::uuid);
+  assert not exists (
+    select 1 from jsonb_array_elements(agg -> 'entries') en, jsonb_array_elements(en -> 'members') m
+    where m -> 'legs' <> '[0, 1]'::jsonb
+  ), 'shrinking to 2 legs must give every lone member legs [0,1], got ' || (agg -> 'entries')::text;
+end $$;
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('id', tests.get('race_fmt'), 'event_id', tests.get('ev_fmt'),
+  'name', 'Corrida', 'team_size', 2,
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":5000},{"modality":"run","label":"Volta extra","distance_m":1000}]'::jsonb))$$,
+  'P0001', 'Não é possível alterar o tamanho da equipe com inscrições');
+do $$ declare rt jsonb; a3 jsonb; begin
+  rt := public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_fmt'), 'name', 'Dupla', 'team_size', 2,
+        'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb));
+  perform tests.set('race_fmt_team', rt -> 'race' ->> 'id');
+  a3 := public.admin_save_athlete('{"name":"Formato Três","sex":"F"}'::jsonb);
+  perform public.admin_save_entry(jsonb_build_object('race_id', rt -> 'race' ->> 'id', 'team_name', 'Dupla F',
+    'members', jsonb_build_array(
+      jsonb_build_object('athlete_id', tests.get('ath_fmt_1'), 'legs', jsonb_build_array(0)),
+      jsonb_build_object('athlete_id', a3 ->> 'id', 'legs', jsonb_build_array(1)))));
+end $$;
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('id', tests.get('race_fmt_team'), 'event_id', tests.get('ev_fmt'),
+  'name', 'Dupla', 'team_size', 2,
+  'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"bike","label":"Ciclismo","distance_m":10000},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb))$$,
+  'P0001', 'Não é possível alterar o número de pernas de uma prova por equipes com inscrições');
+-- the same leg count (only labels/distances edited) still saves.
+do $$ declare r jsonb; begin
+  r := public.admin_save_race(jsonb_build_object('id', tests.get('race_fmt_team'), 'event_id', tests.get('ev_fmt'),
+    'name', 'Dupla', 'team_size', 2,
+    'legs', '[{"modality":"swim","label":"Natação 1 km","distance_m":1000},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb));
+  assert r -> 'race' -> 'legs' -> 0 ->> 'label' = 'Natação 1 km';
+end $$;
+
+-- A-M5: a long event name never makes creation fail on the public address the organizer never
+-- typed: the name part of the generated slug is capped, the date is always kept, and the -N
+-- suffix never pushes it past 80 characters.
+do $$ declare v_long text := repeat('Desafio Internacional ', 6); e1 jsonb; e2 jsonb; e3 jsonb; begin
+  e1 := public.admin_save_event(jsonb_build_object('name', v_long, 'date', '2026-10-11'));
+  assert length(e1 ->> 'public_slug') <= 80 and (e1 ->> 'public_slug') ~ '^[a-z0-9-]{3,80}$',
+    'generated slug must be valid, got ' || coalesce(e1 ->> 'public_slug', '<null>');
+  assert (e1 ->> 'public_slug') like 'desafio-internacional-%-2026-10-11' and (e1 ->> 'public_slug') not like '%--%',
+    'the capped name keeps the date and has no doubled hyphen, got ' || (e1 ->> 'public_slug');
+  e2 := public.admin_save_event(jsonb_build_object('name', v_long, 'date', '2026-10-11'));
+  assert (e2 ->> 'public_slug') like '%-2026-10-11-2' and length(e2 ->> 'public_slug') <= 80,
+    'the collision suffix keeps the slug valid, got ' || (e2 ->> 'public_slug');
+  -- making public an event whose slug was cleared regenerates it the same way.
+  e3 := public.admin_save_event(jsonb_build_object('id', e1 ->> 'id', 'public_slug', '', 'is_public', true));
+  assert (e3 ->> 'public_slug') ~ '^[a-z0-9-]{3,80}$', 'regenerated slug must be valid, got ' || coalesce(e3 ->> 'public_slug', '<null>');
+  -- an 80-character slug already taken: the next candidate is trimmed to fit its suffix.
+  e3 := public.admin_save_event('{"name":"Slug longo","date":"2026-10-11"}'::jsonb);
+  perform public.admin_save_event(jsonb_build_object('id', e3 ->> 'id', 'public_slug', repeat('a', 80)));
+end $$;
+reset role;
+do $$ declare v text; begin
+  v := public.next_unique_public_slug(repeat('a', 80));
+  assert v = repeat('a', 78) || '-2', 'next_unique_public_slug must stay within 80 characters, got ' || v;
+end $$;
+select tests.as_user(tests.get('owner')::uuid);
+
+-- C-Minor-2: an empty or malformed event date is a pt-BR validation error, not a raw cast error.
+select tests.assert_raises($$select public.admin_save_event('{"name":"Sem data","date":""}'::jsonb)$$, 'P0001', 'Informe a data do evento');
+select tests.assert_raises($$select public.admin_save_event('{"name":"Data ruim","date":"31/02/2026"}'::jsonb)$$, 'P0001', 'Informe a data do evento');
+select tests.assert_raises($$select public.admin_save_event(jsonb_build_object('id', tests.get('ev'), 'date', ''))$$, 'P0001', 'Informe a data do evento');
 
 -- organizers
 do $$ declare o jsonb; begin
