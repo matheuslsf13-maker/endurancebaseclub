@@ -292,9 +292,11 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
       toast.dismiss(id);
       fn();
     };
-    // Opaque, with the actions under the text; taps pass through all but its buttons (B2-m1).
+    // Opaque, with the actions under the text; taps pass through all but its buttons (B2-m1), so
+    // it can stay long enough to reach Desfazer.
     id = toast.show({
       testid: 'assign-toast',
+      durationMs: 8_000,
       message: (
         <div className="flex flex-col gap-1">
           <p className="font-semibold">

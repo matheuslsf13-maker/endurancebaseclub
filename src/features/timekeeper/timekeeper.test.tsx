@@ -1393,7 +1393,11 @@ describe('final fix wave: the timekeeper app', () => {
     expect(error).toHaveClass('pointer-events-none');
     expect(error.closest('.pointer-events-auto')).toBeNull();
 
+    // The error goes after 5 s; the assignment stays 8 s (time to reach Desfazer), then goes.
     await flush(5 * SEC);
+    expect(screen.queryByText('Digite o nº de peito')).not.toBeInTheDocument();
+    expect(screen.getByTestId('assign-toast')).toBeInTheDocument();
+    await flush(3 * SEC);
     expect(screen.queryByTestId('assign-toast')).not.toBeInTheDocument();
   });
 
