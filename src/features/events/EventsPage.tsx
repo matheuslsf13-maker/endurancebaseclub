@@ -40,7 +40,8 @@ export default function EventsPage() {
   async function handleDelete(ev: EventSummary) {
     const ok = await confirm({
       title: `Excluir "${ev.name}"?`,
-      message: 'Provas, inscrições e marcações desse evento serão apagadas. Essa ação não pode ser desfeita.',
+      message:
+        'Provas, inscrições, marcações e resultados finalizados desse evento serão apagados, inclusive nas estatísticas dos atletas. Essa ação não pode ser desfeita.',
       confirmLabel: 'Excluir',
       danger: true,
     });
@@ -183,6 +184,11 @@ function CreateEventModal({
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    // C-Minor-2: `noValidate` (below) drops the native `required` check.
+    if (!date.trim()) {
+      setError('Informe a data do evento');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -277,6 +283,10 @@ function DuplicateEventModal({
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (!date.trim()) {
+      setError('Informe a data do evento');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {

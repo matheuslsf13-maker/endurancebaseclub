@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { useNavigate } from 'react-router';
+import { useBlocker, useNavigate } from 'react-router';
+import { useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Checkbox, Input, Select, Textarea, useConfirm, useToast } from '../../components/ui';
 import { api } from '../../lib/api';
 import type { EventRow, EventStatus } from '../../lib/types';
@@ -19,6 +20,8 @@ export default function EventGeneralTab() {
   const navigate = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
+  const queryClient = useQueryClient();
+  const [dateError, setDateError] = useState<string | null>(null);
 
   const [name, setName] = useState(event.name);
   const [date, setDate] = useState(event.date);
@@ -81,8 +84,33 @@ export default function EventGeneralTab() {
     setDirty(true);
   }
 
+  // C-Minor-6: leaving this tab (another tab, browser back) with unsaved edits is silent today.
+  const blocker = useBlocker(dirty);
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return;
+    void (async () => {
+      const ok = await confirm({
+        title: 'Sair sem salvar?',
+        message: 'Este evento tem alterações não salvas. Elas serão perdidas se você sair agora.',
+        confirmLabel: 'Sair sem salvar',
+        danger: true,
+      });
+      if (ok) blocker.proceed?.();
+      else blocker.reset?.();
+    })();
+    // `confirm` is stable (useCallback in ConfirmProvider); only react to the blocker itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocker.state]);
+
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    // C-Minor-2: `noValidate` (above) drops the native `required` check, and an empty date
+    // otherwise reaches the server as a raw cast error ("invalid input syntax for type date").
+    if (!date.trim()) {
+      setDateError('Informe a data do evento');
+      return;
+    }
+    setDateError(null);
     setBusy(true);
     try {
       await api.admin.saveEvent({
@@ -112,7 +140,10 @@ export default function EventGeneralTab() {
   async function onDelete() {
     const ok = await confirm({
       title: `Excluir "${event.name}"?`,
-      message: 'Provas, inscrições e marcações desse evento serão apagadas. Essa ação não pode ser desfeita.',
+      // C-Minor-4: the previous copy only named provas/inscrições/marcações — finalizing a race
+      // also freezes results into the athletes' histories and stats, which this erases too.
+      message:
+        'Provas, inscrições, marcações e resultados finalizados desse evento serão apagados, inclusive nas estatísticas dos atletas. Essa ação não pode ser desfeita.',
       confirmLabel: 'Excluir evento',
       danger: true,
     });
@@ -120,6 +151,10 @@ export default function EventGeneralTab() {
     setDeleting(true);
     try {
       await api.admin.deleteEvent(event.id);
+      // C-Minor-13: without this, the deleted event could still flash in the list (stale
+      // `['events']` cache) and be opened again from it, only to fail loading.
+      await queryClient.invalidateQueries({ queryKey: ['events'] });
+      queryClient.removeQueries({ queryKey: ['event', event.id] });
       toast.show({ message: 'Evento excluído', tone: 'success' });
       navigate('/eventos');
     } catch (err) {
@@ -161,7 +196,11 @@ export default function EventGeneralTab() {
             type="date"
             required
             value={date}
-            onChange={(e) => edited(setDate, e.target.value)}
+            onChange={(e) => {
+              setDateError(null);
+              edited(setDate, e.target.value);
+            }}
+            error={dateError ?? undefined}
             data-testid="event-date"
           />
           <Input
@@ -197,7 +236,12 @@ export default function EventGeneralTab() {
         />
         {isPublic && (
           <div className="flex flex-col gap-2">
-            <Input label="Endereço público (slug)" value={slug} onChange={(e) => edited(setSlug, e.target.value)} />
+            <Input
+              label="Endereço público"
+              hint="Parte final do link — ex.: corrida-de-verao-2026"
+              value={slug}
+              onChange={(e) => edited(setSlug, e.target.value)}
+            />
             <div className="flex flex-wrap items-center gap-3">
               <p className="break-all text-sm text-muted tabular">…/#/p/{slug || '—'}</p>
               <Button type="button" size="sm" variant="secondary" onClick={() => void onCopyLink()}>
