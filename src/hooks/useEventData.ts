@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { mergeById } from '../domain/eventModel';
@@ -12,6 +12,10 @@ const OVERLAP_MS = 10_000;
 /** Live tabs also refetch the whole aggregate this often: admin_live carries no timekeepers, and
  * their registrations / last_seen_at do not bump the event version (Ruling 33). */
 const LIVE_FULL_REFRESH_MS = 30_000;
+/** A live tab whose last data from the server is older than this says so (B2-m8): a frozen board
+ * on race day must not look live. Checked every second. */
+const STALE_AFTER_MS = 10_000;
+const STALE_CHECK_MS = 1_000;
 
 export interface EventData {
   agg: EventAggregate | undefined;
@@ -19,6 +23,9 @@ export interface EventData {
   error: Error | null;
   refresh(): Promise<void>;
   patchAgg(fn: (a: EventAggregate) => EventAggregate): void;
+  /** On a live tab whose polls have failed for more than 10 s: when the data shown last came from
+   * the server (device time, ms). Null while the data is fresh, and on idle tabs. */
+  staleSince: number | null;
 }
 
 /** Where the mark delta stream stands: `serverNow` of the last applied delta, valid only while
@@ -153,5 +160,32 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
     return () => clearInterval(timer);
   }, [loaded, live, eventId, queryClient, refresh]);
 
-  return { agg: query.data, isLoading: query.isLoading, error: query.error, refresh, patchAgg };
+  // Stale data (B2-m8): polls swallow their errors and keep what they have, so the live tabs tell
+  // the organizer when what they show stopped being refreshed. The query's dataUpdatedAt moves
+  // with every successful poll or refetch; after the page comes back into view the polls get
+  // STALE_AFTER_MS to catch up before the warning shows.
+  const [staleSince, setStaleSince] = useState<number | null>(null);
+  const resumedAt = useRef(0);
+  useEffect(() => {
+    if (!loaded || !live) {
+      setStaleSince(null);
+      return;
+    }
+    const check = () => {
+      if (document.hidden) return;
+      const last = queryClient.getQueryState(['event', eventId])?.dataUpdatedAt ?? 0;
+      setStaleSince(Date.now() - Math.max(last, resumedAt.current) > STALE_AFTER_MS ? last : null);
+    };
+    const onVisibility = () => {
+      if (!document.hidden) resumedAt.current = Date.now();
+    };
+    const timer = setInterval(check, STALE_CHECK_MS);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [loaded, live, eventId, queryClient]);
+
+  return { agg: query.data, isLoading: query.isLoading, error: query.error, refresh, patchAgg, staleSince };
 }
