@@ -1,9 +1,9 @@
 import { act } from '@testing-library/react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from './ui';
-import { shouldPromptForUpdate, UpdatePrompt } from './UpdatePrompt';
+import { buildRegisterSWCallbacks, shouldPromptForUpdate, UpdatePrompt } from './UpdatePrompt';
 
 // Ruling 26: main.tsx dispatches this event (never on the timekeeper route) with an `update`
 // callback that wraps the service worker's own `updateSW(true)`; UpdatePrompt only wires it to
@@ -58,5 +58,69 @@ describe('shouldPromptForUpdate', () => {
     expect(shouldPromptForUpdate('#/eventos')).toBe(true);
     expect(shouldPromptForUpdate('#/')).toBe(true);
     expect(shouldPromptForUpdate('')).toBe(true);
+  });
+});
+
+describe('buildRegisterSWCallbacks', () => {
+  const originalLocation = window.location;
+
+  // jsdom's `window.location.reload` is not a configurable property, so `vi.spyOn` cannot stub it
+  // directly — the whole `location` object is swapped out instead (and restored after each test).
+  function mockLocation(hash: string): ReturnType<typeof vi.fn> {
+    const reload = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { ...originalLocation, hash, reload },
+      writable: true,
+      configurable: true,
+    });
+    return reload;
+  }
+
+  afterEach(() => {
+    Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+  });
+
+  it('onNeedReload never reloads the timekeeper route (Ruling 26: same-device reload hazard)', () => {
+    const reload = mockLocation('#/c/abc123');
+    const { onNeedReload } = buildRegisterSWCallbacks(() => vi.fn());
+
+    onNeedReload();
+
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('onNeedReload reloads on every other route', () => {
+    const reload = mockLocation('#/eventos');
+    const { onNeedReload } = buildRegisterSWCallbacks(() => vi.fn());
+
+    onNeedReload();
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('onNeedRefresh dispatches the toast event only once even when called twice (vite-plugin-pwa fires it from both listeners on a long-open tab)', () => {
+    window.location.hash = '#/eventos';
+    const update = vi.fn();
+    const { onNeedRefresh } = buildRegisterSWCallbacks(() => update);
+    const handler = vi.fn();
+    window.addEventListener('ebc:sw-need-refresh', handler);
+
+    onNeedRefresh();
+    onNeedRefresh();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    window.removeEventListener('ebc:sw-need-refresh', handler);
+  });
+
+  it('onNeedRefresh never dispatches on the timekeeper route', () => {
+    window.location.hash = '#/c/abc123';
+    const handler = vi.fn();
+    window.addEventListener('ebc:sw-need-refresh', handler);
+    const { onNeedRefresh } = buildRegisterSWCallbacks(() => vi.fn());
+
+    onNeedRefresh();
+
+    expect(handler).not.toHaveBeenCalled();
+    window.removeEventListener('ebc:sw-need-refresh', handler);
   });
 });

@@ -77,6 +77,7 @@ function EntryStatusModal({ entry, onClose, onSaved }: EntryStatusModalProps) {
       onClose={onClose}
       title="Status e penalidade"
       size="md"
+      closeOnBackdrop={false}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>
@@ -263,7 +264,7 @@ export default function EntriesTab() {
         </>
       )}
 
-      <Modal open={modal !== null} onClose={() => setModal(null)} title={modal === 'new' ? 'Nova inscrição' : 'Editar inscrição'} size="xl">
+      <Modal open={modal !== null} onClose={() => setModal(null)} title={modal === 'new' ? 'Nova inscrição' : 'Editar inscrição'} size="xl" closeOnBackdrop={false}>
         {modal !== null && (
           <EntryForm
             initial={modal === 'new' ? undefined : modal}

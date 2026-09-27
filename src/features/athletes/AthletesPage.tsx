@@ -168,7 +168,7 @@ export default function AthletesPage() {
         )}
       </div>
 
-      <Modal open={modal !== null} onClose={() => setModal(null)} title={modal === 'new' ? 'Novo atleta' : 'Editar atleta'} size="lg">
+      <Modal open={modal !== null} onClose={() => setModal(null)} title={modal === 'new' ? 'Novo atleta' : 'Editar atleta'} size="lg" closeOnBackdrop={false}>
         {modal !== null && (
           <AthleteForm initial={modal === 'new' ? undefined : modal} onSaved={handleSaved} onCancel={() => setModal(null)} />
         )}

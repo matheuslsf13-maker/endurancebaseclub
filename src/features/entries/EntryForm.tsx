@@ -121,11 +121,6 @@ function MemberPicker({ index, label, athletes, value, onChange, onCreateNew }: 
       case 'Escape':
         if (open) {
           e.preventDefault();
-          // Also stops the kit Modal's own document-level Escape listener (Modal.tsx) from
-          // seeing this key: without it, Escape would close the popup *and* the whole dialog
-          // in the same keystroke, since that listener sits on `document` too and
-          // `stopPropagation` alone does not block another listener on the same node.
-          e.nativeEvent.stopImmediatePropagation();
           closeList();
         }
         break;
@@ -388,7 +383,7 @@ export function EntryForm({ initial, defaultRaceId, onSaved, onCancel }: EntryFo
         </Button>
       </div>
 
-      <Modal open={creatingMember !== null} onClose={() => setCreatingMember(null)} title="Novo atleta" size="lg">
+      <Modal open={creatingMember !== null} onClose={() => setCreatingMember(null)} title="Novo atleta" size="lg" closeOnBackdrop={false}>
         {creatingMember !== null && (
           <AthleteForm onSaved={(a) => handleAthleteCreated(creatingMember, a)} onCancel={() => setCreatingMember(null)} />
         )}

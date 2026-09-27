@@ -122,6 +122,75 @@ describe('Modal', () => {
     );
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+
+  it('closeOnBackdrop={false} keeps a data-entry form open on a backdrop click', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <Modal open onClose={onClose} title="Nova inscrição" closeOnBackdrop={false}>
+        <p>Conteúdo</p>
+      </Modal>,
+    );
+    await user.click(screen.getByTestId('modal-backdrop'));
+    expect(onClose).not.toHaveBeenCalled();
+    // Escape still works — only the accidental-outside-tap path is disabled.
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Modal stacking (nested dialogs)', () => {
+  // Mirrors EntryForm's "+ Novo atleta" opening inside EntriesTab's "Nova/Editar inscrição"
+  // (the only nested-dialog case in the app, spec §12).
+  function NestedHarness() {
+    const [outerOpen, setOuterOpen] = useState(true);
+    const [innerOpen, setInnerOpen] = useState(false);
+    return (
+      <div>
+        <Modal open={outerOpen} onClose={() => setOuterOpen(false)} title="Editar inscrição">
+          <button onClick={() => setInnerOpen(true)}>+ Novo atleta</button>
+          <input aria-label="Nome da equipe" />
+          <Modal open={innerOpen} onClose={() => setInnerOpen(false)} title="Novo atleta">
+            <input aria-label="Nome" />
+            <button>Salvar atleta</button>
+          </Modal>
+        </Modal>
+      </div>
+    );
+  }
+
+  it('Escape closes only the inner dialog, keeping the outer form (and its typed input) open', async () => {
+    const user = userEvent.setup();
+    render(<NestedHarness />);
+    await user.click(screen.getByText('+ Novo atleta'));
+    expect(screen.getAllByRole('dialog')).toHaveLength(2);
+
+    await user.type(screen.getByLabelText('Nome'), 'Ana');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Editar inscrição' })).toBeInTheDocument();
+  });
+
+  it('Tab stays inside the inner dialog while it is open', async () => {
+    const user = userEvent.setup();
+    render(<NestedHarness />);
+    await user.click(screen.getByText('+ Novo atleta'));
+
+    const nameField = screen.getByLabelText('Nome');
+    const saveBtn = screen.getByText('Salvar atleta');
+    const closeInner = within(screen.getByRole('dialog', { name: 'Novo atleta' })).getByLabelText('Fechar');
+
+    expect(closeInner).toHaveFocus();
+    await user.tab();
+    expect(nameField).toHaveFocus();
+    await user.tab();
+    expect(saveBtn).toHaveFocus();
+    await user.tab();
+    expect(closeInner).toHaveFocus(); // wraps inside the inner dialog only — never reaches the outer one
+  });
 });
 
 describe('Modal focus management', () => {

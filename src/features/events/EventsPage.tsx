@@ -210,6 +210,7 @@ function CreateEventModal({
       open={open}
       onClose={handleClose}
       title="Novo evento"
+      closeOnBackdrop={false}
       footer={
         <>
           <Button variant="secondary" onClick={handleClose} disabled={busy}>
@@ -292,6 +293,7 @@ function DuplicateEventModal({
       open
       onClose={onClose}
       title={`Duplicar "${event.name}"`}
+      closeOnBackdrop={false}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={busy}>

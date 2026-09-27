@@ -100,6 +100,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
       onClose={onClose}
       title="Importar atletas"
       size="xl"
+      closeOnBackdrop={false}
       footer={
         result ? (
           <Button onClick={onClose}>Fechar</Button>

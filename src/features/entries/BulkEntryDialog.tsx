@@ -77,6 +77,7 @@ export function BulkEntryDialog({ open, onClose, onCreated }: BulkEntryDialogPro
       onClose={onClose}
       title="Inscrever vários atletas"
       size="lg"
+      closeOnBackdrop={false}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>

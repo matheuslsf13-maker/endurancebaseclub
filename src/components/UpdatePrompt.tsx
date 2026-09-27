@@ -18,6 +18,43 @@ interface NeedRefreshDetail {
   update: () => void;
 }
 
+export interface RegisterSWCallbacks {
+  onNeedRefresh: () => void;
+  onNeedReload: () => void;
+}
+
+/**
+ * Builds the two callbacks `registerSW` (virtual:pwa-register) needs, kept here — instead of
+ * inlined in main.tsx — so Ruling 26's guarantee has its own unit tests:
+ *
+ * - `onNeedRefresh`: dispatches the toast event exactly once per waiting build (vite-plugin-pwa
+ *   1.3.0 calls it from both the 'installed'(isExternal) and 'waiting' listeners for a tab open
+ *   more than ~60 s — without the guard the organizer sees the "Nova versão disponível" toast
+ *   twice), and never on `#/c/` (Ruling 26).
+ * - `onNeedReload`: workbox-window's default behaviour is `window.location.reload()` in *every*
+ *   controlled tab once another tab of the same origin applies the update (`controllerchange`).
+ *   That includes an open timekeeper tab — exactly the reload Ruling 26 exists to prevent, since a
+ *   MARCAR tap or a half-typed bib would be lost. Passing this callback instead means the
+ *   timekeeper tab only reloads on its own next launch, matching every other silent-update path.
+ *
+ * `getUpdate` is called lazily (only once a refresh is actually needed) so the caller can pass a
+ * reference to `updateSW` itself before that binding exists yet (registerSW returns it).
+ */
+export function buildRegisterSWCallbacks(getUpdate: () => () => void): RegisterSWCallbacks {
+  let notified = false;
+  return {
+    onNeedRefresh() {
+      if (!shouldPromptForUpdate(location.hash)) return;
+      if (notified) return;
+      notified = true;
+      window.dispatchEvent(new CustomEvent(EVENT, { detail: { update: getUpdate() } }));
+    },
+    onNeedReload() {
+      if (shouldPromptForUpdate(location.hash)) window.location.reload();
+    },
+  };
+}
+
 /**
  * Mounted once at the app root, inside the providers. main.tsx dispatches `ebc:sw-need-refresh`
  * whenever a new build is waiting to activate — never on the timekeeper route (Ruling 26): a
