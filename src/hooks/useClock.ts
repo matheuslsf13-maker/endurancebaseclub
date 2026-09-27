@@ -10,6 +10,9 @@ const STORAGE_KEY = 'ebc.clock';
 const INITIAL_SAMPLES = 5;
 const INITIAL_SPACING_MS = 300;
 const RESYNC_MS = 20_000;
+/** A saved offset older than this still applies until the first sample, but the screens warn
+ * "Relógio não sincronizado" (spec §7.2 saves the offset "com data"; B2-m4). */
+const SAVED_STATE_MAX_AGE_MS = 12 * 3_600_000;
 
 let clock: ClockSync | null = null;
 let started = false;
@@ -28,7 +31,7 @@ function getClock(): ClockSync {
   if (!clock) {
     // The offset saved by the last sync keeps times right after a reload without internet.
     const saved = readJSON<unknown>(safeLocalStorage(), STORAGE_KEY, null);
-    clock = new ClockSync({ initial: isClockState(saved) ? saved : null });
+    clock = new ClockSync({ initial: isClockState(saved) ? saved : null, maxInitialAgeMs: SAVED_STATE_MAX_AGE_MS });
   }
   return clock;
 }
