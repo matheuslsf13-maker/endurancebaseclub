@@ -126,7 +126,7 @@ export function AthleteForm({ initial, onSaved, onCancel }: AthleteFormProps) {
         onChange={(e) => setPublicProfile(e.target.checked)}
       />
       {formError && (
-        <p role="alert" className="text-sm text-danger">
+        <p role="alert" className="text-sm text-danger-text">
           {formError}
         </p>
       )}

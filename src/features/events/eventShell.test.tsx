@@ -206,7 +206,7 @@ describe('EventLayout', () => {
       expect(screen.getByTestId(`tab-${id}`)).toHaveAttribute('href', `/eventos/ev1/${id}`);
       expect(screen.getByTestId(`tab-${id}`)).toHaveTextContent(id === 'revisao' ? 'Revisão2' : label);
     }
-    expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-warning');
+    expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-warning-text');
   });
 
   it('colors the review badge as an error when a crossing is missing', async () => {
@@ -216,7 +216,7 @@ describe('EventLayout', () => {
 
     expect(await screen.findByTestId('page-event-general')).toBeInTheDocument();
     expect(screen.getByTestId('tab-revisao')).toHaveTextContent('Revisão1');
-    expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-danger');
+    expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-danger-text');
   });
 
   it('shows no review badge when nothing is pending', async () => {

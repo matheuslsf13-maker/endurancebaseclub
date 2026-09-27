@@ -13,7 +13,7 @@ function describedBy(fieldId: string, hint?: string, error?: string): string | u
 function FieldMessages({ fieldId, hint, error }: { fieldId: string; hint?: string; error?: string }) {
   if (error) {
     return (
-      <p id={`${fieldId}-error`} role="alert" className="text-sm text-danger">
+      <p id={`${fieldId}-error`} role="alert" className="text-sm text-danger-text">
         {error}
       </p>
     );

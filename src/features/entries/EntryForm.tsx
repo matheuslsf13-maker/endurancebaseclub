@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Input, Modal, Select, Textarea } from '../../components/ui';
@@ -24,6 +24,12 @@ interface MemberPickerProps {
   index: number;
   label: string;
   athletes: AthleteRow[];
+  /** Whether `athletes` is still loading (C-Minor-1): shown instead of "Nenhum atleta encontrado"
+   * so a slow connection never reads as an empty roster and tempts "+ Novo atleta" into creating a
+   * duplicate athlete. */
+  loading: boolean;
+  /** Whether the athlete list failed to load — shown instead of the empty state, for the same reason. */
+  loadError: boolean;
   value: string | null;
   onChange(id: string | null): void;
   onCreateNew(): void;
@@ -46,7 +52,7 @@ interface MemberPickerProps {
  * the "+ Novo atleta" row is the last item, so it is always reachable), Enter activates whatever
  * is highlighted (an athlete or "+ Novo atleta"), Escape closes the popup. Mouse selection
  * (onMouseDown-guarded so it survives the input's blur) keeps working exactly as before. */
-function MemberPicker({ index, label, athletes, value, onChange, onCreateNew }: MemberPickerProps) {
+function MemberPicker({ index, label, athletes, loading, loadError, value, onChange, onCreateNew }: MemberPickerProps) {
   const fieldId = useId();
   const listboxId = useId();
   const [open, setOpen] = useState(false);
@@ -175,7 +181,13 @@ function MemberPicker({ index, label, athletes, value, onChange, onCreateNew }: 
               {a.name}
             </button>
           ))}
-          {matches.length === 0 && <p className="px-3 py-2 text-sm text-muted">Nenhum atleta encontrado</p>}
+          {loading && <p className="px-3 py-2 text-sm text-muted">Carregando atletas…</p>}
+          {!loading && loadError && (
+            <p role="alert" className="px-3 py-2 text-sm text-danger-text">
+              Não foi possível carregar os atletas.
+            </p>
+          )}
+          {!loading && !loadError && matches.length === 0 && <p className="px-3 py-2 text-sm text-muted">Nenhum atleta encontrado</p>}
           <button
             id={optionId(createIndex)}
             type="button"
@@ -221,6 +233,14 @@ export function EntryForm({ initial, defaultRaceId, onSaved, onCancel }: EntryFo
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [creatingMember, setCreatingMember] = useState<number | null>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (errors.length > 0) {
+      errorRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      errorRef.current?.focus();
+    }
+  }, [errors]);
 
   const athletesQuery = useQuery({ queryKey: ['athletes'], queryFn: () => api.admin.listAthletes() });
   const athletes = athletesQuery.data ?? [];
@@ -278,10 +298,10 @@ export function EntryForm({ initial, defaultRaceId, onSaved, onCancel }: EntryFo
   return (
     <div className="flex flex-col gap-4">
       {errors.length > 0 && (
-        <div className="rounded-xl border border-danger/30 bg-danger/10 p-3">
+        <div ref={errorRef} tabIndex={-1} className="rounded-xl border border-danger/30 bg-danger/10 p-3 outline-none">
           <ul className="flex flex-col gap-1">
             {errors.map((e, i) => (
-              <li key={i} role="alert" className="text-sm text-danger">
+              <li key={i} role="alert" className="text-sm text-danger-text">
                 {e}
               </li>
             ))}
@@ -313,6 +333,8 @@ export function EntryForm({ initial, defaultRaceId, onSaved, onCancel }: EntryFo
             index={i}
             label={memberLabel(race, i)}
             athletes={athletes}
+            loading={athletesQuery.isLoading}
+            loadError={athletesQuery.isError}
             value={athleteId}
             onChange={(id) => setState((s) => setMember(s, i, id))}
             onCreateNew={() => setCreatingMember(i)}

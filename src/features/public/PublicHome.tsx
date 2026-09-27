@@ -72,7 +72,7 @@ export default function PublicHome() {
             </div>
           )}
           {error && (
-            <p role="alert" className="text-sm text-danger">
+            <p role="alert" className="text-sm text-danger-text">
               {error instanceof ApiError ? error.message : 'Não foi possível carregar os eventos.'}
             </p>
           )}

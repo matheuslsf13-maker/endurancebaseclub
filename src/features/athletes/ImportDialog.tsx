@@ -158,7 +158,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
         )}
 
         {readError && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {readError}
           </p>
         )}
@@ -169,7 +169,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
               {result.inserted} novos, {result.updated} atualizados, {result.entries_created} inscrições
             </p>
             {result.errors.length > 0 && (
-              <ul className="flex flex-col gap-1 text-sm text-danger">
+              <ul className="flex flex-col gap-1 text-sm text-danger-text">
                 {result.errors.map((e, i) => (
                   <li key={i}>
                     Linha {e.row}: {e.message}
@@ -182,10 +182,11 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
           mapped && (
             <div className="flex flex-col gap-3">
               <p className="text-sm text-fg">
-                {fileName} — {mapped.rows.length} atleta(s) válido(s), {mapped.errors.length} erro(s)
+                {fileName} — {mapped.rows.length} {mapped.rows.length === 1 ? 'atleta válido' : 'atletas válidos'},{' '}
+                {mapped.errors.length} {mapped.errors.length === 1 ? 'erro' : 'erros'}
               </p>
               {mapped.errors.length > 0 && (
-                <ul className="flex flex-col gap-1 text-sm text-danger">
+                <ul className="flex flex-col gap-1 text-sm text-danger-text">
                   {mapped.errors.map((e, i) => (
                     <li key={i}>
                       Linha {e.row}: {e.message}
@@ -230,7 +231,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
         )}
 
         {importError && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {importError}
           </p>
         )}

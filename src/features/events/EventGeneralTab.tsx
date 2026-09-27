@@ -138,7 +138,7 @@ export default function EventGeneralTab() {
   return (
     <form onSubmit={(e) => void onSubmit(e)} noValidate className="flex flex-col gap-6">
       {serverChanged && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning-text">
           <p>Os dados do evento mudaram em outro lugar — salve para sobrescrever ou recarregue.</p>
           <Button type="button" size="sm" variant="secondary" onClick={reloadFromServer}>
             Recarregar

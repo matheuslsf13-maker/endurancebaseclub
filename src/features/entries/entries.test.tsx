@@ -171,6 +171,40 @@ describe('creating a team entry', () => {
     expect(screen.getByTestId('entry-save')).toBeInTheDocument(); // modal stayed open
   });
 
+  it('C-I4: moves focus to the error banner after a failed save', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', team_size: 1 });
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('new-entry'));
+    await user.type(screen.getByTestId('entry-member-0'), 'Ana');
+    await user.click(await screen.findByTestId('entry-member-0-option-a1'));
+
+    const { ApiError } = await import('../../lib/api');
+    saveEntry.mockRejectedValueOnce(new ApiError('Nº já usado nesta prova'));
+    await user.click(screen.getByTestId('entry-save'));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.parentElement?.parentElement).toHaveFocus();
+  });
+
+  it('C-Minor-1: MemberPicker shows loading and error states instead of "Nenhum atleta encontrado"', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', team_size: 1 });
+    let resolveList!: (v: typeof ANA[]) => void;
+    listAthletes.mockReturnValue(new Promise((resolve) => { resolveList = resolve; }));
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('new-entry'));
+    await user.click(screen.getByTestId('entry-member-0'));
+    expect(screen.getByText('Carregando atletas…')).toBeInTheDocument();
+    expect(screen.queryByText('Nenhum atleta encontrado')).not.toBeInTheDocument();
+
+    resolveList([]);
+    await waitFor(() => expect(screen.queryByText('Carregando atletas…')).not.toBeInTheDocument());
+    expect(screen.getByText('Nenhum atleta encontrado')).toBeInTheDocument();
+  });
+
   it('selects a member with the keyboard (ArrowDown + Enter) and exposes combobox ARIA', async () => {
     const user = userEvent.setup();
     const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
@@ -341,6 +375,47 @@ describe('bulk entry dialog', () => {
     await user.click(screen.getByTestId('bulk-entries'));
     expect(screen.getByText(/nenhuma prova individual/i)).toBeInTheDocument();
     expect(screen.getByTestId('bulk-confirm')).toBeDisabled();
+  });
+
+  it('shows a pt-BR plural toast without an "(s)"/"(ões)" suffix, singular and plural (C-Minor-17)', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', name: 'Corrida 5km', team_size: 1 });
+    bulkCreateEntries.mockResolvedValue([makeEntry({ id: 'en1' })]);
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('bulk-entries'));
+    await user.click(await screen.findByText('Ana Souza'));
+    await user.click(screen.getByTestId('bulk-confirm'));
+
+    expect(await screen.findByText('1 inscrição criada')).toBeInTheDocument();
+    expect(screen.queryByText(/inscrição\(ões\)/)).not.toBeInTheDocument();
+  });
+
+  it('C-Minor-1: shows a loading state instead of "Nenhum atleta disponível" while the roster is loading', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', name: 'Corrida 5km', team_size: 1 });
+    let resolveList!: (v: typeof ANA[]) => void;
+    listAthletes.mockReturnValue(new Promise((resolve) => { resolveList = resolve; }));
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('bulk-entries'));
+    expect(screen.getByText('Carregando atletas…')).toBeInTheDocument();
+    expect(screen.queryByText('Nenhum atleta disponível.')).not.toBeInTheDocument();
+
+    resolveList([ANA, BETO]);
+    expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
+  });
+
+  it('C-Minor-1: shows an error instead of "Nenhum atleta disponível" when the roster fails to load', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', name: 'Corrida 5km', team_size: 1 });
+    listAthletes.mockRejectedValue(new Error('offline'));
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('bulk-entries'));
+
+    expect(await screen.findByText('Não foi possível carregar os atletas.')).toBeInTheDocument();
+    expect(screen.queryByText('Nenhum atleta disponível.')).not.toBeInTheDocument();
   });
 });
 

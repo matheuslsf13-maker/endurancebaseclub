@@ -67,7 +67,7 @@ export default function SettingsPage() {
           </div>
         )}
         {error && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {errorMessage(error, 'Não foi possível carregar os organizadores')}
           </p>
         )}
@@ -169,7 +169,7 @@ function MyAccountCard() {
           data-testid="newpass-2"
         />
         {errors.form && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {errors.form}
           </p>
         )}
@@ -297,7 +297,7 @@ function AddOrganizer({ onAdded }: { onAdded(): Promise<void> }) {
         </Button>
       </div>
       {error && (
-        <p role="alert" className="text-sm text-danger">
+        <p role="alert" className="text-sm text-danger-text">
           {error}
         </p>
       )}

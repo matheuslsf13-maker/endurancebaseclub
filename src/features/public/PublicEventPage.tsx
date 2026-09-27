@@ -264,7 +264,7 @@ export default function PublicEventPage() {
       <PublicShell>
         <div data-testid="public-results" className="mx-auto w-full max-w-md px-4 py-12">
           <Card className="flex flex-col gap-4">
-            <p role="alert" className="text-sm text-danger">
+            <p role="alert" className="text-sm text-danger-text">
               {query.error instanceof Error ? query.error.message : 'Evento não encontrado'}
             </p>
             <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">

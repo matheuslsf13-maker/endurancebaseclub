@@ -91,7 +91,7 @@ function EntryStatusModal({ entry, onClose, onSaved }: EntryStatusModalProps) {
     >
       <div className="flex flex-col gap-4">
         {formError && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {formError}
           </p>
         )}

@@ -115,7 +115,7 @@ export default function AthletesPage() {
           </div>
         ) : query.error ? (
           <Card>
-            <p role="alert" className="text-sm text-danger">
+            <p role="alert" className="text-sm text-danger-text">
               {query.error instanceof Error ? query.error.message : 'Erro inesperado'}
             </p>
           </Card>

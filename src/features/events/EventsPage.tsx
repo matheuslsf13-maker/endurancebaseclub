@@ -70,7 +70,7 @@ export default function EventsPage() {
           </div>
         )}
         {error && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {errorMessage(error, 'Não foi possível carregar os eventos')}
           </p>
         )}
@@ -252,7 +252,7 @@ function CreateEventModal({
           data-testid="event-levels"
         />
         {error && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {error}
           </p>
         )}
@@ -322,7 +322,7 @@ function DuplicateEventModal({
           data-testid="duplicate-date"
         />
         {error && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {error}
           </p>
         )}

@@ -1,5 +1,6 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent, ReactNode } from 'react';
+import { useBlocker } from 'react-router';
 import { Button, Card, Input, Select, useConfirm, useToast } from '../../components/ui';
 import { defaultRaceConfig } from '../../domain/presets';
 import { formatClock } from '../../lib/format';
@@ -10,7 +11,12 @@ import { AgeGroupsEditor } from './AgeGroupsEditor';
 import { LegsEditor } from './LegsEditor';
 import { RankingsEditor } from './RankingsEditor';
 import { formToPayload, teamSizeLabel, validateRaceForm } from './raceForm';
-import type { RaceForm } from './raceForm';
+import type { RaceForm, RaceFormLeg } from './raceForm';
+
+/** pt-BR count phrase without an awkward "(ões)"/"(s)" suffix (C-Minor-17). */
+function countLabel(n: number, singular: string, plural: string): string {
+  return `${n} ${n === 1 ? singular : plural}`;
+}
 
 const TEAM_SIZE_OPTIONS = [1, 2, 3, 4, 5, 6].map((n) => ({ value: String(n), label: teamSizeLabel(n) }));
 const isTeam = (n: number) => n > 1;
@@ -73,29 +79,117 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const hasLevels = agg.event.levels.length > 0;
+  const errorRef = useRef<HTMLDivElement>(null);
+
+  // How many entries already exist for this race (0 for one not yet saved) — used to warn before
+  // a team-size or leg-count change the server now rejects or rewrites once entries exist (B1-I2 /
+  // C-Minor-5), and before a wave removal that would silently re-time or orphan them (C-I3).
+  const entryCount = form.id ? agg.entries.filter((e) => e.race_id === form.id).length : 0;
+
+  // C-Minor-6: leaving this page mid-edit (another tab, browser back) with unsaved changes is
+  // silent today. `initial` is only ever the value this editor was seeded with (never re-read
+  // afterwards, per Ruling 40), so comparing against it detects any edit, including one already
+  // undone back to the original values (harmless false positive, not a false negative).
+  const isDirty = JSON.stringify(form) !== JSON.stringify(initial);
+  const blocker = useBlocker(isDirty);
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return;
+    void (async () => {
+      const ok = await confirm({
+        title: 'Sair sem salvar?',
+        message: 'Esta prova tem alterações não salvas. Elas serão perdidas se você sair agora.',
+        confirmLabel: 'Sair sem salvar',
+        danger: true,
+      });
+      if (ok) blocker.proceed?.();
+      else blocker.reset?.();
+    })();
+    // `confirm` is stable (useCallback in ConfirmProvider); only react to the blocker itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocker.state]);
+
+  useEffect(() => {
+    if (errors.length > 0) {
+      // Optional call: jsdom (unit tests) has no layout engine and doesn't implement
+      // `scrollIntoView` at all — this is a no-op there, and the real behaviour in a browser.
+      errorRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      errorRef.current?.focus();
+    }
+  }, [errors]);
+
+  async function handleCancel() {
+    if (isDirty) {
+      const ok = await confirm({
+        title: 'Sair sem salvar?',
+        message: 'Esta prova tem alterações não salvas. Elas serão perdidas se você sair agora.',
+        confirmLabel: 'Sair sem salvar',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onDone();
+  }
 
   async function onTeamSizeChange(e: ChangeEvent<HTMLSelectElement>) {
     const next = Number(e.target.value);
+    if (next === form.team_size) return;
     const wasTeam = isTeam(form.team_size);
     const nowTeam = isTeam(next);
+
+    const parts: string[] = [];
+    if (wasTeam !== nowTeam) {
+      parts.push(
+        `A prova vai virar ${nowTeam ? 'uma prova em equipe' : 'individual'}, o que redefine o pódio e as faixas etárias para os padrões de ${nowTeam ? 'equipe' : 'individual'}.`,
+      );
+    }
+    if (entryCount > 0) {
+      parts.push(
+        `Esta prova já tem ${countLabel(entryCount, 'inscrição', 'inscrições')} — o servidor não permite mudar o tamanho da equipe enquanto houver inscrições.`,
+      );
+    }
+    if (parts.length > 0) {
+      const ok = await confirm({ title: 'Mudar tamanho da equipe', message: `${parts.join(' ')} Continuar?`, confirmLabel: 'Continuar' });
+      if (!ok) return;
+    }
+
     if (wasTeam === nowTeam) {
       setForm((f) => ({ ...f, team_size: next }));
       return;
     }
-    const ok = await confirm({
-      title: 'Mudar tamanho da equipe',
-      message: `A prova vai virar ${nowTeam ? 'uma prova em equipe' : 'individual'}. Isso redefine o pódio e as faixas etárias para os padrões de ${nowTeam ? 'equipe' : 'individual'}. Continuar?`,
-      confirmLabel: 'Continuar',
-    });
-    if (!ok) return;
     const def = defaultRaceConfig(next);
     setForm((f) => ({ ...f, team_size: next, config: { ...f.config, rankings: def.rankings, age_groups: def.age_groups } }));
+  }
+
+  async function onLegsChange(legs: RaceFormLeg[]) {
+    if (entryCount > 0 && legs.length !== form.legs.length) {
+      const ok = await confirm({
+        title: 'Mudar pernas',
+        message: `Esta prova já tem ${countLabel(entryCount, 'inscrição', 'inscrições')}. Mudar o número de pernas pode deixar atletas sem perna atribuída até as inscrições serem revisadas. Continuar?`,
+        confirmLabel: 'Continuar',
+      });
+      if (!ok) return;
+    }
+    setForm((f) => ({ ...f, legs }));
   }
 
   function addWave() {
     setForm((f) => ({ ...f, waves: [...f.waves, { name: `Onda ${f.waves.length + 1}`, position: f.waves.length, start_at: null }] }));
   }
-  function removeWave(i: number) {
+  async function removeWave(i: number) {
+    const wave = form.waves[i];
+    const waveEntryCount = wave.id ? agg.entries.filter((e) => e.wave_id === wave.id).length : 0;
+    if (wave.start_at || waveEntryCount > 0) {
+      const parts: string[] = [];
+      if (wave.start_at) parts.push(`já registrou a largada às ${formatClock(Date.parse(wave.start_at), { tenths: true })}`);
+      if (waveEntryCount > 0) parts.push(`tem ${countLabel(waveEntryCount, 'inscrição', 'inscrições')} vinculada${waveEntryCount === 1 ? '' : 's'}`);
+      const ok = await confirm({
+        title: 'Remover largada',
+        message: `A largada "${wave.name}" ${parts.join(' e ')}. O servidor recusa remover uma largada nessas condições — mova as inscrições para outra largada primeiro. Continuar mesmo assim?`,
+        confirmLabel: 'Remover',
+        danger: true,
+      });
+      if (!ok) return;
+    }
     setForm((f) => ({ ...f, waves: f.waves.filter((_, idx) => idx !== i) }));
   }
   function updateWaveName(i: number, name: string) {
@@ -125,10 +219,10 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
   return (
     <div className="flex flex-col gap-4">
       {errors.length > 0 && (
-        <div className="rounded-xl border border-danger/30 bg-danger/10 p-3">
+        <div ref={errorRef} tabIndex={-1} className="rounded-xl border border-danger/30 bg-danger/10 p-3 outline-none">
           <ul className="flex flex-col gap-1">
             {errors.map((e, i) => (
-              <li key={i} role="alert" className="text-sm text-danger">
+              <li key={i} role="alert" className="text-sm text-danger-text">
                 {e}
               </li>
             ))}
@@ -148,7 +242,7 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
       </Section>
 
       <Section title="Pernas">
-        <LegsEditor legs={form.legs} onChange={(legs) => setForm((f) => ({ ...f, legs }))} />
+        <LegsEditor legs={form.legs} onChange={(legs) => void onLegsChange(legs)} />
       </Section>
 
       <Section title="Largadas">
@@ -166,7 +260,7 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
                 aria-label={`Remover largada ${w.name}`}
                 data-testid={`wave-remove-${i}`}
                 disabled={form.waves.length <= 1}
-                onClick={() => removeWave(i)}
+                onClick={() => void removeWave(i)}
               >
                 Remover
               </Button>
@@ -297,7 +391,7 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
         <Button data-testid="race-save" loading={saving} onClick={() => void handleSave()}>
           Salvar prova
         </Button>
-        <Button variant="secondary" data-testid="race-cancel" disabled={saving} onClick={onDone}>
+        <Button variant="secondary" data-testid="race-cancel" disabled={saving} onClick={() => void handleCancel()}>
           Cancelar
         </Button>
       </div>

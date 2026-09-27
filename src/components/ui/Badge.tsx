@@ -7,12 +7,15 @@ export interface BadgeProps {
   children: ReactNode;
 }
 
+// C-Minor-11: warning/danger/info use the brand-derived "-text" tint (index.css) for the text
+// colour — the plain swatch fails WCAG AA as text in one theme or the other. success already
+// passes and keeps its original swatch.
 const TONE_CLASSES: Record<BadgeTone, string> = {
   neutral: 'bg-surface-2 text-fg border-border',
   success: 'bg-success/15 text-success border-success/30',
-  warning: 'bg-warning/15 text-warning border-warning/30',
-  danger: 'bg-danger/15 text-danger border-danger/30',
-  info: 'bg-info/15 text-info border-info/30',
+  warning: 'bg-warning/15 text-warning-text border-warning/30',
+  danger: 'bg-danger/15 text-danger-text border-danger/30',
+  info: 'bg-info/15 text-info-text border-info/30',
 };
 
 export function Badge({ tone = 'neutral', children }: BadgeProps) {
