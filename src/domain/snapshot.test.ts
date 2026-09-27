@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { classifyRace } from './ranking';
-import { buildFinalizeRows } from './snapshot';
+import type { RaceClassification } from './ranking';
+import { buildFinalizeRows, classificationFromResults, snapshotDrift } from './snapshot';
 import type { EntryTiming, TimingStatus } from './consolidation';
-import type { AthleteRow, EntryRow } from '../lib/types';
+import type { AthleteRow, EntryRow, FinalizeRowInput, ResultRow } from '../lib/types';
 import { makeRace, makeEntry, makeAthlete, makeEvent, T0, MIN } from './testing/fixtures';
 
 const ev = { date: '2026-10-11', levels: [] as string[] };
@@ -61,5 +62,97 @@ describe('buildFinalizeRows', () => {
     expect(row.final_ms).toBeNull();
     expect(row.overall_pos).toBeNull();
     expect(row.data.podiums).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// B1-I1 / B2-I2: the frozen snapshot of a finalized race rebuilt as a classification (shared by the
+// public page, the organizer's results tab and the workbook) and compared with the live one.
+// ---------------------------------------------------------------------------------------------
+
+/** What `admin_finalize_race` stores for the rows `buildFinalizeRows` built. */
+function asResults(rows: FinalizeRowInput[], raceId = 'r1'): ResultRow[] {
+  return rows.map(r => ({ ...r, race_id: raceId, event_id: 'e1', finalized_at: '2026-10-11T12:00:00.000Z' }));
+}
+const podiumKeys = (cls: RaceClassification) =>
+  cls.podiums.map(g => [g.ranking.id, g.group_label, g.places.map(p => [idOf(p.ranked.entry.id), p.podium_pos])]);
+
+describe('classificationFromResults', () => {
+  const { cls, athletes } = buildFixtureClassification();
+  const results = asResults(buildFinalizeRows(makeEvent(), cls, athletes));
+
+  it('rebuilds the finalized classification: rows in overall_pos order (bib tie-break), unranked by status, finishers', () => {
+    // Stored in reverse to prove the rows are ordered by the frozen positions, not by storage order.
+    const official = classificationFromResults(cls.race, [...results].reverse(), []);
+    expect(official.rows.map(r => idOf(r.entry.id))).toEqual(cls.rows.map(r => idOf(r.entry.id)));
+    expect(official.rows.map(r => r.overall_pos)).toEqual(cls.rows.map(r => r.overall_pos));
+    expect(official.rows.map(r => r.timing.status)).toEqual(cls.rows.map(r => r.timing.status));
+    expect(official.rows.map(r => r.timing.final_ms)).toEqual(cls.rows.map(r => r.timing.final_ms));
+    expect(official.rows.map(r => r.gap_ms)).toEqual(cls.rows.map(r => r.gap_ms));
+    expect(official.finishers).toBe(cls.finishers);
+    expect(official.race).toBe(cls.race);
+  });
+
+  it('rebuilds the podiums in the live order (ranking order, then canonical group order)', () => {
+    const official = classificationFromResults(cls.race, results, []);
+    expect(podiumKeys(official)).toEqual(podiumKeys(cls));
+  });
+
+  it('rebuilds each entry from the snapshot (bib, member names, penalty) and ignores other races\' results', () => {
+    const other = asResults(buildFinalizeRows(makeEvent(), cls, athletes), 'r-other');
+    const official = classificationFromResults(cls.race, [...results, ...other], []);
+    expect(official.rows).toHaveLength(11);
+    const f1 = official.rows.find(r => idOf(r.entry.id) === 'f1')!;
+    expect(f1.entry).toMatchObject({ bib: '1', race_id: 'r1', penalty_ms: 0, members: [{ athlete_id: 'f1', name: 'F1', legs: [0] }] });
+    expect(f1.category).toEqual({ sex: 'F', age: 36, age_group: '30-39', level: null });
+    expect(f1.sex_pos).toBe(1);
+  });
+});
+
+describe('snapshotDrift', () => {
+  const { cls, athletes } = buildFixtureClassification();
+  const results = asResults(buildFinalizeRows(makeEvent(), cls, athletes));
+  const race = cls.race;
+
+  /** The live classification after `patch` changed some timings/entries. */
+  function liveWith(patch: (timings: Map<string, EntryTiming>) => void, extraEntries: EntryRow[] = [], dropIds: string[] = []): RaceClassification {
+    const timings = new Map(cls.rows.map(r => [r.entry.id, r.timing] as const));
+    patch(timings);
+    const entries = [...cls.rows.map(r => r.entry).filter(e => !dropIds.includes(e.id)), ...extraEntries];
+    return classifyRace(race, entries, timings, athletes, ev);
+  }
+
+  it('is empty when nothing changed since finalization', () => {
+    expect(snapshotDrift(cls, results)).toEqual([]);
+  });
+
+  it('lists every entry whose status, final time, overall position or podium places changed', () => {
+    // A late mark gives m4 (9th, 25 min) a 17-min finish: m4 now wins; everyone ranked moves down.
+    const live = liveWith(t => { t.set('e-m4', timing('e-m4', 17 * MIN)); });
+    const drift = snapshotDrift(live, results);
+    const m4 = drift.find(d => idOf(d.entry_id) === 'm4')!;
+    expect(m4).toEqual({ entry_id: 'e-m4', bib: '9', change: 'changed', fields: ['final_ms', 'overall_pos', 'podiums'] });
+    expect(drift.find(d => idOf(d.entry_id) === 'f5')).toEqual({ entry_id: 'e-f5', bib: '5', change: 'changed', fields: ['overall_pos'] });
+    // DNF/DNS rows did not move.
+    expect(drift.some(d => ['m5', 'f6'].includes(idOf(d.entry_id)))).toBe(false);
+  });
+
+  it('reports a status change on its own', () => {
+    const live = liveWith(t => { t.set('e-m5', timing('e-m5', null, 'dsq')); });
+    expect(snapshotDrift(live, results)).toEqual([{ entry_id: 'e-m5', bib: '10', change: 'changed', fields: ['status'] }]);
+  });
+
+  it('reports entries added or removed after finalization', () => {
+    const late = makeEntry({ id: 'e-late', bib: '99', status: 'dns', members: [{ athlete_id: 'f6', position: 0, legs: [0] }] });
+    const live = liveWith(t => { t.set('e-late', timing('e-late', null, 'dns')); }, [late], ['e-f6']);
+    expect(snapshotDrift(live, results)).toEqual([
+      { entry_id: 'e-late', bib: '99', change: 'added', fields: [] },
+      { entry_id: 'e-f6', bib: '11', change: 'removed', fields: [] },
+    ]);
+  });
+
+  it('ignores results of other races', () => {
+    const other = asResults(buildFinalizeRows(makeEvent(), cls, athletes), 'r-other');
+    expect(snapshotDrift(cls, [...results, ...other])).toEqual([]);
   });
 });

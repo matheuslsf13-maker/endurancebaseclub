@@ -25,14 +25,14 @@ export function isRanked(timing: EntryTiming): boolean {
 
 /** Numeric-aware bib compare, used as the display tie-break wherever two rows are otherwise equal. */
 const bibCollator = new Intl.Collator('pt-BR', { numeric: true });
-const compareBib = (a: EntryRow, b: EntryRow): number => bibCollator.compare(a.bib, b.bib);
+export const compareBib = (a: EntryRow, b: EntryRow): number => bibCollator.compare(a.bib, b.bib);
 
 /**
  * Status order for the unranked rows that follow the ranked ones (spec §9 + Controller Ruling 9):
  * a finish recorded with no resolvable final time sorts first (the entry did cross the line —
  * closest to being ranked), then on_course, not_started, dnf, dns, dsq.
  */
-const UNRANKED_STATUS_ORDER: Record<EntryTiming['status'], number> = {
+export const UNRANKED_STATUS_ORDER: Record<EntryTiming['status'], number> = {
   finished: 0, on_course: 1, not_started: 2, dnf: 3, dns: 4, dsq: 5,
 };
 
@@ -98,9 +98,8 @@ function levelIndex(levels: string[], level: string | null): number {
  * dimensions that ranking actually groups by (a dimension absent from `dims` never splits the
  * group, so it plays no part in ordering it).
  *
- * Exported so any other reconstruction of podium groups from frozen data (e.g. the public
- * finalized-race view in `features/public/PublicEventPage.tsx`) can reuse the same canonical
- * order instead of re-deriving or approximating it (e.g. alphabetically).
+ * Exported so the reconstruction of podium groups from frozen data (`classificationFromResults`
+ * in `snapshot.ts`) reuses the same canonical order instead of re-deriving or approximating it.
  */
 export function compareGroupOrder(dims: RankingDim[], a: EntryCategory, b: EntryCategory, ageGroups: AgeGroup[], levels: string[]): number {
   if (dims.includes('sex')) {
