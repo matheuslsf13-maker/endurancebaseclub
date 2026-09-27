@@ -15,10 +15,12 @@ export interface RaceClassification { race: RaceRow; rows: RankedEntry[]; finish
  * A row counts as "ranked" only once it has actually finished with a resolvable final time (spec
  * §9). Controller Ruling 9: a `finished` crossing with a null `final_ms` (a finish mark recorded
  * with no wave start to compute a total from) does NOT count as ranked — it is listed among the
- * unranked rows instead, first among them (see `UNRANKED_STATUS_ORDER`).
+ * unranked rows instead, first among them (see `UNRANKED_STATUS_ORDER`). The same goes for a total
+ * that is zero or negative (B1-M4: the wave start typed or recorded after the finish — the `order`
+ * issue flags it), which would otherwise lead the classification with a nonsensical time.
  */
-function isRanked(timing: EntryTiming): boolean {
-  return timing.status === 'finished' && timing.final_ms !== null;
+export function isRanked(timing: EntryTiming): boolean {
+  return timing.status === 'finished' && timing.final_ms !== null && timing.final_ms > 0;
 }
 
 /** Numeric-aware bib compare, used as the display tie-break wherever two rows are otherwise equal. */
