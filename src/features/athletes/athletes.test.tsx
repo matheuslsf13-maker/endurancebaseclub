@@ -394,6 +394,17 @@ describe('AthletesPage', () => {
 
     expect(screen.getByTestId('import-file')).toBeInTheDocument();
   });
+
+  // C-Minor-3: the shortcut also carries `evento=<id>` so the dialog preselects that event.
+  it('preselects the event named in ?evento=<id> (C-Minor-3)', async () => {
+    listEvents.mockResolvedValue([
+      { id: 'ev1', name: 'Copa EBC', date: '2026-10-11', location: '', description: '', levels: [], status: 'planejado', is_public: false, public_slug: null, version: 1, races_count: 1, entries_count: 0 },
+    ]);
+    renderWithProviders(<AthletesPage />, { route: '/atletas?import=1&evento=ev1' });
+    await screen.findByText('Ana Souza');
+
+    expect(await screen.findByLabelText(/Inscrever na prova/)).toHaveValue('ev1');
+  });
 });
 
 describe('AthleteProfilePage', () => {

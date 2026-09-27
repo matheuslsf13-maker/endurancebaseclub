@@ -162,11 +162,14 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
 
   async function onLegsChange(legs: RaceFormLeg[]) {
     if (entryCount > 0 && legs.length !== form.legs.length) {
-      const ok = await confirm({
-        title: 'Mudar pernas',
-        message: `Esta prova já tem ${countLabel(entryCount, 'inscrição', 'inscrições')}. Mudar o número de pernas pode deixar atletas sem perna atribuída até as inscrições serem revisadas. Continuar?`,
-        confirmLabel: 'Continuar',
-      });
+      // Consistent with area A's admin_save_race (final-fix-1-report.md): a team race rejects the
+      // change outright with "Não é possível alterar o número de pernas de uma prova por equipes
+      // com inscrições"; an individual race instead rewrites each entry's single member to
+      // 0..N-1, so there is no data-loss risk there — only a heads-up that it will happen.
+      const message = isTeam(form.team_size)
+        ? `Esta prova já tem ${countLabel(entryCount, 'inscrição', 'inscrições')} — o servidor não permite mudar o número de pernas de uma prova por equipes enquanto houver inscrições.`
+        : `Esta prova já tem ${countLabel(entryCount, 'inscrição', 'inscrições')}. As pernas de cada uma serão reatribuídas automaticamente ao salvar. Continuar?`;
+      const ok = await confirm({ title: 'Mudar pernas', message, confirmLabel: 'Continuar' });
       if (!ok) return;
     }
     setForm((f) => ({ ...f, legs }));
@@ -179,12 +182,14 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
     const wave = form.waves[i];
     const waveEntryCount = wave.id ? agg.entries.filter((e) => e.wave_id === wave.id).length : 0;
     if (wave.start_at || waveEntryCount > 0) {
+      // Mirrors area A's admin_save_race pt-BR wording (final-fix-1-report.md): 'Não é possível
+      // remover a onda "<nome>" porque ela já largou' / '… porque ela tem N inscrição(ões)'.
       const parts: string[] = [];
-      if (wave.start_at) parts.push(`já registrou a largada às ${formatClock(Date.parse(wave.start_at), { tenths: true })}`);
-      if (waveEntryCount > 0) parts.push(`tem ${countLabel(waveEntryCount, 'inscrição', 'inscrições')} vinculada${waveEntryCount === 1 ? '' : 's'}`);
+      if (wave.start_at) parts.push('já largou');
+      if (waveEntryCount > 0) parts.push(`tem ${countLabel(waveEntryCount, 'inscrição', 'inscrições')}`);
       const ok = await confirm({
         title: 'Remover largada',
-        message: `A largada "${wave.name}" ${parts.join(' e ')}. O servidor recusa remover uma largada nessas condições — mova as inscrições para outra largada primeiro. Continuar mesmo assim?`,
+        message: `Não será possível remover a largada "${wave.name}" porque ela ${parts.join(' e ')} — mova as inscrições para outra largada antes, se for o caso. Continuar mesmo assim?`,
         confirmLabel: 'Remover',
         danger: true,
       });

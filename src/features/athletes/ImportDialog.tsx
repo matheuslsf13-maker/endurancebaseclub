@@ -13,6 +13,10 @@ import type { ImportResult } from '../../lib/types';
 
 export interface ImportDialogProps {
   open: boolean;
+  /** C-Minor-3: preselects this event in the "Inscrever na prova..." select on open (the Entries
+   * tab's import shortcut carries `?evento=<id>`) — without it the shortcut arrived on "Nenhum",
+   * so the Prova column was silently ignored and nobody got enrolled. */
+  initialEventId?: string;
   onClose(): void;
   /** Called once `admin_import_athletes` succeeds, so the caller can refresh its athlete list. */
   onImported(): void;
@@ -34,11 +38,11 @@ async function readTable(file: File): Promise<string[][]> {
   return parseCsv(text);
 }
 
-export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
+export function ImportDialog({ open, initialEventId = '', onClose, onImported }: ImportDialogProps) {
   const [fileName, setFileName] = useState<string | null>(null);
   const [mapped, setMapped] = useState<MappedImport | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
-  const [eventId, setEventId] = useState('');
+  const [eventId, setEventId] = useState(initialEventId);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -46,15 +50,17 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
   const eventsQuery = useQuery({ queryKey: ['events', 'summary'], queryFn: () => api.admin.listEvents(), enabled: open });
 
   // Start clean every time the dialog opens, so a previous import's preview/result never bleeds
-  // into the next one.
+  // into the next one. `eventId` seeds from `initialEventId` (C-Minor-3) rather than always
+  // resetting to "Nenhum", so the Entries tab's `?evento=<id>` shortcut is actually honoured.
   useEffect(() => {
     if (!open) return;
     setFileName(null);
     setMapped(null);
     setReadError(null);
-    setEventId('');
+    setEventId(initialEventId);
     setResult(null);
     setImportError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only reset when the dialog opens
   }, [open]);
 
   async function handleFile(e: ChangeEvent<HTMLInputElement>) {

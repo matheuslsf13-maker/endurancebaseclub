@@ -198,7 +198,7 @@ describe('C-I3: removing a wave that has started or has entries', () => {
 
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveTextContent('Largada geral');
-    expect(dialog).toHaveTextContent(/08:00:00\.0/);
+    expect(dialog).toHaveTextContent(/já largou/);
     await user.click(screen.getByTestId('confirm-cancel'));
     // Cancelled: the wave is still there.
     expect(screen.getByTestId('wave-remove-0')).toBeInTheDocument();

@@ -34,7 +34,9 @@ export default function RacesTab() {
   async function handleDelete(race: RaceRow) {
     const ok = await confirm({
       title: 'Excluir prova',
-      message: `Excluir a prova "${race.name}"? As inscrições e marcações associadas também são removidas.`,
+      // C-Minor-4: marks are not deleted — they lose their athlete (FK set null) and resurface as
+      // "sem atleta" pendências in Revisão, which the previous copy did not say.
+      message: `Excluir a prova "${race.name}"? As inscrições dessa prova são removidas; as marcações já registradas ficam sem atleta e aparecem como pendência em Revisão.`,
       confirmLabel: 'Excluir',
       danger: true,
     });

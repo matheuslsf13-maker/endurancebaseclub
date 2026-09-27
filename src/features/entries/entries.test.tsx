@@ -84,6 +84,20 @@ describe('entries list', () => {
     expect(screen.queryByTestId('new-entry')).not.toBeInTheDocument();
   });
 
+  it('C-Minor-10: "Categoria" only shows dimensions that apply (no age groups, no event levels)', () => {
+    const race = makeRace({ id: 'r1', name: 'Revezamento', team_size: 2, configPatch: { age_groups: [] } });
+    const entry = makeEntry({
+      id: 'en1', race_id: 'r1', bib: '1',
+      members: [{ athlete_id: 'a1', position: 0, legs: [0] }, { athlete_id: 'a2', position: 1, legs: [1] }],
+    });
+    renderTab(makeAgg({ event: makeEvent({ id: 'ev1', levels: [] }), races: [race], entries: [entry], athletes: [ANA, BETO] }));
+
+    // Ana (F) + Beto (M) => Misto, with no "Sem faixa"/"Sem nível" noise since neither applies here.
+    expect(screen.getByText('Misto')).toBeInTheDocument();
+    expect(screen.queryByText(/Sem faixa/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Sem nível/)).not.toBeInTheDocument();
+  });
+
   it('filters by race and by accent-insensitive search', async () => {
     const user = userEvent.setup();
     const race1 = makeRace({ id: 'r1', name: 'Aquathlon', team_size: 1 });
@@ -419,17 +433,17 @@ describe('bulk entry dialog', () => {
   });
 });
 
-describe('import shortcut (Ruling 51)', () => {
-  it('keeps the exact hint text and navigates to /atletas asking it to open the import dialog', async () => {
+describe('import shortcut (Ruling 51 / C-Minor-3)', () => {
+  it('keeps the exact hint text and navigates to /atletas asking it to open the import dialog preselecting this event', async () => {
     const user = userEvent.setup();
     const race = makeRace({ id: 'r1', team_size: 1 });
-    const { router } = renderTab(makeAgg({ races: [race] }));
+    const { router } = renderTab(makeAgg({ event: makeEvent({ id: 'ev1' }), races: [race] }));
 
     expect(screen.getByText(/a coluna Prova inscreve automaticamente em provas individuais/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Importar atletas' }));
 
     expect(router.state.location.pathname).toBe('/atletas');
-    expect(router.state.location.search).toBe('?import=1');
+    expect(router.state.location.search).toBe('?import=1&evento=ev1');
   });
 });

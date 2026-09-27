@@ -7,7 +7,7 @@ import type { EventIndex } from '../../domain/eventModel';
 import { ENTRY_STATUS_LABEL } from '../../domain/labels';
 import { api, ApiError } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
-import type { AthleteRow, EntryRow, EntryStatus, RaceRow } from '../../lib/types';
+import type { AthleteRow, EntryRow, EntryStatus, RaceRow, RankingDim } from '../../lib/types';
 import { useEventContext } from '../events/EventContext';
 import { BulkEntryDialog } from './BulkEntryDialog';
 import { EntryForm } from './EntryForm';
@@ -31,6 +31,16 @@ function legsSummary(entry: EntryRow, race: RaceRow, athletesById: Map<string, A
       return `${name} – ${leg.label}`;
     })
     .join(' · ');
+}
+
+/** C-Minor-10: which category dimensions actually apply to this race/event — sex always does;
+ * age only when the race has age groups configured, level only when the event has levels — so
+ * "Categoria" never shows "Misto · Sem faixa · Sem nível" for a plain team race without levels. */
+function applicableDims(race: RaceRow, hasLevels: boolean): RankingDim[] {
+  const dims: RankingDim[] = ['sex'];
+  if (race.config.age_groups.length > 0) dims.push('age');
+  if (hasLevels) dims.push('level');
+  return dims;
 }
 
 interface EntryStatusModalProps {
@@ -151,7 +161,9 @@ export default function EntriesTab() {
   async function handleDelete(entry: EntryRow) {
     const ok = await confirm({
       title: 'Excluir inscrição',
-      message: `Excluir a inscrição Nº ${entry.bib}? Essa ação não pode ser desfeita.`,
+      // C-Minor-4: marks tied to this entry are not deleted — they lose their athlete and
+      // resurface as "sem atleta" pendências in Revisão.
+      message: `Excluir a inscrição Nº ${entry.bib}? As marcações já registradas ficam sem atleta. Essa ação não pode ser desfeita.`,
       confirmLabel: 'Excluir',
       danger: true,
     });
@@ -202,7 +214,7 @@ export default function EntriesTab() {
             <p>
               Prefere importar de uma planilha? — a coluna Prova inscreve automaticamente em provas individuais.
             </p>
-            <Button variant="secondary" onClick={() => navigate('/atletas?import=1')}>
+            <Button variant="secondary" onClick={() => navigate(`/atletas?import=1&evento=${agg.event.id}`)}>
               Importar atletas
             </Button>
           </Card>
@@ -236,7 +248,7 @@ export default function EntriesTab() {
                       <td className="px-3 py-2">{race.name}</td>
                       <td className="px-3 py-2">{entryDisplayName(entry, index)}</td>
                       <td className="px-3 py-2">{legsSummary(entry, race, index.athletesById)}</td>
-                      <td className="px-3 py-2">{groupLabel(['sex', 'age', 'level'], category)}</td>
+                      <td className="px-3 py-2">{groupLabel(applicableDims(race, agg.event.levels.length > 0), category)}</td>
                       <td className="px-3 py-2">{wave?.name ?? '—'}</td>
                       <td className="px-3 py-2">
                         <Badge tone={STATUS_BADGE_TONE[entry.status]}>{ENTRY_STATUS_LABEL[entry.status]}</Badge>
