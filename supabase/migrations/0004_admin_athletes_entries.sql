@@ -33,6 +33,7 @@ begin
 end $$;
 
 -- 3. admin_list_athletes: every athlete plus participations/wins/podiums tallied from results.
+--    A-M7: `athlete_ids @> array[id]` (not `id = any(athlete_ids)`) so results_athletes_idx (GIN) is used.
 create or replace function public.admin_list_athletes() returns jsonb
 language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
 begin
@@ -41,15 +42,15 @@ begin
     select jsonb_agg(to_jsonb(a) || jsonb_build_object(
       'participations', (
         select count(*) from public.results r
-        where a.id = any(r.athlete_ids) and r.status not in ('dns', 'not_started')
+        where r.athlete_ids @> array[a.id] and r.status not in ('dns', 'not_started')
       ),
       'wins', (
         select count(*) from public.results r
-        where a.id = any(r.athlete_ids) and r.overall_pos = 1
+        where r.athlete_ids @> array[a.id] and r.overall_pos = 1
       ),
       'podiums', (
         select count(*) from public.results r
-        where a.id = any(r.athlete_ids)
+        where r.athlete_ids @> array[a.id]
           and exists (
             select 1 from jsonb_array_elements(coalesce(r.data->'podiums', '[]'::jsonb)) p
             where (p->>'podium_pos')::int <= 3
@@ -308,7 +309,7 @@ begin
     'athlete', to_jsonb(a),
     'results', coalesce((
       select jsonb_agg(to_jsonb(r) order by (r.data->'event'->>'date') desc)
-      from public.results r where p_athlete_id = any(r.athlete_ids)
+      from public.results r where r.athlete_ids @> array[p_athlete_id]
     ), '[]'::jsonb)
   );
 end $$;

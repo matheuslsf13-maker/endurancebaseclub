@@ -134,7 +134,7 @@ begin
       select jsonb_agg(to_jsonb(r) order by (r.data->'event'->>'date') desc)
       from public.results r
       join public.events ev on ev.id = r.event_id
-      where p_athlete_id = any(r.athlete_ids) and ev.is_public
+      where r.athlete_ids @> array[p_athlete_id] and ev.is_public
     ), '[]'::jsonb)
   );
 end $$;
