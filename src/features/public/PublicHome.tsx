@@ -1,14 +1,20 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api';
 import { formatDateBR } from '../../lib/format';
+import { safeLocalStorage } from '../../lib/storage';
 import { Logo } from '../../components/Logo';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import { Badge, Card, EmptyState, Spinner } from '../../components/ui';
 import type { BadgeTone } from '../../components/ui';
 import type { EventStatus } from '../../lib/types';
+
+// C-Minor-7: must match App.tsx's `LAST_TIMEKEEPER_TOKEN_KEY` (its `/c/:token` route wrapper
+// writes it). Duplicated as a literal, not a shared import, so this route stays a small,
+// independent chunk (Ruling 30) instead of statically pulling in the app shell.
+const LAST_TIMEKEEPER_TOKEN_KEY = 'ebc.lastTkToken';
 
 /** pt-BR label + tone for an event's public status (same wording as the organizer's list, spec
  * §12); shared with `PublicEventPage`. */
@@ -53,6 +59,12 @@ export default function PublicHome() {
     document.title = 'EnduranceBaseClub';
   }, []);
 
+  // C-Minor-7: a volunteer's phone that has a timekeeper link offers a way back to it from the
+  // plain public home — the PWA's home-screen icon (`start_url: '/'`) has no other path there,
+  // and it works offline too (no query involved). Read once; a new link overwrites the stored
+  // token via the App.tsx route wrapper the next time it's opened.
+  const [lastTkToken] = useState(() => safeLocalStorage().getItem(LAST_TIMEKEEPER_TOKEN_KEY));
+
   const { data: events, isLoading, error } = useQuery({
     queryKey: ['pub-events'],
     queryFn: () => api.pub.events(),
@@ -64,6 +76,19 @@ export default function PublicHome() {
     <PublicShell>
       <div data-testid="public-events" className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
         <h1 className="brand-title text-xl font-semibold">Eventos</h1>
+
+        {lastTkToken && (
+          <Card className="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-fg">Este aparelho tem um link de cronometragem salvo.</p>
+            <Link
+              to={`/c/${lastTkToken}`}
+              data-testid="back-to-timekeeper"
+              className="inline-flex min-h-11 items-center rounded-xl border border-border bg-surface-2 px-3 text-sm font-medium text-fg hover:bg-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              Voltar à cronometragem
+            </Link>
+          </Card>
+        )}
 
         <div className="mt-6">
           {isLoading && (

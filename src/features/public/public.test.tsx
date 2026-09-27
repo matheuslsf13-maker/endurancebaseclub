@@ -61,6 +61,31 @@ describe('PublicHome', () => {
 
     expect(await screen.findByText('Nenhum evento público no momento')).toBeInTheDocument();
   });
+
+  describe('C-Minor-7: "Voltar à cronometragem"', () => {
+    afterEach(() => {
+      window.localStorage.clear();
+    });
+
+    it('offers a link back to the remembered timekeeper link when this device has one', async () => {
+      window.localStorage.setItem('ebc.lastTkToken', 'tok-abc');
+      mocks.events.mockResolvedValue([]);
+
+      renderWithProviders(<PublicHome />);
+
+      const link = await screen.findByTestId('back-to-timekeeper');
+      expect(link).toHaveAttribute('href', '/c/tok-abc');
+    });
+
+    it('shows nothing when this device has no remembered link', async () => {
+      mocks.events.mockResolvedValue([]);
+
+      renderWithProviders(<PublicHome />);
+      await screen.findByText('Nenhum evento público no momento');
+
+      expect(screen.queryByTestId('back-to-timekeeper')).not.toBeInTheDocument();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

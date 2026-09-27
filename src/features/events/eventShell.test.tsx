@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 
-import { routes } from '../../App';
+import { routes, RouteErrorBoundary } from '../../App';
 import { ConfirmProvider, ToastProvider } from '../../components/ui';
 import { ClockSync } from '../../lib/clock';
 import { useClock } from '../../hooks/useClock';
@@ -179,6 +179,56 @@ describe('routes', () => {
   it('unknown paths render NotFound', async () => {
     renderApp('/nada/aqui', fakeSession());
     expect(await screen.findByText('Página não encontrada')).toBeInTheDocument();
+  });
+
+  it('C-Minor-9: every top-level route (and the organizer area) declares a pt-BR errorElement', () => {
+    const topLevel = routes.filter((r) => r.path !== '*');
+    for (const r of topLevel) expect(r.errorElement, `route ${r.path ?? '(organizer area)'}`).toBeDefined();
+  });
+});
+
+describe('C-Minor-9: RouteErrorBoundary', () => {
+  function ThrowingPage(): never {
+    throw new Error('boom');
+  }
+
+  let consoleError: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    // React (and react-router's own render-error logging) log the caught error to console.error
+    // even though the boundary handles it — expected noise for this deliberate-throw test, not a
+    // real failure, so it's silenced the same way UpdatePrompt.test.tsx does for its own case.
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleError.mockRestore();
+  });
+
+  function renderWithBoundary() {
+    const router = createMemoryRouter(
+      [{ path: '/', element: <ThrowingPage />, errorElement: <RouteErrorBoundary /> }],
+      { initialEntries: ['/'] },
+    );
+    render(<RouterProvider router={router} />);
+  }
+
+  it('shows a pt-BR "Algo deu errado" message with a Recarregar action instead of the router default', async () => {
+    renderWithBoundary();
+    expect(await screen.findByText('Algo deu errado')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Recarregar' })).toBeInTheDocument();
+    expect(screen.queryByText(/Unexpected Application Error/)).not.toBeInTheDocument();
+  });
+
+  it('Recarregar reloads the page', async () => {
+    const user = userEvent.setup();
+    const reload = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { ...originalLocation, reload }, writable: true, configurable: true });
+
+    renderWithBoundary();
+    await user.click(await screen.findByRole('button', { name: 'Recarregar' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
   });
 });
 
