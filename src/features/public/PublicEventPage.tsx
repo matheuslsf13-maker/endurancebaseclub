@@ -9,7 +9,7 @@ import { classifyRace, compareGroupOrder } from '../../domain/ranking';
 import type { PodiumGroup, PodiumPlace, RaceClassification, RankedEntry } from '../../domain/ranking';
 import type { EntryCategory } from '../../domain/categories';
 import { formatDateBR } from '../../lib/format';
-import { Badge, Card, EmptyState, Spinner } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, Spinner } from '../../components/ui';
 import { ClassificationTable } from '../results/ClassificationTable';
 import { PodiumView } from '../results/PodiumView';
 import { EVENT_STATUS_LABEL, PublicShell } from './PublicHome';
@@ -148,9 +148,14 @@ function classificationFromResults(race: RaceRow, results: ResultRow[], athletes
 // replacing resolutions/waves, and refetching the whole payload when the version moves.
 // ---------------------------------------------------------------------------
 
-function usePublicLivePoll(slug: string | undefined, enabled: boolean) {
+/** C-Minor-14: `pub_live` failures used to be silent (kept the last known state forever, with no
+ * sign anything was wrong) — returns whether the *most recent* poll failed, so the page can show
+ * a small "não foi possível atualizar" hint instead of looking merely stale. Clears again as soon
+ * as a poll succeeds. */
+function usePublicLivePoll(slug: string | undefined, enabled: boolean): { lastPollFailed: boolean } {
   const queryClient = useQueryClient();
   const inFlight = useRef(false);
+  const [lastPollFailed, setLastPollFailed] = useState(false);
 
   useEffect(() => {
     if (!slug || !enabled) return undefined;
@@ -185,8 +190,11 @@ function usePublicLivePoll(slug: string | undefined, enabled: boolean) {
               void queryClient.refetchQueries({ queryKey: key, exact: true });
             }
           }
+          if (!cancelled) setLastPollFailed(false);
         } catch {
-          // Offline or a transient failure: keep the last known state and retry on the next tick.
+          // Offline or a transient failure: keep the last known state and retry on the next tick,
+          // but say so (C-Minor-14) instead of looking silently stale.
+          if (!cancelled) setLastPollFailed(true);
         } finally {
           inFlight.current = false;
         }
@@ -206,6 +214,8 @@ function usePublicLivePoll(slug: string | undefined, enabled: boolean) {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [slug, enabled, queryClient]);
+
+  return { lastPollFailed };
 }
 
 // ---------------------------------------------------------------------------
@@ -216,20 +226,36 @@ export default function PublicEventPage() {
     queryKey: ['pub-event', slug],
     queryFn: () => api.pub.event(slug as string),
     enabled: slug !== undefined,
+    // C-Minor-14: the 10 s delta poll (usePublicLivePoll) already resumes the moment the tab
+    // becomes visible again, so re-downloading the whole payload on every window focus only
+    // costs bandwidth on a spectator's phone for no fresher data.
+    refetchOnWindowFocus: false,
   });
   const payload = query.data;
 
-  usePublicLivePoll(slug, payload !== undefined);
+  const { lastPollFailed } = usePublicLivePoll(slug, payload !== undefined);
 
   useEffect(() => {
     document.title = payload ? `${payload.event.name} – Resultados` : 'EnduranceBaseClub';
   }, [payload]);
+
+  // C-Minor-15: reset on unmount only (not on every `payload` change, which would flash the
+  // default title while the page stays open) — otherwise an admin tab reached by following a
+  // public link keeps "… – Resultados" forever.
+  useEffect(() => () => { document.title = 'EnduranceBaseClub'; }, []);
 
   const index = useMemo(() => (payload ? indexEvent(payload) : null), [payload]);
   const races = useMemo(() => (payload ? [...payload.races].sort((a, b) => a.position - b.position) : []), [payload]);
   const [selectedRaceId, setSelectedRaceId] = useState('');
   const activeRaceId = races.some((r) => r.id === selectedRaceId) ? selectedRaceId : (races[0]?.id ?? '');
   const race = races.find((r) => r.id === activeRaceId) ?? null;
+  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+
+  // C-Minor-8: scroll the active race tab into view whenever it changes — a public event with
+  // several races can push later tabs off-screen at 390 px with no other affordance.
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [activeRaceId]);
 
   const liveTiming = useMemo(() => (payload ? computeEventTiming(payload, Date.now()) : null), [payload]);
 
@@ -267,9 +293,15 @@ export default function PublicEventPage() {
             <p role="alert" className="text-sm text-danger-text">
               {query.error instanceof Error ? query.error.message : 'Evento não encontrado'}
             </p>
-            <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
-              Voltar aos eventos públicos
-            </Link>
+            {/* C-Minor-14: the load error had no way to recover short of a manual reload. */}
+            <div className="flex flex-wrap items-center gap-3">
+              <Button size="sm" onClick={() => void query.refetch()} loading={query.isFetching}>
+                Tentar novamente
+              </Button>
+              <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
+                Voltar aos eventos públicos
+              </Link>
+            </div>
           </Card>
         </div>
       </PublicShell>
@@ -304,21 +336,29 @@ export default function PublicEventPage() {
 
         {races.length > 0 && (
           <>
-            <div role="tablist" aria-label="Provas" className="mt-6 flex gap-1 overflow-x-auto border-b border-border">
-              {races.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={r.id === activeRaceId}
-                  onClick={() => setSelectedRaceId(r.id)}
-                  className={`inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
-                    r.id === activeRaceId ? 'border-fg text-fg' : 'border-transparent text-muted hover:text-fg'
-                  }`}
-                >
-                  {r.name}
-                </button>
-              ))}
+            {/* C-Minor-8: the fade + scroll-into-view mirror the kit's Tabs (src/components/ui/Tabs.tsx)
+                — this tablist can't reuse it directly (NavLink-based, not a click handler over
+                in-memory state), but the same 390 px affordance gap applies here. */}
+            <div className="relative mt-6">
+              <div role="tablist" aria-label="Provas" className="flex gap-1 overflow-x-auto border-b border-border">
+                {races.map((r) => (
+                  <button
+                    key={r.id}
+                    ref={r.id === activeRaceId ? activeTabRef : undefined}
+                    type="button"
+                    role="tab"
+                    aria-selected={r.id === activeRaceId}
+                    onClick={() => setSelectedRaceId(r.id)}
+                    className={`inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                      r.id === activeRaceId ? 'border-fg text-fg' : 'border-transparent text-muted hover:text-fg'
+                    }`}
+                  >
+                    {r.name}
+                  </button>
+                ))}
+              </div>
+              <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-bg to-transparent" />
+              <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-bg to-transparent" />
             </div>
 
             {race && cls && index && (
@@ -331,6 +371,13 @@ export default function PublicEventPage() {
                     <>
                       <Badge tone="warning">Parcial – ao vivo</Badge>
                       <span className="text-xs text-muted">Atualiza automaticamente a cada 10 segundos.</span>
+                      {/* C-Minor-14: pub_live failures used to be silent; the classification just
+                          quietly stopped updating. */}
+                      {lastPollFailed && (
+                        <span role="status" className="text-xs text-warning-text">
+                          Não foi possível atualizar agora — tentando de novo.
+                        </span>
+                      )}
                     </>
                   )}
                 </div>

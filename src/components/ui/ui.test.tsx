@@ -292,6 +292,28 @@ describe('Tabs', () => {
     expect(screen.getByTestId('tab-revisao')).toBeInTheDocument();
     expect(screen.getByText('2')).toBeInTheDocument();
   });
+
+  it('C-Minor-8: scrolls the active tab into view (a strip wider than the viewport has no other affordance at 390 px)', () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+
+    renderWithProviders(
+      <Tabs
+        items={[
+          { id: 'geral', label: 'Geral', to: '/eventos/1/geral' },
+          { id: 'provas', label: 'Provas', to: '/eventos/1/provas' },
+          { id: 'resultados', label: 'Resultados', to: '/eventos/1/resultados' },
+        ]}
+      />,
+      { route: '/eventos/1/resultados' },
+    );
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(scrollIntoView.mock.instances[0]).toBe(screen.getByTestId('tab-resultados'));
+
+    Element.prototype.scrollIntoView = original;
+  });
 });
 
 describe('Badge', () => {
