@@ -122,7 +122,7 @@ export function buildEventWorkbook(
 }
 
 /** Resumo (spec §11): headerless — title, Evento/Data/Local/Gerada em, a blank row, then a bold
- * header and one row per race with entry/status counts, open pendências and finalized state. The
+ * header and one row per race with entry/status counts, open pendências (warnings and errors) and finalized state. The
  * counts come from the same classification the Classificação sheet shows (T15): "Concluintes" are
  * its ranked finishers, and a finish without a usable time (no start, or not after the start —
  * Ruling 9) is counted apart in "Chegada sem tempo". */
@@ -161,7 +161,8 @@ function buildResumoSheet(
       }
     }
     const inscritos = cls ? classified.length : entries.filter(e => e.race_id === race.id).length;
-    const pendencias = timing.issues.filter(i => i.race_id === race.id).length;
+    // Pending = warnings and errors, like every counter in the app; info issues are not pending.
+    const pendencias = timing.issues.filter(i => i.race_id === race.id && i.severity !== 'info').length;
     const drift = driftByRaceId.get(race.id) ?? 0;
     const finalizada = race.finalized_at
       ? `Sim (${formatDateTimeBR(Date.parse(race.finalized_at))})${drift > 0 ? ` — difere do ao vivo (${plural(drift, 'inscrição', 'inscrições')})` : ''}`

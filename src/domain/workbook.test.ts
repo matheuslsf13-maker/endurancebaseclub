@@ -188,6 +188,28 @@ describe('buildEventWorkbook edge cases', () => {
     const emptyModel = buildEventWorkbook(empty, emptyTiming, [], T0);
     expect(emptyModel.sheets.map(s => s.name)).toEqual(['Resumo', 'Inscritos', 'Pódios', 'Marcações', 'Pendências', 'Súmula manual']);
   });
+
+  it('Resumo "Pendências" counts warnings and errors only, like the app\'s counters (info issues are not pending)', () => {
+    // A DSQ that finished (info: status with crossings) whose timekeeper also tapped twice (info:
+    // duplicate), and an entry with a 14 s divergence (warning).
+    const dsq = makeEntry({ id: 'en1', race_id: 'r1', wave_id: 'w1', bib: '101', status: 'dsq', members: [{ athlete_id: 'a1', position: 0, legs: [0] }] });
+    const div = makeEntry({ id: 'en2', race_id: 'r1', wave_id: 'w1', bib: '102', members: [{ athlete_id: 'a2', position: 0, legs: [0] }] });
+    const agg2: EventAggregate = {
+      ...agg, races: [raceRun], waves: [waveRun], entries: [dsq, div], athletes: [a1, a2],
+      marks: [
+        makeMark({ at: T0 + 25 * MIN, entry_id: 'en1', leg_index: 0, timekeeper_id: 'tk1' }),
+        makeMark({ at: T0 + 25 * MIN + 500, entry_id: 'en1', leg_index: 0, timekeeper_id: 'tk1' }),
+        makeMark({ at: T0 + 27 * MIN, entry_id: 'en2', leg_index: 0, timekeeper_id: 'tk1' }),
+        makeMark({ at: T0 + 27 * MIN + 14 * SEC, entry_id: 'en2', leg_index: 0, timekeeper_id: 'tk2' }),
+      ],
+      resolutions: [],
+    };
+    const t2 = computeEventTiming(agg2, nowMs);
+    expect(t2.issues.filter(i => i.race_id === 'r1').map(i => i.severity).sort()).toEqual(['info', 'info', 'warning']);
+    const cls2 = classifyRace(raceRun, [dsq, div], t2.byEntry, athletesById, event);
+    const resumo = buildEventWorkbook(agg2, t2, [cls2], nowMs).sheets.find(s => s.name === 'Resumo')!;
+    expect(resumo.rows.find(r => r[0] === 'Corrida 5K')?.[8]).toBe(1);
+  });
 });
 
 describe('workbookFileName', () => {
