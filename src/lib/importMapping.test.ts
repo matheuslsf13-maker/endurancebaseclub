@@ -22,6 +22,25 @@ describe('mapImportRows', () => {
       { row: 6, message: 'Data de nascimento inválida: "31/02/1990"' },
     ]);
   });
+  it('rejects a year-only birth date instead of reading it as an Excel serial from 1905 (B1-M1)', () => {
+    const table = [
+      ['Nome', 'Sexo', 'Nascimento'],
+      ['Ana', 'F', '1990'],
+      ['Beto', 'M', '2005'],
+      ['Caio', 'M', '3653'],       // serial 3653 = 1909-12-31: not a plausible birth date
+      ['Dani', 'F', '99999'],      // far beyond any plausible birth date
+      ['Eva', 'F', '3654'],        // 1910-01-01, the earliest serial accepted
+      ['Fábio', 'M', '46000'],     // 2025-12-09
+    ];
+    const r = mapImportRows(table);
+    expect(r.errors).toEqual([
+      { row: 2, message: 'Data de nascimento incompleta: informe dia/mês/ano' },
+      { row: 3, message: 'Data de nascimento incompleta: informe dia/mês/ano' },
+      { row: 4, message: 'Data de nascimento inválida: "3653"' },
+      { row: 5, message: 'Data de nascimento inválida: "99999"' },
+    ]);
+    expect(r.rows.map(x => [x.name, x.birth_date])).toEqual([['Eva', '1910-01-01'], ['Fábio', '2025-12-09']]);
+  });
   it('requires name and sex columns', () => {
     expect(mapImportRows([['Atleta', 'Cidade'], ['Ana', 'X']]).errors).toEqual([{ row: 1, message: 'Coluna obrigatória não encontrada: Sexo' }]);
   });

@@ -47,16 +47,28 @@ function excelSerialToIso(serial: number): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
-/** parseDateInput first; else an integer 1..60000 read as an Excel serial; '' → null; anything else → null (invalid). */
-function parseBirthDate(raw: string): string | null {
-  if (raw === '') return null;
+/** Excel serials accepted as birth dates: 1910-01-01 (3654) .. 2064-04-08 (60000). A smaller
+ * integer is not a plausible birth date — above all a bare year like "1990", which as a serial is
+ * 1905-06-12 and would put the athlete in "60+" (B1-M1). */
+const BIRTH_SERIAL_MIN = 3_654;
+const BIRTH_SERIAL_MAX = 60_000;
+
+/**
+ * parseDateInput first; else an integer in the plausible birth range read as an Excel serial; a
+ * 4-digit year 1900..2100 alone is reported as incomplete; '' → no date; anything else → invalid.
+ */
+function parseBirthDate(raw: string): { date: string | null; error: string | null } {
+  if (raw === '') return { date: null, error: null };
   const viaFormat = parseDateInput(raw);
-  if (viaFormat !== null) return viaFormat;
+  if (viaFormat !== null) return { date: viaFormat, error: null };
   if (/^\d+$/.test(raw)) {
-    const serial = parseInt(raw, 10);
-    if (serial >= 1 && serial <= 60_000) return excelSerialToIso(serial);
+    const n = parseInt(raw, 10);
+    if (raw.length === 4 && n >= 1900 && n <= 2100) {
+      return { date: null, error: 'Data de nascimento incompleta: informe dia/mês/ano' };
+    }
+    if (n >= BIRTH_SERIAL_MIN && n <= BIRTH_SERIAL_MAX) return { date: excelSerialToIso(n), error: null };
   }
-  return null;
+  return { date: null, error: `Data de nascimento inválida: "${raw}"` };
 }
 
 function orNull(s: string): string | null {
@@ -103,9 +115,9 @@ export function mapImportRows(table: string[][]): MappedImport {
     if (sex === null) { errors.push({ row: rowNum, message: `Sexo inválido: "${rawSex}"` }); continue; }
 
     const rawBirth = get(raw, 'birth_date').trim();
-    const birth_date = parseBirthDate(rawBirth);
-    if (birth_date === null && rawBirth !== '') {
-      errors.push({ row: rowNum, message: `Data de nascimento inválida: "${rawBirth}"` });
+    const { date: birth_date, error: birthError } = parseBirthDate(rawBirth);
+    if (birthError !== null) {
+      errors.push({ row: rowNum, message: birthError });
       continue;
     }
 
