@@ -126,7 +126,9 @@ begin
         v_athlete_id := null;
       end if;
 
-      select * into ex from public.marks where id = v_id;
+      -- A-M4: lock the row read here (and in the re-read below) until the update: an organizer
+      -- move committing in between must never be overwritten by this request (Ruling 27).
+      select * into ex from public.marks where id = v_id for update;
       if not found then
         v_ts := (m ->> 'ts')::timestamptz;
         if v_ts is null or abs(extract(epoch from v_ts - now())) > 172800 then raise exception 'Horário inválido'; end if;
@@ -138,7 +140,7 @@ begin
         if not found then
           -- lost the insert race with a concurrent send of the same id (Ruling 28a): treat this
           -- request as an update against the row that is now there instead of erroring.
-          select * into ex from public.marks where id = v_id;
+          select * into ex from public.marks where id = v_id for update;
         end if;
       end if;
 
@@ -208,10 +210,12 @@ create or replace function public.admin_update_mark(p_mark_id uuid, p_patch json
 language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare
   m public.marks; v_entry public.entries; v_entry_id uuid; v_leg int; v_legs int;
-  v_discarded boolean; v_discarded_by text; v_org_edited boolean;
+  v_discarded boolean; v_discarded_by text; v_org_edited boolean; v_athlete_id uuid;
 begin
   perform public.assert_organizer();
-  select * into m from public.marks where id = p_mark_id;
+  -- A-M4: lock the mark until the update, so a concurrent tk_sync cannot slip in between and a
+  -- stale `discarded` flag is never written back.
+  select * into m from public.marks where id = p_mark_id for update;
   if not found then raise exception 'Marcação não encontrada' using errcode = 'P0001'; end if;
 
   if p_patch ? 'entry_id' then
@@ -246,9 +250,29 @@ begin
 
   v_org_edited := m.org_edited or (v_entry_id is distinct from m.entry_id) or (v_leg is distinct from m.leg_index);
 
+  -- B2-m7: a move (entry and/or leg) gives the mark the athlete of the leg it now ends -- the one
+  -- the timekeeper's phone sends as its hint -- or none when unassigned; so re-sending the same
+  -- placement is not rejected as "Alterada pela organização" because of a stale athlete_id.
+  if v_entry_id is distinct from m.entry_id or v_leg is distinct from m.leg_index then
+    v_athlete_id := null;
+    if v_entry_id is not null then
+      select em.athlete_id into v_athlete_id from public.entry_members em
+       where em.entry_id = v_entry_id and v_leg = any(em.legs)
+       order by em.position limit 1;
+      if v_athlete_id is null then
+        -- a lone member covers the whole race even if its stored legs are stale.
+        select min(em.athlete_id::text)::uuid into v_athlete_id from public.entry_members em
+         where em.entry_id = v_entry_id
+        having count(*) = 1;
+      end if;
+    end if;
+  else
+    v_athlete_id := m.athlete_id;
+  end if;
+
   update public.marks set
-    entry_id = v_entry_id, leg_index = v_leg, discarded = v_discarded, discarded_by = v_discarded_by,
-    org_edited = v_org_edited
+    entry_id = v_entry_id, leg_index = v_leg, athlete_id = v_athlete_id,
+    discarded = v_discarded, discarded_by = v_discarded_by, org_edited = v_org_edited
   where id = p_mark_id
   returning * into m;
 

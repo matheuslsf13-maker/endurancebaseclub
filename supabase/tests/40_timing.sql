@@ -150,6 +150,57 @@ do $$ declare m jsonb; begin
   assert (m ->> 'org_edited')::boolean = true, 'changing entry_id/leg_index should flip org_edited to true';
 end $$;
 
+-- B2-m7: whenever the organizer moves a mark (entry and/or leg), its athlete_id follows the leg's
+-- athlete -- or becomes null when unassigned -- so the timekeeper's identical placement (which
+-- carries that same athlete as its hint) is not rejected as "Alterada pela organização".
+reset role;
+select tests.as_anon();
+do $$ declare res jsonb; v_mark uuid := gen_random_uuid(); begin
+  perform tests.set('mark_athlete', v_mark::text);
+  res := public.tk_sync(tests.get('tk_token'), tests.get('tk_ana')::uuid, tests.get('secret_ana'), jsonb_build_array(
+    jsonb_build_object('id', v_mark, 'ts', tests.get('t0')::timestamptz + interval '12 minutes',
+      'entry_id', tests.get('entry'), 'leg_index', 0, 'athlete_id', tests.get('ath_a'), 'discarded', false)
+  ), null);
+  assert jsonb_array_length(res -> 'accepted') = 1;
+end $$;
+reset role;
+select tests.as_user(tests.get('owner')::uuid);
+do $$ declare m jsonb; begin
+  m := public.admin_update_mark(tests.get('mark_athlete')::uuid, '{"leg_index":1}'::jsonb);
+  assert (m ->> 'leg_index')::int = 1 and m ->> 'athlete_id' = tests.get('ath_b'),
+    'moving a mark to leg 1 must give it leg 1''s athlete (B), got ' || coalesce(m ->> 'athlete_id', '<null>');
+  m := public.admin_update_mark(tests.get('mark_athlete')::uuid, '{"discarded":true}'::jsonb);
+  assert m ->> 'athlete_id' = tests.get('ath_b'), 'a discard alone keeps the athlete';
+  m := public.admin_update_mark(tests.get('mark_athlete')::uuid, '{"discarded":false}'::jsonb);
+  m := public.admin_update_mark(tests.get('mark_athlete')::uuid, '{"entry_id":null}'::jsonb);
+  assert (m ->> 'athlete_id') is null, 'an unassigned mark has no athlete, got ' || coalesce(m ->> 'athlete_id', '<null>');
+  m := public.admin_update_mark(tests.get('mark_athlete')::uuid, jsonb_build_object('entry_id', tests.get('entry'), 'leg_index', 0));
+  assert m ->> 'athlete_id' = tests.get('ath_a'), 'reassigned to leg 0 -> athlete A, got ' || coalesce(m ->> 'athlete_id', '<null>');
+end $$;
+reset role;
+select tests.as_anon();
+do $$ declare res jsonb; begin
+  -- the timekeeper re-sends the same placement the organizer set (leg 0, athlete A): accepted.
+  res := public.tk_sync(tests.get('tk_token'), tests.get('tk_ana')::uuid, tests.get('secret_ana'), jsonb_build_array(
+    jsonb_build_object('id', tests.get('mark_athlete'), 'ts', tests.get('t0')::timestamptz + interval '12 minutes',
+      'entry_id', tests.get('entry'), 'leg_index', 0, 'athlete_id', tests.get('ath_a'), 'discarded', false)
+  ), null);
+  assert jsonb_array_length(res -> 'accepted') = 1 and jsonb_array_length(res -> 'rejected') = 0,
+    'an identical placement (with the leg''s athlete) must be accepted, got ' || (res -> 'rejected')::text;
+end $$;
+reset role;
+select tests.as_user(tests.get('owner')::uuid);
+
+-- A-M3: admin_get_event never sends a timekeeper's secret to the organizer's browser.
+do $$ declare agg jsonb; t jsonb; begin
+  agg := public.admin_get_event(tests.get('ev')::uuid);
+  assert jsonb_array_length(agg -> 'timekeepers') = 2;
+  for t in select el from jsonb_array_elements(agg -> 'timekeepers') as x(el) loop
+    assert not (t ? 'secret'), 'admin_get_event must never return a timekeeper secret';
+    assert (t ? 'marks_count') and (t ? 'name') and (t ? 'active'), 'admin_get_event keeps the other timekeeper fields';
+  end loop;
+end $$;
+
 -- admin_update_timekeeper deactivates Ana; her tk_sync now fails outright, and the row never
 -- carries the secret back.
 do $$ declare t jsonb; begin
@@ -208,7 +259,7 @@ select tests.assert_raises(
 -- admin_live: sees every mark, the one resolution and the one wave of the event.
 do $$ declare live jsonb; begin
   live := public.admin_live(tests.get('ev')::uuid, null);
-  assert jsonb_array_length(live -> 'marks') = 4, 'expected 4 marks, got ' || jsonb_array_length(live -> 'marks');
+  assert jsonb_array_length(live -> 'marks') = 5, 'expected 5 marks, got ' || jsonb_array_length(live -> 'marks');
   assert jsonb_array_length(live -> 'resolutions') = 1, 'expected 1 resolution, got ' || jsonb_array_length(live -> 'resolutions');
   assert jsonb_array_length(live -> 'waves') = 1, 'expected 1 wave, got ' || jsonb_array_length(live -> 'waves');
 end $$;
@@ -279,10 +330,11 @@ end $$;
 reset role;
 select tests.as_anon();
 do $$ declare res jsonb; begin
-  -- an identical re-send (matching the organizer-set state exactly) is idempotently accepted.
+  -- an identical re-send (matching the organizer-set state exactly: leg 0 and, like the phone
+  -- sends it, leg 0's athlete as the hint -- B2-m7) is idempotently accepted.
   res := public.tk_sync(tests.get('tk_token'), tests.get('tk_carla')::uuid, tests.get('secret_carla'), jsonb_build_array(
     jsonb_build_object('id', tests.get('mark_replay'), 'ts', tests.get('t0')::timestamptz + interval '20 minutes',
-      'entry_id', tests.get('entry'), 'leg_index', 0, 'discarded', false)
+      'entry_id', tests.get('entry'), 'leg_index', 0, 'athlete_id', tests.get('ath_a'), 'discarded', false)
   ), null);
   assert jsonb_array_length(res -> 'accepted') = 1, 'an identical re-send matching current state should be accepted';
 end $$;
@@ -346,6 +398,18 @@ do $$ declare res jsonb; agg jsonb; begin
   assert jsonb_array_length(agg -> 'results') = 0, 'results should be deleted';
 end $$;
 select tests.assert_raises($$select public.admin_unfinalize_race(gen_random_uuid())$$, 'P0001');
+
+-- A-M4: tk_sync and admin_update_mark read a mark and then write it; both lock the row they read
+-- (select ... for update) so an organizer move committing in between can never be overwritten by
+-- a timekeeper replay (Ruling 27), nor a stale "discarded" flag restored by the organizer.
+reset role;
+do $$ declare def text; begin
+  def := pg_get_functiondef('public.tk_sync(text,uuid,text,jsonb,timestamptz)'::regprocedure);
+  assert (select count(*) from regexp_matches(def, 'from public\.marks where id = v_id for update', 'g')) = 2,
+    'tk_sync must lock the mark in both of its reads (first read and the re-read after a lost insert race)';
+  def := pg_get_functiondef('public.admin_update_mark(uuid,jsonb)'::regprocedure);
+  assert def ~ 'from public\.marks where id = p_mark_id for update', 'admin_update_mark must lock the mark it reads';
+end $$;
 
 reset role;
 rollback;

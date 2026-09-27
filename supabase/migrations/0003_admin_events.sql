@@ -228,8 +228,9 @@ begin
       join public.entries en on en.id = m.entry_id
       where en.event_id = ev.id
     ), '[]'::jsonb),
+    -- A-M3: the secret never leaves the server after tk_register (not even to organizers).
     'timekeepers', coalesce((
-      select jsonb_agg(to_jsonb(t) || jsonb_build_object(
+      select jsonb_agg((to_jsonb(t) - 'secret') || jsonb_build_object(
         'marks_count', (select count(*) from public.marks mk where mk.timekeeper_id = t.id and mk.event_id = ev.id)
       ))
       from public.timekeepers t where t.event_id = ev.id
