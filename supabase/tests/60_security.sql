@@ -14,6 +14,27 @@ do $$ begin
     'a function created after 0006 must not be executable by authenticated';
 end $$;
 
+-- A-M6: the full EXECUTE matrix (Rulings 15/35), run on production too (T29): anon can execute
+-- exactly tk_* (except tk_event), pub_* and server_time; authenticated exactly those plus admin_*.
+-- Every function of schema public is checked both ways, so a grant slipped in by a later migration
+-- (or one missing for a new RPC) fails here by name.
+do $$ declare bad text; begin
+  select string_agg(p.oid::regprocedure::text, ', ' order by p.proname) into bad
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public'
+    and has_function_privilege('anon', p.oid, 'execute')
+      <> ((p.proname like 'tk\_%' and p.proname <> 'tk_event') or p.proname like 'pub\_%' or p.proname = 'server_time');
+  assert bad is null, 'anon EXECUTE differs from tk_*/pub_*/server_time for: ' || bad;
+
+  select string_agg(p.oid::regprocedure::text, ', ' order by p.proname) into bad
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public'
+    and has_function_privilege('authenticated', p.oid, 'execute')
+      <> ((p.proname like 'tk\_%' and p.proname <> 'tk_event') or p.proname like 'pub\_%' or p.proname = 'server_time'
+          or p.proname like 'admin\_%');
+  assert bad is null, 'authenticated EXECUTE differs from admin_*/tk_*/pub_*/server_time for: ' || bad;
+end $$;
+
 select tests.as_anon();
 select tests.assert_raises($$select * from public.events$$, '42501');
 select tests.assert_raises($$select * from public.marks$$, '42501');
