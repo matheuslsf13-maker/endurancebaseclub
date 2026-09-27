@@ -65,7 +65,14 @@ const SERVER_ERRORS: Record<string, { message: string; network?: boolean }> = {
 /** The error the app shows for a failed RPC answer (`status` = its HTTP status). */
 function serverError(error: { message?: string; code?: string | null }, status: number | null): ApiError {
   const code = error.code || null;
-  if (code === 'P0001' || code === '42501') return new ApiError(error.message || 'Erro inesperado', code, status);
+  if (code === 'P0001') return new ApiError(error.message || 'Erro inesperado', code, status);
+  if (code === '42501') {
+    // Our own checks raise pt-BR texts ("Acesso restrito à organização"); Postgres's grant checks
+    // raise English ones ("permission denied for function …", "must be owner of …").
+    const message = error.message ?? '';
+    const english = message === '' || /^(permission denied|must be owner)/i.test(message);
+    return new ApiError(english ? 'Sem permissão para esta ação.' : message, code, status);
+  }
   const known = code ? SERVER_ERRORS[code] : undefined;
   if (known) return new ApiError(known.message, known.network ? 'network' : code, status);
   // A gateway/5xx body (HTML or English text) says only that the server is not answering.

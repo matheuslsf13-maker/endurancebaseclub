@@ -102,6 +102,17 @@ describe('api', () => {
     expect(err).toMatchObject({ message: 'Acesso restrito à organização', code: '42501', status: 403 });
   });
 
+  it.each([
+    'permission denied for function admin_list_events',
+    'permission denied for table events',
+    'must be owner of function tk_event',
+  ])('turns a 42501 raised by Postgres itself ("%s") into pt-BR', async (original) => {
+    answer.mockResolvedValue({ data: null, error: { message: original, code: '42501' }, status: 403 });
+    const err = await api.admin.listEvents().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ message: 'Sem permissão para esta ação.', code: '42501', status: 403 });
+  });
+
   it.each<[string, string, number, string, string]>([
     ['statement timeout', '57014', 500, 'canceling statement due to statement timeout', 'O servidor demorou demais para responder. Tente de novo.'],
     ['unique violation', '23505', 409, 'duplicate key value violates unique constraint "entries_event_id_bib_key"',
