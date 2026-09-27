@@ -42,6 +42,7 @@ export const ISSUE_LABEL: Record<IssueType, string> = {
   unassigned: 'Sem atleta',
   chosen_mark_discarded: 'Escolha descartada',
   not_finished: 'Em prova',
+  status_with_crossings: 'Status com passagens',
 };
 
 /** The name of the timekeeper `id` resolves to, or undefined for `null`/an unknown id. */

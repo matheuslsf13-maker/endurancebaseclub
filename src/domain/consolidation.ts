@@ -20,7 +20,9 @@ export interface EntryTiming {
   total_ms: number | null; final_ms: number | null; status: TimingStatus;
   current_leg: number | null; current_leg_start_ms: number | null;
 }
-export type IssueType = 'divergence' | 'missing_crossing' | 'order' | 'duplicate' | 'no_start' | 'unassigned' | 'chosen_mark_discarded' | 'not_finished';
+export type IssueType =
+  | 'divergence' | 'missing_crossing' | 'order' | 'duplicate' | 'no_start' | 'unassigned' | 'chosen_mark_discarded'
+  | 'not_finished' | 'status_with_crossings';
 export interface Issue {
   type: IssueType; severity: 'error' | 'warning' | 'info'; message: string;
   entry_id?: string; race_id?: string; leg_index?: number; mark_ids?: string[]; suggested_leg_index?: number;
@@ -203,7 +205,9 @@ function entryIssues(
     }
 
     if (c.chosen_mark_discarded) {
-      issues.push({ type: 'chosen_mark_discarded', severity: 'warning', message: `${where}: a marcação escolhida foi descartada`, ...legRefs });
+      // The chosen mark is no longer a usable candidate of this crossing: discarded, or moved to
+      // another leg/entry (B1-M6).
+      issues.push({ type: 'chosen_mark_discarded', severity: 'warning', message: `${where}: a marcação escolhida foi descartada ou movida`, ...legRefs });
     }
     if (c.official_ms === null && k < lastPassed) {
       issues.push({ type: 'missing_crossing', severity: 'error', message: `${where}: passagem não registrada (há passagem posterior)`, ...legRefs });
@@ -219,6 +223,17 @@ function entryIssues(
   }
   if (timing.status === 'on_course') {
     issues.push({ type: 'not_finished', severity: 'info', message: `Nº ${entry.bib}: ainda em prova`, ...refs });
+  }
+  // B1-M7: a DNS/DNF/DSQ entry leaves the classification, so crossings recorded for it must not go
+  // unnoticed. It is a warning when they contradict the status (DNS with any crossing, DNF with a
+  // finish); a DNF after an early leg, or a DSQ, normally has crossings, so it is only shown (info).
+  if (entry.status !== 'ok' && lastPassed >= 0) {
+    const finished = lastPassed === timing.legs.length - 1;
+    const contradicts = entry.status === 'dns' || (entry.status === 'dnf' && finished);
+    issues.push({
+      type: 'status_with_crossings', severity: contradicts ? 'warning' : 'info',
+      message: `Nº ${entry.bib} está como ${entry.status.toUpperCase()} mas tem passagens`, ...refs,
+    });
   }
   return issues;
 }
