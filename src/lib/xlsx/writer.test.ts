@@ -44,6 +44,22 @@ describe('helpers', () => {
     expect(long.length).toBeLessThanOrEqual(31);
     expect(sanitizeSheetName('Classificação – Triathlon Olímpico Revezamento', used).endsWith(' (2)')).toBe(true);
   });
+  it('keeps sheet names unique ignoring case, as Excel requires (B1-M2)', () => {
+    const used = new Set<string>();
+    expect(sanitizeSheetName('Tempos – Corrida 5k', used)).toBe('Tempos – Corrida 5k');
+    expect(sanitizeSheetName('Tempos – Corrida 5K', used)).toBe('Tempos – Corrida 5K (2)');
+    expect(sanitizeSheetName('TEMPOS – CORRIDA 5K', used)).toBe('TEMPOS – CORRIDA 5K (3)');
+  });
+  it('never starts or ends a sheet name with an apostrophe (B1-M2)', () => {
+    const used = new Set<string>();
+    expect(sanitizeSheetName("'Prova da Lagoa'", used)).toBe('Prova da Lagoa');
+    expect(sanitizeSheetName("Tempos – Corrida d'Água", used)).toBe("Tempos – Corrida d'Água");
+    // Truncated at 31 characters right after an apostrophe.
+    const cut = sanitizeSheetName("Classificação – Travessia Ri d'Ouro", used);
+    expect(cut.length).toBeLessThanOrEqual(31);
+    expect(cut.startsWith("'") || cut.endsWith("'")).toBe(false);
+    expect(sanitizeSheetName("''", used)).toBe('Planilha');
+  });
   it('column letters', () => {
     expect([0, 25, 26, 701, 702].map(colLetter)).toEqual(['A', 'Z', 'AA', 'ZZ', 'AAA']);
   });

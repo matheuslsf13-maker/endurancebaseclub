@@ -45,20 +45,27 @@ export function entryWave(entry: EntryRow, idx: EventIndex): WaveRow | null {
 }
 
 /** `team_name` when set; otherwise member athlete names (in member-position order) joined by
- * ' / '; falls back to `Nº <bib>` when no member name can be resolved from the index. */
+ * ' / ' — from the index, else the name the member row carries (snapshot rows); falls back to
+ * `Nº <bib>` when no member name can be resolved. */
 export function entryDisplayName(entry: EntryRow, idx: EventIndex): string {
   if (entry.team_name) return entry.team_name;
   const names = entry.members
     .slice()
     .sort((a, b) => a.position - b.position)
-    .map(m => idx.athletesById.get(m.athlete_id)?.name)
+    .map(m => idx.athletesById.get(m.athlete_id)?.name ?? m.name)
     .filter((n): n is string => !!n);
   return names.length > 0 ? names.join(' / ') : `Nº ${entry.bib}`;
 }
 
-/** The id of the member assigned to `legIndex`, or null if no member covers that leg. */
+/**
+ * The id of the member assigned to `legIndex`, or null if no member covers that leg. An entry with
+ * a single member is that athlete's for every leg, even when its stored legs are stale (created
+ * before the race gained legs — B1-I2).
+ */
 export function legAthleteId(entry: EntryRow, legIndex: number): string | null {
-  return entry.members.find(m => m.legs.includes(legIndex))?.athlete_id ?? null;
+  const covering = entry.members.find(m => m.legs.includes(legIndex));
+  if (covering) return covering.athlete_id;
+  return entry.members.length === 1 ? entry.members[0].athlete_id : null;
 }
 
 /**

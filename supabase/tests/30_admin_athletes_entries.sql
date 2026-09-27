@@ -244,5 +244,23 @@ do $$ declare a jsonb; begin
   assert not exists (select 1 from jsonb_array_elements(public.admin_list_athletes()) x where x ->> 'name' = 'Descartável');
 end $$;
 
+-- A-M7: every per-athlete lookup into results uses `athlete_ids @> array[<id>]`, which the GIN
+-- index results_athletes_idx can serve (`<id> = any(athlete_ids)` cannot: 3 sequential scans of
+-- results per athlete in admin_list_athletes).
+reset role;
+do $$ declare f text; def text; line text; plan text := ''; begin
+  foreach f in array array['public.admin_list_athletes()', 'public.admin_athlete_profile(uuid)', 'public.pub_athlete(uuid)'] loop
+    def := pg_get_functiondef(f::regprocedure);
+    assert def !~* 'any\s*\(\s*r\.athlete_ids\s*\)', f || ' must not look results up with = any(r.athlete_ids)';
+    assert def ~ 'r\.athlete_ids\s*@>\s*array\[', f || ' must look results up with r.athlete_ids @> array[...]';
+  end loop;
+  perform set_config('enable_seqscan', 'off', true);
+  for line in execute $q$explain select 1 from public.results r where r.athlete_ids @> array['00000000-0000-0000-0000-000000000001'::uuid]$q$ loop
+    plan := plan || line || E'\n';
+  end loop;
+  perform set_config('enable_seqscan', 'on', true);
+  assert plan like '%results_athletes_idx%', 'the @> form must be able to use results_athletes_idx, plan: ' || plan;
+end $$;
+
 reset role;
 rollback;

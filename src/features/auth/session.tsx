@@ -64,16 +64,28 @@ function authError(e: unknown): ApiError {
   return new ApiError(err.message || 'Erro inesperado', err.code ?? null);
 }
 
+/** `storageKey` of the Supabase client (src/lib/supabase.ts) and the keys auth-js derives from it. */
+const AUTH_STORAGE_KEYS = ['ebc.auth', 'ebc.auth-user', 'ebc.auth-code-verifier'];
+
 /**
  * Ends the session on this device only. `scope: 'global'` (the supabase-js default) would revoke the
  * organizer's refresh tokens everywhere: the master laptop must not log out because a phone did.
- * supabase-js removes the local copy even when the logout request itself fails.
+ *
+ * supabase-js does NOT always remove the local copy: with an expired access token and no network,
+ * its signOut fails to refresh first and returns that error before removing the stored session
+ * (auth-js `_signOut`), so the refresh token would survive a "Sair" and the session come back when
+ * coverage returns. The stored session is therefore removed here whatever signOut returned (A-I2).
  */
 async function dropSession(): Promise<void> {
   try {
     await supabase.auth.signOut({ scope: 'local' });
   } catch {
-    // Nothing left to do: the session is gone locally either way.
+    // Removed below either way.
+  }
+  try {
+    for (const key of AUTH_STORAGE_KEYS) window.localStorage.removeItem(key);
+  } catch {
+    // Storage unavailable (private mode, blocked site data): nothing was persisted there either.
   }
 }
 
@@ -88,6 +100,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
   // Set while signIn runs, so its own SIGNED_IN event does not load the profile a second time.
   const signingIn = useRef(false);
+  // Set by an explicit "Sair" until the next explicit signIn: a TOKEN_REFRESHED/SIGNED_IN that
+  // auth-js fires afterwards (its refresh timer still holding the old session) must not bring the
+  // organizer back on a device that was just handed to someone else (A-I2).
+  const signedOut = useRef(false);
 
   // Being signed in is not enough: only accounts with an `organizers` row get in. For any other
   // account admin_me answers 42501 — sign it out and let the UI explain why.
@@ -117,7 +133,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // yet, a 5xx, a captive portal — keeps the session and tries again with backoff: a network
     // hiccup on race day must never log the organizer out.
     const restore = async () => {
-      if (cancelled || running) return;
+      if (cancelled || running || signedOut.current) return;
       running = true;
       clearTimeout(retry);
       let again = false;
@@ -158,6 +174,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       } else if (
         (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') &&
         !signingIn.current &&
+        !signedOut.current &&
         (statusRef.current === 'loading' || statusRef.current === 'anon')
       ) {
         // The token was refreshed once the network came back, or another tab signed in.
@@ -176,6 +193,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const signIn = useCallback(
     async (email: string, password: string) => {
       signingIn.current = true;
+      signedOut.current = false;
       try {
         let error: unknown;
         try {
@@ -194,6 +212,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Cached admin data (athletes' contacts included) must not outlive the session on this device.
   const signOut = useCallback(async () => {
+    signedOut.current = true;
     await dropSession();
     apply(ANON);
     queryClient.clear();

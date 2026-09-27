@@ -28,19 +28,26 @@ export function colLetter(index0: number): string {
   return out;
 }
 
-/** Sanitizes a name for use as an Excel sheet name, de-duplicating against `used` (which is mutated). */
+/** Excel's other sheet-name rule: no apostrophe (nor stray space) at either end (B1-M2). */
+const trimSheetName = (s: string): string => s.replace(/^['\s]+|['\s]+$/g, '');
+
+/**
+ * Sanitizes a name for use as an Excel sheet name — no []:*?/\ characters, at most 31 characters,
+ * no apostrophe at either end — de-duplicating against `used` (which is mutated) ignoring case,
+ * as Excel does (B1-M2: "Corrida 5k" and "Corrida 5K" would otherwise make Excel "repair" the file).
+ */
 export function sanitizeSheetName(name: string, used: Set<string>): string {
-  let base = name.replace(/[[\]:*?/\\]/g, ' ').replace(/\s+/g, ' ').trim();
+  let base = trimSheetName(name.replace(/[[\]:*?/\\]/g, ' ').replace(/\s+/g, ' '));
   if (base === '') base = 'Planilha';
-  base = base.slice(0, 31);
+  base = trimSheetName(base.slice(0, 31));
   let candidate = base;
   let n = 2;
-  while (used.has(candidate)) {
+  while (used.has(candidate.toLocaleLowerCase('pt-BR'))) {
     const suffix = ` (${n})`;
-    candidate = base.slice(0, Math.max(0, 31 - suffix.length)) + suffix;
+    candidate = trimSheetName(base.slice(0, Math.max(0, 31 - suffix.length))) + suffix;
     n++;
   }
-  used.add(candidate);
+  used.add(candidate.toLocaleLowerCase('pt-BR'));
   return candidate;
 }
 
