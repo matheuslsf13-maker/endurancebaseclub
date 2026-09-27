@@ -12,29 +12,37 @@ wait_text pub "$(tid public-results)" "Tubarões"
 expect_text pub "$(tid public-results)" "Resultado oficial"
 snap pub 04-public-results
 
+step "public results page never leaks e-mail, phone or birth date (C-Minor-18)"
+# Checked here, before navigating away — [data-testid=public-results] no longer exists once the
+# SPA moves to the athlete page below. Defensive IIFE: an element that's momentarily absent (a
+# re-render) reads as '' rather than crashing the whole scenario on a TypeError.
+PUB_RESULTS_TEXT=$(js_str pub "(() => { const el = document.querySelector('[data-testid=public-results]'); return el ? el.innerText : ''; })()")
+python3 - "$PUB_RESULTS_TEXT" <<'PY' || fail pub "the public results page leaks private athlete data"
+import sys
+text = sys.argv[1]
+assert text, 'public-results text came back empty — element not found'
+# pub_event must return only public athlete fields (spec §6) — never birth_date, email or phone.
+assert '@' not in text, 'an e-mail-like "@" is visible on the public results page'
+assert '1990' not in text, "an athlete's birth year is visible on the public results page"
+PY
+
 step "public athlete page"
 click_with_text pub "$(tid public-results) a[href*=\"#/atleta/\"]" "Ana"
 wait_tid pub public-athlete
 wait_text pub "$(tid public-athlete)" "Participações"
 snap pub 04-public-athlete
 
-step "public pages never leak e-mail, phone or birth date (C-Minor-18)"
-PUB_ATHLETE_TEXT=$(js_str pub "document.querySelector('[data-testid=public-athlete]').innerText")
+step "public athlete page never leaks e-mail, phone or birth date (C-Minor-18)"
+PUB_ATHLETE_TEXT=$(js_str pub "(() => { const el = document.querySelector('[data-testid=public-athlete]'); return el ? el.innerText : ''; })()")
 python3 - "$PUB_ATHLETE_TEXT" <<'PY' || fail pub "the public athlete page leaks private athlete data"
 import sys
 text = sys.argv[1]
+assert text, 'public-athlete text came back empty — element not found'
 # Ana's fixture (01_master_setup.sh): birth date 15/06/1990. pub_athlete must return only
 # {id,name,sex,city,team_club} (spec §6) — never birth_date, email or phone.
 assert '@' not in text, 'an e-mail-like "@" is visible on the public athlete page'
 assert '1990' not in text, "Ana's birth year is visible on the public athlete page"
 assert '15/06' not in text, "Ana's birth date is visible on the public athlete page"
-PY
-PUB_RESULTS_TEXT=$(js_str pub "document.querySelector('[data-testid=public-results]').innerText")
-python3 - "$PUB_RESULTS_TEXT" <<'PY' || fail pub "the public results page leaks private athlete data"
-import sys
-text = sys.argv[1]
-assert '@' not in text, 'an e-mail-like "@" is visible on the public results page'
-assert '1990' not in text, "an athlete's birth year is visible on the public results page"
 PY
 
 step "public pages at 390×844"
