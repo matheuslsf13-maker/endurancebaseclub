@@ -46,6 +46,12 @@ describe('eventModel', () => {
     expect(entryWave(entry, idx)).toBeNull();
   });
 
+  it('entryDisplayName uses the name a member row carries when the index lacks that athlete (snapshot rows)', () => {
+    const idx = indexEvent({ races: [], waves: [], entries: [], athletes: [], timekeepers: [] });
+    const entry = makeEntry({ members: [{ athlete_id: 'gone', position: 0, legs: [0], name: 'Nome no snapshot' }] });
+    expect(entryDisplayName(entry, idx)).toBe('Nome no snapshot');
+  });
+
   it('entryDisplayName prefers team_name', () => {
     const idx = indexEvent({ races: [], waves: [], entries: [], athletes: [], timekeepers: [] });
     const entry = makeEntry({ team_name: 'Tubarões' });
@@ -71,6 +77,15 @@ describe('eventModel', () => {
     expect(legAthleteId(entry, 0)).toBe('a1');
     expect(legAthleteId(entry, 2)).toBe('a2');
     expect(legAthleteId(entry, 5)).toBeNull();
+  });
+
+  it('legAthleteId falls back to the only member of an entry whose stored legs are stale (B1-I2)', () => {
+    // An individual entry created when the race had 1 leg, read after the race became a duathlon.
+    const solo = makeEntry({ members: [{ athlete_id: 'a1', position: 0, legs: [0] }] });
+    expect(legAthleteId(solo, 0)).toBe('a1');
+    expect(legAthleteId(solo, 2)).toBe('a1');
+    const empty = makeEntry({ members: [] });
+    expect(legAthleteId(empty, 0)).toBeNull();
   });
 
   it('mergeById replaces with a newer incoming, keeps a newer current, and appends unknown ids in order', () => {

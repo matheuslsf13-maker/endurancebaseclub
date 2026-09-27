@@ -72,6 +72,19 @@ describe('suggestLeg edge cases', () => {
   });
 });
 
+describe('suggestLeg with stale member legs (B1-I2)', () => {
+  it('never suggests a leg the race no longer has, even for a selected athlete whose stored legs are stale', () => {
+    // The member still carries legs [0, 1, 2] from when the race had three legs; it now has two.
+    const e = makeEntry({ members: [{ athlete_id: 'a1', position: 0, legs: [0, 1, 2] }] });
+    const marks = [makeMark({ at: T0 + 10 * MIN, leg_index: 0 }), makeMark({ at: T0 + 30 * MIN, leg_index: 1 })];
+    const s = suggestLeg({ entry: e, race: solo, marks, tsMs: T0 + 60 * MIN, athleteId: 'a1' });
+    expect(s).toMatchObject({ leg_index: 1, warning: 'already_finished' });
+    expect(() => planBibAssignment({
+      entries: [e], racesById: new Map([[solo.id, solo]]), marks, markId: null, tsMs: T0 + 60 * MIN, bibText: '101', athleteId: 'a1',
+    })).not.toThrow();
+  });
+});
+
 describe('planBibAssignment', () => {
   const racesById = new Map([[solo.id, solo]]);
   it('reports an unknown bib', () => {
