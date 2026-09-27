@@ -171,7 +171,7 @@ export default function EntriesTab() {
     try {
       await api.admin.deleteEntry(entry.id);
       await refresh();
-      toast.show({ message: 'Inscrição excluída.', tone: 'success' });
+      toast.show({ message: 'Inscrição excluída', tone: 'success' });
     } catch (err) {
       toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
     }

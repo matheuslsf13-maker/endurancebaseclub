@@ -344,7 +344,8 @@ export function EntryForm({ initial, defaultRaceId, onSaved, onCancel }: EntryFo
 
       {isTeam && (
         <div className="flex flex-col gap-3">
-          <p className="text-sm font-medium text-fg">Quem corre cada perna</p>
+          {/* C-Minor-17: "corre" was wrong for a swim/bike leg — "faz" applies to any modality. */}
+          <p className="text-sm font-medium text-fg">Quem faz cada perna</p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {race.legs.map((leg, k) => (
               <Select

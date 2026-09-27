@@ -83,7 +83,7 @@ export default function SettingsPage() {
                   <p className="text-sm text-muted">{o.email}</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Badge tone={o.role === 'owner' ? 'info' : 'neutral'}>{o.role === 'owner' ? 'Dono' : 'Organizador'}</Badge>
+                  <Badge tone={o.role === 'owner' ? 'info' : 'neutral'}>{o.role === 'owner' ? 'Organizadora master' : 'Organizador'}</Badge>
                   {isOwner && o.user_id !== me?.user_id && (
                     <Button
                       size="sm"
@@ -145,7 +145,7 @@ function MyAccountCard() {
         <dt className="text-muted">E-mail</dt>
         <dd>{me?.email}</dd>
         <dt className="text-muted">Função</dt>
-        <dd>{me?.role === 'owner' ? 'Dono' : 'Organizador'}</dd>
+        <dd>{me?.role === 'owner' ? 'Organizadora master' : 'Organizador'}</dd>
       </dl>
       <form className="flex flex-col gap-3" onSubmit={(e) => void onSubmit(e)} noValidate>
         <p className="text-sm font-medium">Trocar senha</p>

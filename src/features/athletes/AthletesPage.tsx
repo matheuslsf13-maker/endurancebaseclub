@@ -81,7 +81,7 @@ export default function AthletesPage() {
     if (!ok) return;
     try {
       await api.admin.deleteAthlete(a.id);
-      toast.show({ message: 'Atleta excluído.', tone: 'success' });
+      toast.show({ message: 'Atleta excluído', tone: 'success' });
       void refreshList();
     } catch (err) {
       toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });

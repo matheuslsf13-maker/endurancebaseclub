@@ -35,7 +35,7 @@ export default function AthleteProfilePage() {
     try {
       await api.admin.deleteAthlete(athlete.id);
       void queryClient.invalidateQueries({ queryKey: ['athletes'] });
-      toast.show({ message: 'Atleta excluído.', tone: 'success' });
+      toast.show({ message: 'Atleta excluído', tone: 'success' });
       navigate('/atletas');
     } catch (err) {
       toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
