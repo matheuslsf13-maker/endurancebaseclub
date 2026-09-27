@@ -47,6 +47,17 @@ describe('ClockSync', () => {
     c.addSample({ t0: 11_000, t1: 11_050, server: 13_425 }); // rtt 50 -> offset 2400
     expect(c.offsetMs).toBe(2400);
   });
+  it('keeps the good low-RTT samples when one slow, asymmetric sample arrives (not a clock step)', () => {
+    const c = new ClockSync({ now: () => 0 });
+    c.addSample({ t0: 1000, t1: 1100, server: 6050 }); // rtt 100 -> offset 5000 (true offset)
+    c.addSample({ t0: 2000, t1: 2200, server: 7100 }); // rtt 200 -> offset 5000
+    // Request 2.9 s, response 0.1 s on a congested link: rtt 3000, offset 6400 — its error (up to
+    // rtt/2 = 1.5 s) explains the 1.4 s gap, so its interval overlaps the good samples'.
+    c.addSample({ t0: 10_000, t1: 13_000, server: 17_900 });
+    expect(c.offsetMs).toBe(5000);
+    expect(c.rttMs).toBe(100);
+    expect(c.state()).toEqual({ offset_ms: 5000, rtt_ms: 100, synced_at: 0 });
+  });
   it('treats a restored state older than maxInitialAgeMs as not synchronized, but still applies its offset (B2-m4)', () => {
     const H = 3_600_000;
     const stale = new ClockSync({ now: () => 13 * H, initial: { offset_ms: 700, rtt_ms: 80, synced_at: 0 }, maxInitialAgeMs: 12 * H });

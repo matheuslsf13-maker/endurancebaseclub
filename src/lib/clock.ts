@@ -21,8 +21,9 @@ interface EffectiveSample {
   addedAt: number;
 }
 
-/** A sample whose offset differs from the newest one by more than this is from before a device
- * clock step (an OS/NTP/NITZ correction), not network jitter: it is dropped (B1-M11). */
+/** A sample whose offset differs from the newest one by more than this — beyond what both samples'
+ * round-trip uncertainty (rtt/2 each) can explain — is from before a device clock step (an
+ * OS/NTP/NITZ correction), not network jitter: it is dropped (B1-M11). */
 const CLOCK_STEP_MS = 1_000;
 
 export class ClockSync {
@@ -49,8 +50,11 @@ export class ClockSync {
     if (rtt < 0) return;
     const offset = Math.round(s.server - (s.t0 + s.t1) / 2);
     // After a device clock step every earlier sample is off by the size of the step; keeping them
-    // would let a pre-step minimum-RTT sample win for up to `maxSamples` more samples.
-    this.samples = this.samples.filter(x => Math.abs(x.offset - offset) <= CLOCK_STEP_MS);
+    // would let a pre-step minimum-RTT sample win for up to `maxSamples` more samples. A sample's
+    // offset is only known within ±rtt/2 (asymmetric request/response), so an earlier sample counts
+    // as pre-step only when the two offset intervals cannot overlap even with 1 s of slack — one
+    // slow, lopsided sample must never evict the good low-RTT ones.
+    this.samples = this.samples.filter(x => Math.abs(x.offset - offset) <= CLOCK_STEP_MS + (x.rtt + rtt) / 2);
     this.samples.push({ offset, rtt, addedAt: this.nowFn() });
     if (this.samples.length > this.maxSamples) this.samples.shift();
   }
