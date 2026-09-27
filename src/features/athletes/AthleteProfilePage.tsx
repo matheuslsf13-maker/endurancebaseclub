@@ -117,7 +117,7 @@ export default function AthleteProfilePage() {
         <StatsView athlete={athlete} results={results} />
       </div>
 
-      <Modal open={editing} onClose={() => setEditing(false)} title="Editar atleta" size="lg">
+      <Modal open={editing} onClose={() => setEditing(false)} title="Editar atleta" size="lg" closeOnBackdrop={false}>
         <AthleteForm initial={athlete} onSaved={handleSaved} onCancel={() => setEditing(false)} />
       </Modal>
     </div>

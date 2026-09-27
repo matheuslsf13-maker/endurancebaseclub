@@ -18,6 +18,25 @@ wait_tid pub public-athlete
 wait_text pub "$(tid public-athlete)" "Participações"
 snap pub 04-public-athlete
 
+step "public pages never leak e-mail, phone or birth date (C-Minor-18)"
+PUB_ATHLETE_TEXT=$(js_str pub "document.querySelector('[data-testid=public-athlete]').innerText")
+python3 - "$PUB_ATHLETE_TEXT" <<'PY' || fail pub "the public athlete page leaks private athlete data"
+import sys
+text = sys.argv[1]
+# Ana's fixture (01_master_setup.sh): birth date 15/06/1990. pub_athlete must return only
+# {id,name,sex,city,team_club} (spec §6) — never birth_date, email or phone.
+assert '@' not in text, 'an e-mail-like "@" is visible on the public athlete page'
+assert '1990' not in text, "Ana's birth year is visible on the public athlete page"
+assert '15/06' not in text, "Ana's birth date is visible on the public athlete page"
+PY
+PUB_RESULTS_TEXT=$(js_str pub "document.querySelector('[data-testid=public-results]').innerText")
+python3 - "$PUB_RESULTS_TEXT" <<'PY' || fail pub "the public results page leaks private athlete data"
+import sys
+text = sys.argv[1]
+assert '@' not in text, 'an e-mail-like "@" is visible on the public results page'
+assert '1990' not in text, "an athlete's birth year is visible on the public results page"
+PY
+
 step "public pages at 390×844"
 ab pub set viewport 390 844 >/dev/null
 ab pub open "$APP/#/p/$SLUG" >/dev/null
