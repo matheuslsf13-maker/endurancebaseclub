@@ -27,7 +27,7 @@ function WaveRowItem({ raceName, wave }: WaveRowItemProps) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function applyStart(startAt: string | null) {
+  async function applyStart(startAt: string | null): Promise<boolean> {
     setBusy(true);
     try {
       const updated = await api.admin.setWaveStart(wave.id, startAt);
@@ -36,21 +36,38 @@ function WaveRowItem({ raceName, wave }: WaveRowItemProps) {
       // marks already exist (Review Focus 5: "esqueceram de apertar Largar").
       patchAgg((a) => ({ ...a, waves: a.waves.map((w) => (w.id === updated.id ? updated : w)) }));
       await refresh();
+      return true;
     } catch (e) {
       toast.show({ message: errorMessage(e), tone: 'danger' });
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
   async function handleLargarAgora() {
+    // B2-m9: pressing "Largar agora" on a wave that already started replaces its start — say
+    // which start, and keep it for Desfazer.
+    const previous = wave.start_at;
     const ok = await confirm({
       title: `Largar ${raceName} – ${wave.name} agora?`,
-      confirmLabel: 'Largar agora',
+      message: previous
+        ? `Esta onda largou às ${formatClock(Date.parse(previous), { tenths: true })} — substituir pelo horário de agora?`
+        : undefined,
+      confirmLabel: previous ? 'Substituir largada' : 'Largar agora',
+      danger: previous !== null,
     });
     if (!ok) return;
     const nowMs = clock.now();
-    await applyStart(new Date(nowMs).toISOString());
+    const done = await applyStart(new Date(nowMs).toISOString());
+    if (done && previous) {
+      toast.show({
+        message: `Nova largada de ${raceName} – ${wave.name}: ${formatClock(nowMs, { tenths: true })} (antes ${formatClock(Date.parse(previous), { tenths: true })})`,
+        tone: 'success',
+        durationMs: 15_000,
+        actions: [{ label: 'Desfazer', onClick: () => void applyStart(previous) }],
+      });
+    }
   }
 
   function handleSave(e: FormEvent<HTMLFormElement>) {
