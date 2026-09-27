@@ -48,6 +48,7 @@ Owns: src/features/timekeeper/**, src/features/timing/**, src/features/review/**
 14. B2-m12 — pt-BR decimals with comma ("3,5 s", "+0,3 s") and no "(s)" plurals in Review/CrossingEditor/ResultsTab.
 15. B2-m13 — revoke the export blob URL after a delay (iOS Safari).
 16. T28 minors (B2 triage) — bib field: no caret-looks-like-"+" (empty/other placeholder); CrossingEditor wide enough to reach "Mover para" without sideways scroll at 1280 px; no "Duda · Duda" subtitle for individual entries.
+17. (from Fixer 1, Ruling 59 entry) — api.ts now maps server 5xx to code 'network'; the timekeeper header must tell a server error from no internet ("Sem conexão com o servidor · N marcações guardadas" vs "Sem internet · …") with the same pending/retry behaviour. Also pass `race.config` as the new 4th argument of `crossingSourceLabel` wherever the timing/review screens call it.
 
 ## Fixer 3 — organizer/public UI, kit, shell, delivery (runs in parallel with Fixer 1)
 Owns: src/components/**, src/features/{athletes,entries,events (except EventLayout's stale hint),races,public,settings,help}/**, src/features/NotFound.tsx, src/App.tsx, src/main.tsx, index.html, vite.config.ts, vercel.json, package.json (+ package-lock.json if needed), tsconfig.json, tests/e2e/**. In PublicEventPage.tsx avoid the reconstruction functions (Fixer 1 moves them); edit only tabs/retry/title/refetch parts.
