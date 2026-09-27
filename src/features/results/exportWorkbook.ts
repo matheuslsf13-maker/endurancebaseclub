@@ -5,11 +5,14 @@ import { writeXlsx } from '../../lib/xlsx/writer';
 import type { EventAggregate } from '../../lib/types';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+/** Some iOS Safari versions abort a download whose object URL is revoked right after the click. */
+const REVOKE_AFTER_MS = 10_000;
 
 /**
  * Builds the whole event's "planilha de conferência" (spec §11) and downloads it as
- * `workbookFileName(agg.event)` through a temporary `<a download>`, then revokes the object URL
- * (Controller Ruling: exact filename, exact MIME, revoke after the click).
+ * `workbookFileName(agg.event)` through a temporary `<a download>`, then revokes the object URL a
+ * few seconds later (Controller Ruling: exact filename, exact MIME; B2-m13: not right after the
+ * click). Finalized races come from their stored snapshot (`buildEventWorkbook`).
  */
 export function exportWorkbook(agg: EventAggregate, timing: EventTiming, classifications: RaceClassification[]): void {
   const model = buildEventWorkbook(agg, timing, classifications, Date.now());
@@ -27,6 +30,6 @@ export function exportWorkbook(agg: EventAggregate, timing: EventTiming, classif
     a.click();
     document.body.removeChild(a);
   } finally {
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), REVOKE_AFTER_MS);
   }
 }

@@ -76,10 +76,19 @@ function MemberNames({
 
 /** pt-BR status text for a classification row, with Controller Ruling 9's hint: a `finished`
  * status with no resolvable `final_ms` (a finish mark with no wave start to time it from) is
- * unranked but did cross the line, so it is called out rather than shown as a plain "Concluiu". */
+ * unranked but did cross the line, so it is called out rather than shown as a plain "Concluiu".
+ * A finish whose time is zero or negative (a wave start recorded after it — B1-M4) is unranked
+ * too, and says so. */
 function statusText(timing: EntryTiming): string {
   const label = STATUS_LABEL[timing.status];
-  return timing.status === 'finished' && timing.final_ms === null ? `${label} (sem largada)` : label;
+  if (timing.status !== 'finished') return label;
+  if (timing.final_ms === null) return `${label} (sem largada)`;
+  return timing.final_ms > 0 ? label : `${label} (sem tempo válido)`;
+}
+
+/** A time as a result: a zero or negative duration is not one, so it shows "—" like a missing time. */
+function resultDuration(ms: number | null): string {
+  return formatDuration(ms !== null && ms > 0 ? ms : null);
 }
 
 const PODIUM_ROW_CLASS = 'bg-warning/10';
@@ -138,12 +147,12 @@ export function ClassificationTable({ race, cls, showLegs = false, linkAthletes 
               <td className="px-3 py-2 whitespace-nowrap">{groupLabel(catDims, row.category)}</td>
               {showLegs && Array.from({ length: legCount }, (_, k) => (
                 <td key={k} className="px-3 py-2">
-                  {formatDuration(row.timing.legs.find(l => l.leg_index === k)?.leg_ms ?? null)}
+                  {resultDuration(row.timing.legs.find(l => l.leg_index === k)?.leg_ms ?? null)}
                 </td>
               ))}
-              <td className="px-3 py-2">{formatDuration(row.timing.total_ms)}</td>
+              <td className="px-3 py-2">{resultDuration(row.timing.total_ms)}</td>
               <td className="px-3 py-2">{formatGap(row.entry.penalty_ms)}</td>
-              <td className="px-3 py-2 font-medium">{formatDuration(row.timing.final_ms)}</td>
+              <td className="px-3 py-2 font-medium">{resultDuration(row.timing.final_ms)}</td>
               <td className="px-3 py-2">{formatGap(row.gap_ms)}</td>
               <td className="px-3 py-2 whitespace-nowrap">{statusText(row.timing)}</td>
             </tr>

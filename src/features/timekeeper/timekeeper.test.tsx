@@ -33,7 +33,10 @@ const TOKEN = 'tok123';
 const OFFSET = 1_500;
 const NOW0 = T0 + 10 * MIN; // both waves started at T0
 const REG = { timekeeper_id: 'tk-me', secret: 's3cret', name: 'Ana TK' };
+/** Before B2-I4c the registration was kept per link; it is migrated on read. */
 const REG_KEY = `ebc.tk.reg.${TOKEN}`;
+/** B2-I4c: the registration is kept per event, so a new link of the same event keeps it. */
+const DEVICE_KEY = 'ebc.tk.device.e1';
 const SESSION_KEY = `ebc.tk.session.${TOKEN}`;
 const OUTBOX_KEY = 'ebc.tk.e1.tk-me';
 
@@ -60,6 +63,7 @@ const okSync = (p: Partial<TkSyncResult> = {}) =>
     accepted: marks.map(m => m.id), rejected: [], server_now: iso(Date.now() + OFFSET), version: 1, marks: [], waves: [], ...p,
   });
 const networkError = () => new ApiError('Sem conexão com o servidor', 'network');
+const invalidLink = () => new ApiError('Link de cronometragem inválido ou desativado', 'P0001');
 
 let visibility: DocumentVisibilityState;
 
@@ -172,7 +176,7 @@ describe('registration', () => {
 
     expect(mocks.register).toHaveBeenCalledWith(TOKEN, 'Ana TK', expect.any(String));
     expect(screen.getByTestId('mark-button')).toBeInTheDocument();
-    expect(JSON.parse(window.localStorage.getItem(REG_KEY)!)).toEqual(REG);
+    expect(JSON.parse(window.localStorage.getItem(DEVICE_KEY)!)).toEqual(REG);
     expect(JSON.parse(window.localStorage.getItem(SESSION_KEY)!)).toMatchObject({ event: { id: 'e1' } });
   });
 
@@ -1020,10 +1024,15 @@ describe('sync loop', () => {
 
     const mine = within(screen.getByTestId('my-marks')).getAllByRole('listitem');
     expect(mine).toHaveLength(1);
-    expect(mine[0]).toHaveTextContent('⚠');
     expect(mine[0]).toHaveTextContent('Alterada pela organização');
     expect(mine[0]).toHaveTextContent('Nº 303');
     expect(status()).toHaveTextContent('Online · tudo sincronizado');
+    // B2-m7: the server copy exists and wins — nothing is left for the timekeeper to fix, so the
+    // rejection no longer counts as one.
+    expect(mine[0]).toHaveTextContent('vale a versão registrada');
+    expect(mine[0]).not.toHaveTextContent('⚠');
+    expect(screen.queryByText(/marcaç(ão|ões) recusada/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('my-marks').querySelector('summary')).not.toHaveTextContent('⚠');
   });
 
   it.each([
@@ -1071,14 +1080,49 @@ describe('sync loop', () => {
     }
   });
 
-  it('the invalid-link screen says the marks stay on the device (Ruling 44 M6)', async () => {
+  it('a link turned off mid-race keeps MARCAR, says the marks stay on the device and resumes when it works again (B2-I4b/d, Ruling 44 M6)', async () => {
     await renderMain();
     tapMark();
-    mocks.sync.mockRejectedValueOnce(new ApiError('Link de cronometragem inválido ou desativado', 'P0001'));
+    mocks.sync.mockRejectedValue(invalidLink());
+    mocks.open.mockRejectedValue(invalidLink());
     await flush(2 * SEC);
-    expect(screen.getByText('Link de cronometragem inválido ou desativado. Peça um novo link à organização.')).toBeInTheDocument();
-    expect(screen.getByText(/Suas marcações continuam guardadas neste aparelho/)).toBeInTheDocument();
-    expect(stored()).toHaveLength(1);
+
+    // Still the timing screen: crossings in the gap are recorded.
+    expect(screen.getByTestId('tk-link-invalid')).toHaveTextContent('Link de cronometragem inválido ou desativado');
+    expect(screen.getByTestId('tk-link-invalid')).toHaveTextContent('as marcações ficam guardadas neste aparelho');
+    expect(status()).toHaveTextContent('Link inválido · 1 marcação guardada no aparelho');
+    tapMark();
+    expect(stored()).toHaveLength(2);
+    expect(status()).toHaveTextContent('Link inválido · 2 marcações guardadas no aparelho');
+
+    // No tk_sync while the link is refused; tk_open is asked again every 10 s.
+    const syncs = mocks.sync.mock.calls.length;
+    const opens = mocks.open.mock.calls.length;
+    await flush(10 * SEC);
+    expect(mocks.open).toHaveBeenCalledTimes(opens + 1);
+    expect(mocks.sync).toHaveBeenCalledTimes(syncs);
+
+    // The organization turns the link back on: the next check resumes the sync with every mark.
+    mocks.open.mockResolvedValue(session());
+    mocks.sync.mockImplementation(okSync());
+    await flush(10 * SEC);
+    expect(screen.queryByTestId('tk-link-invalid')).not.toBeInTheDocument();
+    expect(mocks.sync.mock.calls.at(-1)![3].map(m => m.id).sort()).toEqual(stored().map(m => m.id).sort());
+    expect(status()).toHaveTextContent('Online · tudo sincronizado');
+  });
+
+  it('"Tentar novamente" on a refused link checks it at once (B2-I4b)', async () => {
+    await renderMain();
+    mocks.sync.mockRejectedValue(invalidLink());
+    mocks.open.mockRejectedValue(invalidLink());
+    await flush(2 * SEC);
+    const opens = mocks.open.mock.calls.length;
+    mocks.open.mockResolvedValue(session());
+    mocks.sync.mockImplementation(okSync());
+    fireEvent.click(within(screen.getByTestId('tk-link-invalid')).getByRole('button', { name: 'Tentar novamente' }));
+    await flush();
+    expect(mocks.open).toHaveBeenCalledTimes(opens + 1);
+    expect(screen.queryByTestId('tk-link-invalid')).not.toBeInTheDocument();
   });
 
   it('offers Reatribuir on a rejected mark whose entry is gone (Ruling 44 M7)', async () => {
@@ -1090,6 +1134,8 @@ describe('sync loop', () => {
     const row = within(screen.getByTestId('my-marks')).getByRole('listitem');
     expect(row).toHaveTextContent('Inscrição não encontrada');
     expect(unassignedRows()).toHaveLength(0);
+    // Never stored on the server: it still counts until it is identified again (B2-m7).
+    expect(screen.getByText(/1 marcação recusada/)).toBeInTheDocument();
 
     fireEvent.click(within(row).getByRole('button', { name: /Reatribuir/ }));
     expect(unassignedRows()).toHaveLength(1);
@@ -1276,5 +1322,155 @@ describe('index.html theme bootstrap (Ruling 21)', () => {
     expect(boot('#/c/abc', 'dark')).toBe('dark');
     window.localStorage.clear();
     expect(boot('#/eventos', 'light')).toBe('light');
+  });
+});
+
+describe('final fix wave: the timekeeper app', () => {
+  it('a new link of the same event keeps this device\'s timekeeper and sends its pending marks (B2-I4c)', async () => {
+    const { unmount } = await renderMain();
+    // Migrated from the per-link key on read.
+    expect(JSON.parse(window.localStorage.getItem(DEVICE_KEY)!)).toEqual(REG);
+    expect(window.localStorage.getItem(REG_KEY)).toBeNull();
+    mocks.sync.mockRejectedValue(invalidLink()); // the organizer generated a new link
+    tapMark();
+    const id = stored()[0].id;
+    await flush(2 * SEC);
+    unmount();
+
+    mocks.sync.mockReset().mockImplementation(okSync());
+    renderWithProviders(<TimekeeperPage />, { route: '/c/newtok', path: '/c/:token' });
+    await flush();
+    expect(screen.getByTestId('mark-button')).toBeInTheDocument();
+    expect(mocks.register).not.toHaveBeenCalled();
+    expect(mocks.open).toHaveBeenLastCalledWith('newtok');
+    const [token, tkId, secret, marks] = mocks.sync.mock.calls.at(-1)!;
+    expect([token, tkId, secret]).toEqual(['newtok', 'tk-me', 's3cret']);
+    expect(marks).toEqual([expect.objectContaining({ id })]);
+  });
+
+  it('without a registration, the invalid-link screen checks again by itself and on "Tentar novamente" (B2-I4b)', async () => {
+    mocks.open.mockRejectedValue(invalidLink());
+    renderPage();
+    await flush();
+    expect(screen.getByText('Link de cronometragem inválido ou desativado. Peça um novo link à organização.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Tentar novamente' }));
+    await flush();
+    expect(mocks.open).toHaveBeenCalledTimes(2);
+
+    mocks.open.mockResolvedValue(session()); // the link was turned back on
+    await flush(10 * SEC);
+    expect(screen.getByTestId('tk-register')).toBeInTheDocument();
+  });
+
+  it('tells a server failure from a lost internet connection, with the same retry (Ruling 59 entry)', async () => {
+    mocks.sync.mockRejectedValue(new ApiError('Servidor indisponível no momento. Tente de novo em instantes.', 'network', 503));
+    await renderMain();
+    expect(status()).toHaveTextContent('Sem conexão com o servidor · 0 marcações guardadas no aparelho');
+    expect(status()).not.toHaveTextContent('Sem internet');
+    tapMark();
+    expect(status()).toHaveTextContent('Sem conexão com o servidor · 1 marcação guardada no aparelho');
+    await flush(4 * SEC);
+    expect(mocks.sync).toHaveBeenCalledTimes(2); // the same ×2 backoff as without internet
+
+    mocks.sync.mockRejectedValue(networkError()); // no answer at all
+    await flush(8 * SEC);
+    expect(status()).toHaveTextContent('Sem internet · 1 marcação guardada no aparelho');
+  });
+
+  it('assignment and error notices let taps through to the rows and MARCAR, except on their buttons (B2-m1)', async () => {
+    await renderMain();
+    typeBib('101');
+    tapMark();
+    const notice = screen.getByTestId('assign-toast');
+    expect(notice).toHaveClass('pointer-events-none');
+    expect(notice.closest('.pointer-events-auto')).toBeNull();
+    const buttons = within(notice).getAllByRole('button');
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Desfazer', 'Trocar perna', 'Fechar']);
+    for (const b of buttons) expect(b).toHaveClass('pointer-events-auto');
+
+    submitBib(); // an error notice: nothing typed
+    const error = screen.getByText('Digite o nº de peito').closest('[role]') as HTMLElement;
+    expect(error).toHaveClass('pointer-events-none');
+    expect(error.closest('.pointer-events-auto')).toBeNull();
+
+    // The error goes after 5 s; the assignment stays 8 s (time to reach Desfazer), then goes.
+    await flush(5 * SEC);
+    expect(screen.queryByText('Digite o nº de peito')).not.toBeInTheDocument();
+    expect(screen.getByTestId('assign-toast')).toBeInTheDocument();
+    await flush(3 * SEC);
+    expect(screen.queryByTestId('assign-toast')).not.toBeInTheDocument();
+  });
+
+  it('two overlapping touches on two "Em prova" rows record both arrivals (B2-m2)', async () => {
+    await renderMain();
+    const first = within(rowFor('303')).getByRole('button');
+    const second = within(rowFor('101')).getByRole('button');
+    fireEvent.pointerDown(first, { pointerId: 11, pointerType: 'touch', clientX: 60, clientY: 500 });
+    fireEvent.pointerDown(second, { pointerId: 12, pointerType: 'touch', clientX: 300, clientY: 420 });
+    fireEvent.pointerUp(first, { pointerId: 11, pointerType: 'touch', clientX: 61, clientY: 501 });
+    fireEvent.pointerUp(second, { pointerId: 12, pointerType: 'touch', clientX: 301, clientY: 421 });
+    expect(stored().map(m => m.entry_id).sort()).toEqual(['en1', 'en3']);
+  });
+
+  it('asks for the wake lock again after a refusal or a release, on the next tap (B2-m3)', async () => {
+    const sentinel = Object.assign(new EventTarget(), { release: vi.fn().mockResolvedValue(undefined) });
+    const request = vi.fn().mockRejectedValueOnce(new Error('NotAllowedError')).mockResolvedValue(sentinel);
+    Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: { request } });
+    try {
+      await renderMain();
+      expect(request).toHaveBeenCalledTimes(1); // refused: no user gesture yet
+      tapMark();
+      await flush();
+      expect(request).toHaveBeenCalledTimes(2); // asked again on the tap, and granted
+      tapMark();
+      await flush();
+      expect(request).toHaveBeenCalledTimes(2); // held: nothing to ask
+      act(() => { sentinel.dispatchEvent(new Event('release')); }); // released by the system
+      await flush();
+      expect(request).toHaveBeenCalledTimes(3);
+    } finally {
+      delete (navigator as { wakeLock?: unknown }).wakeLock;
+    }
+  });
+
+  it('drops other events\' timekeeper data with nothing pending when a session opens, and keeps the rest (B2-m5)', async () => {
+    const put = (k: string, v: unknown) => window.localStorage.setItem(k, JSON.stringify(v));
+    const item = (id: string, state: string) => {
+      const ts = iso(T0);
+      return { items: { [id]: { state, mark: { id, ts, device_ts: ts, clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null, discarded: false, local_updated_at: T0 } } } };
+    };
+    const E2 = '22222222-2222-4222-8222-222222222222';
+    const E3 = '33333333-3333-4333-8333-333333333333';
+    const TK = '44444444-4444-4444-8444-444444444444';
+    const other = (id: string) => session({ event: { ...session().event, id } });
+    const e2Keys = [`ebc.tk.session.tokE2`, `ebc.tk.reg.tokE2`, `ebc.tk.device.${E2}`, `ebc.tk.marks.${E2}`, `ebc.tk.${E2}.${TK}`, `ebc.tk.outboxes.${E2}`, `ebc.tk.aside.${E2}.${TK}`];
+    put(e2Keys[0], other(E2));
+    put(e2Keys[1], REG);
+    put(e2Keys[2], REG);
+    put(e2Keys[3], { server_now: null, marks: [] });
+    put(e2Keys[4], item('old', 'synced'));
+    put(e2Keys[5], [TK]);
+    put(e2Keys[6], []);
+    const e3Keys = [`ebc.tk.session.tokE3`, `ebc.tk.device.${E3}`, `ebc.tk.${E3}.${TK}`];
+    put(e3Keys[0], other(E3));
+    put(e3Keys[1], REG);
+    put(e3Keys[2], item('unsent', 'pending')); // still to be sent: that event keeps everything
+    window.localStorage.setItem('ebc.tk.lastLink', 'abc'); // not ours to judge
+    window.localStorage.setItem('ebc.clock', '{}');
+
+    await renderMain();
+    await flush();
+
+    for (const k of e2Keys) expect(window.localStorage.getItem(k), k).toBeNull();
+    for (const k of e3Keys) expect(window.localStorage.getItem(k), k).not.toBeNull();
+    expect(window.localStorage.getItem('ebc.tk.lastLink')).toBe('abc');
+    expect(window.localStorage.getItem('ebc.clock')).toBe('{}');
+    expect(window.localStorage.getItem(DEVICE_KEY)).not.toBeNull();
+    expect(window.localStorage.getItem(SESSION_KEY)).not.toBeNull();
+  });
+
+  it('the bib field has no placeholder that reads like a "+" under the caret (T28 minor)', async () => {
+    await renderMain();
+    expect(screen.getByTestId('bib-input').getAttribute('placeholder') ?? '').toBe('');
   });
 });
