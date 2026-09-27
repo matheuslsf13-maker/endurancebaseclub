@@ -16,7 +16,8 @@
       /* C-Minor-19: theme-color follows the bootstrapped theme (this fixed value otherwise stayed
          ink even for the timekeeper link, which opens light by default — a light address bar with
          a dark declared color reads wrong on Android). ThemeToggle keeps it in sync afterwards. */
-      document.querySelector('meta[name="theme-color"]').setAttribute('content', theme === 'light' ? '#F4F1EC' : '#191513');
+      var themeColorMeta = document.querySelector('meta[name="theme-color"]');
+      if (themeColorMeta) themeColorMeta.setAttribute('content', theme === 'light' ? '#F4F1EC' : '#191513');
     </script>
   </head>
   <body>
