@@ -177,3 +177,31 @@ Each commit ends with the single trailer `Co-Authored-By: Claude Opus 5.5 <norep
 6. **Resumo counts of a finalized race** (items 5/24) now come from the snapshot classification (so the row agrees with the Classificação sheet); "Pendências" stays live (organizer work to do). A new column "Chegada sem tempo" sits between Concluintes and Em prova (10 columns).
 7. **session.tsx hardcodes the auth storage keys** (`ebc.auth`, `-user`, `-code-verifier`) because `src/lib/supabase.ts` (storageKey) is outside my ownership; keep them in sync if the storageKey ever changes.
 8. `admin_update_mark`'s lone-member fallback for `athlete_id` (entry whose stored legs do not include the leg) is exercised only by a scratch check (see gates section), not by a committed test — with item 3 the server rewrites individual members' legs, so the path is defensive.
+
+## Fix round 2
+
+Built on 07adbc1 in the same worktree. Scoped re-review: all 25 items ADDRESSED; one new Important item (N1) and two small consistency items. Each started with a failing test.
+
+| # | Item | Change | Covering test | RED → GREEN |
+|---|------|--------|---------------|-------------|
+| N1 (Important) | One slow, asymmetric clock sample pushed out all the good low-RTT samples | `src/lib/clock.ts:24-27` (comment) and `:53-57`. An earlier sample now counts as "before a clock step" only when the two offset ranges cannot overlap: `\|x.offset − offset\| > CLOCK_STEP_MS + (x.rtt + rtt) / 2` | `clock.test.ts:50` "keeps the good low-RTT samples when one slow, asymmetric sample arrives". The sample has rtt 3000 and offset 6400 against a true offset of 5000. The existing test for a real 3 s clock step still passes. | RED: `expected 6400 to be 5000` (clock.test.ts:57). GREEN: clock 9/9 |
+| s1 | Resumo "Pendências" also counted info issues | `src/domain/workbook.ts:164-165`: `severity !== 'info'`, the same rule EventLayout, ResultsTab and LiveBoard use. The header stays "Pendências"; the doc comment says "warnings and errors". | `workbook.test.ts:192` "Resumo Pendências counts warnings and errors only". The race has a DSQ entry with crossings (info), a duplicate tap (info) and a 14 s divergence (warning). | RED: `expected 3 to be 1`. GREEN: workbook 24/24 |
+| s2 | 42501 errors that Postgres raises itself came through in English | `src/lib/api.ts:69-75`: a 42501 whose message is empty or starts with "permission denied" or "must be owner" becomes "Sem permissão para esta ação."; the pt-BR 42501 texts our SQL raises still pass through unchanged. | `api.test.ts:105-114` (3 cases: function, table, owner). The existing test "keeps the pt-BR message of a permission error (42501) verbatim" still passes. | RED: 3× `expected ApiError: permission denied for … to match object {…}`. GREEN: api+auth+clock+workbook 130/130 |
+
+### Round-2 gates (WSL, ff1, HEAD 974e0f6)
+All in one run with exit 0: `npm run typecheck && npx vitest run && npm run test:integration && EBC_DB=ebc_ff1 bash scripts/test-sql.sh`.
+```
+typecheck: clean
+vitest:      Test Files 40 passed (40) · Tests 672 passed (672)
+integration: Test Files 2 passed (2)   · Tests 16 passed (16)
+test-sql:    PASS 00_helpers, 10_schema, 20_admin_events, 30_admin_athletes_entries, 40_timing, 50_public, 60_security
+EXIT=0
+```
+
+### Round-2 commits (07adbc1..974e0f6)
+```
+bce7a5a fix(clock): a slow asymmetric sample no longer evicts good samples
+c011b27 fix(workbook): Resumo "Pendências" counts warnings and errors only
+974e0f6 fix(api): pt-BR text for Postgres's own permission errors
+```
+Each commit ends with the single trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The working tree is clean and nothing is pushed.
