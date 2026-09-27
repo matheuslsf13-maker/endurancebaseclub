@@ -1,0 +1,396 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { EntryRow, MarkRow, TkSession } from '../../lib/types';
+import type { LocalMark, OutboxItem } from '../../lib/outbox';
+import {
+  iso, makeEntry, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
+} from '../../domain/testing/fixtures';
+import {
+  applyWaveStarts, assignMark, assignmentMessage, burstHead, currentBurst, keepAside, localToMarkRow, markToInput, mergedMarks,
+  newMark, onCourse, selectedMarkId, selectionAfterMark, sessionIndex, tapTargetId,
+} from './tkStore';
+
+const ME = 'tk-me';
+
+// Solo entry (Ana does both legs), with the member name tk_open embeds.
+const solo = (p: Partial<EntryRow> = {}): EntryRow =>
+  makeEntry({ members: [{ athlete_id: 'a1', position: 0, legs: [0, 1], name: 'Ana Souza' }], ...p });
+
+function session(p: Partial<TkSession> = {}): TkSession {
+  return {
+    event: { id: 'e1', name: 'Evento Teste', date: '2026-10-11', location: 'Vila Velha' },
+    races: [makeRace()], waves: [makeWave()], entries: [solo()], timekeepers: [makeTimekeeper()],
+    version: 1, server_now: iso(T0), ...p,
+  };
+}
+
+// Relay pair: João swims (leg 0), Matheus runs (leg 1). Member names come embedded (tk_open).
+const relayRace = makeRace({ id: 'r2', name: 'Revezamento', team_size: 2 });
+const relayWave = makeWave({ id: 'w2', race_id: 'r2' });
+function relayEntry(p: Partial<EntryRow> = {}): EntryRow {
+  return makeEntry({
+    id: 'en-relay', race_id: 'r2', wave_id: 'w2', bib: '101', team_name: 'Tubarões',
+    members: [
+      { athlete_id: 'a1', position: 0, legs: [0], name: 'João' },
+      { athlete_id: 'a2', position: 1, legs: [1], name: 'Matheus' },
+    ],
+    ...p,
+  });
+}
+
+function local(p: Partial<LocalMark> & { id: string; ts: string }): LocalMark {
+  return {
+    device_ts: p.ts, clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null,
+    discarded: false, local_updated_at: Date.parse(p.ts), ...p,
+  };
+}
+const item = (mark: LocalMark, state: OutboxItem['state'], reason?: string): OutboxItem => ({ mark, state, reason });
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('localToMarkRow', () => {
+  it('fills the server-only fields from the local mark', () => {
+    const m = local({ id: 'm1', ts: iso(T0 + MIN), discarded: true, local_updated_at: T0 + 2 * MIN });
+    expect(localToMarkRow(m, 'e1', ME)).toEqual({
+      id: 'm1', event_id: 'e1', timekeeper_id: ME, ts: iso(T0 + MIN), device_ts: iso(T0 + MIN),
+      clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null,
+      discarded: true, discarded_by: 'timekeeper', created_at: iso(T0 + MIN), updated_at: iso(T0 + 2 * MIN),
+    });
+    expect(localToMarkRow({ ...m, discarded: false }, 'e1', ME).discarded_by).toBeNull();
+  });
+});
+
+describe('mergedMarks', () => {
+  it('prefers a pending local edit over the server copy and keeps synced server marks', () => {
+    const serverEdited = makeMark({ id: 'm1', at: T0 + MIN, timekeeper_id: ME, entry_id: null, leg_index: null });
+    const serverOther = makeMark({ id: 'm2', at: T0 + 2 * MIN, timekeeper_id: 'tk2' });
+    const serverSynced = makeMark({ id: 'm3', at: T0 + 3 * MIN, timekeeper_id: ME });
+    const localEdit = local({ id: 'm1', ts: iso(T0 + MIN), entry_id: 'en1', leg_index: 1 });
+    const localSynced = local({ id: 'm3', ts: iso(T0 + 3 * MIN), entry_id: null, leg_index: null });
+
+    const merged = mergedMarks(
+      [serverEdited, serverOther, serverSynced],
+      [item(localEdit, 'pending'), item(localSynced, 'synced')],
+      'e1', ME,
+    );
+
+    expect(merged.map(m => m.id)).toEqual(['m1', 'm2', 'm3']);
+    expect(merged[0]).toMatchObject({ entry_id: 'en1', leg_index: 1, timekeeper_id: ME });
+    expect(merged[1]).toBe(serverOther);
+    expect(merged[2]).toBe(serverSynced); // not pending: the server copy wins
+  });
+
+  it('lets the server copy win over a rejected edit (the organizer moved the mark)', () => {
+    const moved = makeMark({ id: 'm1', at: T0 + MIN, timekeeper_id: ME, entry_id: 'en1', leg_index: 1 });
+    const mine = local({ id: 'm1', ts: iso(T0 + MIN), entry_id: 'en1', leg_index: 0 });
+    const merged = mergedMarks([moved], [item(mine, 'rejected', 'Alterada pela organização')], 'e1', ME);
+    expect(merged).toEqual([moved]);
+  });
+
+  it('adds local marks the server has not returned yet, but not rejected new marks', () => {
+    const fresh = local({ id: 'new', ts: iso(T0 + 5 * MIN) });
+    const acked = local({ id: 'acked', ts: iso(T0 + 4 * MIN) });
+    const refused = local({ id: 'refused', ts: iso(T0 + 6 * MIN), entry_id: 'gone', leg_index: 0 });
+    const merged = mergedMarks(
+      [],
+      [item(acked, 'synced'), item(fresh, 'pending'), item(refused, 'rejected', 'Atleta não encontrado neste evento')],
+      'e1', ME,
+    );
+    expect(merged.map(m => m.id)).toEqual(['acked', 'new']);
+    expect(merged[1]).toEqual(localToMarkRow(fresh, 'e1', ME));
+  });
+});
+
+describe('newMark', () => {
+  it('stamps ts with the synced time and keeps the device time and clock state for auditing', () => {
+    const mark = newMark(T0 + 5 * SEC, T0 + 5 * SEC - 1234, { offset_ms: 1234, rtt_ms: 90, synced_at: T0 });
+    expect(mark).toEqual({
+      id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+      ts: iso(T0 + 5 * SEC), device_ts: iso(T0 + 5 * SEC - 1234), clock_offset_ms: 1234, clock_rtt_ms: 90,
+      entry_id: null, leg_index: null, athlete_id: null, discarded: false,
+    });
+  });
+
+  it('leaves the clock fields empty when the clock never synced', () => {
+    const mark = newMark(T0, T0, null);
+    expect(mark.clock_offset_ms).toBeNull();
+    expect(mark.clock_rtt_ms).toBeNull();
+  });
+
+  it('still creates a v4 id where crypto.randomUUID is missing (plain-http origins)', () => {
+    const real = globalThis.crypto;
+    vi.stubGlobal('crypto', { getRandomValues: (a: Uint8Array<ArrayBuffer>) => real.getRandomValues(a) });
+    const a = newMark(T0, T0, null).id;
+    const b = newMark(T0, T0, null).id;
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(a).not.toBe(b);
+  });
+});
+
+describe('assignMark', () => {
+  it('suggests the selected athlete leg on a relay (second member → leg 1)', () => {
+    const mark = markToInput(makeMark({ id: 'x', at: T0 + 20 * MIN, entry_id: null, leg_index: null }));
+    const { mark: assigned, suggestion } = assignMark(mark, relayEntry(), relayRace, [], 'a2');
+    expect(suggestion).toMatchObject({ leg_index: 1, athlete_id: 'a2', reason: 'next' });
+    expect(assigned).toEqual({ ...mark, entry_id: 'en-relay', leg_index: 1, athlete_id: 'a2' });
+  });
+
+  it('ignores the mark itself when it was already filed on a leg', () => {
+    // Filed by mistake on leg 1 (and nothing else is known): counting itself would say "same crossing, leg 1".
+    const self = makeMark({ id: 'x', at: T0 + 10 * MIN, entry_id: 'en1', leg_index: 1 });
+    const { suggestion } = assignMark(markToInput(self), solo(), makeRace(), [self]);
+    expect(suggestion).toMatchObject({ leg_index: 0, reason: 'next' });
+  });
+
+  it('confirms the crossing another timekeeper already marked', () => {
+    const other = makeMark({ at: T0 + 10 * MIN, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 });
+    const mine = markToInput(makeMark({ id: 'x', at: T0 + 10 * MIN + 3 * SEC, entry_id: null, leg_index: null }));
+    const { mark, suggestion } = assignMark(mine, relayEntry(), relayRace, [other]);
+    expect(suggestion).toMatchObject({ leg_index: 0, reason: 'same_crossing', athlete_id: 'a1' });
+    expect(mark.leg_index).toBe(0);
+  });
+});
+
+describe('assignmentMessage', () => {
+  it('names the bib, the athlete and the leg (Ruling 8 wording)', () => {
+    expect(assignmentMessage(relayEntry(), relayRace, { leg_index: 1, athlete_id: 'a2', reason: 'next', warning: null }, 'Matheus'))
+      .toBe('✓ Nº 101 · Matheus · fim da perna 2/2 (Corrida)');
+  });
+
+  it('warns when the entry had already finished', () => {
+    expect(assignmentMessage(relayEntry(), relayRace, { leg_index: 1, athlete_id: 'a2', reason: 'next', warning: 'already_finished' }, 'Matheus'))
+      .toBe('Nº 101 já concluiu — registrada como fim da perna 2/2 (Corrida)');
+  });
+});
+
+describe('onCourse', () => {
+  const relaySession = (entries: EntryRow[] = [relayEntry()]) => session({ races: [relayRace], waves: [relayWave], entries });
+  const leg0 = T0 + 10 * MIN;
+  const relayLeg0 = () => makeMark({ at: leg0, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 });
+
+  it('lists a relay whose leg 0 was marked with the next athlete and the leg timer', () => {
+    const now = leg0 + 2 * MIN;
+    const list = onCourse(relaySession(), [relayLeg0()], now);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      athleteName: 'Matheus', legLabel: 'Corrida', legIndex: 1, legElapsedMs: now - leg0, displayName: 'Tubarões', confirm: null,
+    });
+    expect(list[0].entry.id).toBe('en-relay');
+    expect(list[0].race.id).toBe('r2');
+    expect(list[0].timing.status).toBe('on_course');
+  });
+
+  it('lists started entries without crossings on their first leg, and leaves out entries not started or out of the race', () => {
+    const waiting = makeWave({ id: 'w3', race_id: 'r1', start_at: null });
+    const list = onCourse(session({
+      waves: [makeWave(), waiting],
+      entries: [
+        solo({ id: 'a', bib: '1' }),
+        solo({ id: 'b', bib: '2', wave_id: 'w3' }),
+        solo({ id: 'c', bib: '3', status: 'dns' }),
+        solo({ id: 'd', bib: '4', status: 'dnf' }),
+      ],
+    }), [], T0 + 5 * MIN);
+    expect(list.map(i => i.entry.bib)).toEqual(['1']);
+    expect(list[0]).toMatchObject({ legIndex: 0, legLabel: 'Natação', athleteName: 'Ana Souza', legElapsedMs: 5 * MIN });
+  });
+
+  it('pins a crossing inside the same-crossing window at the top with the seconds left to confirm', () => {
+    const now = leg0 + 10_200;
+    const list = onCourse(relaySession([relayEntry(), solo({ id: 'solo', race_id: 'r2', wave_id: 'w2', bib: '7' })]), [relayLeg0()], now);
+    expect(list.map(i => i.entry.id)).toEqual(['en-relay', 'solo']);
+    expect(list[0].confirm).toEqual({ leg_index: 0, leg_label: 'Natação', leg_ms: 10 * MIN, crossing_ms: leg0, remaining_s: 20, mine: false });
+    // Still on course: the row keeps showing who is running now.
+    expect(list[0]).toMatchObject({ athleteName: 'Matheus', legIndex: 1, legElapsedMs: 10_200 });
+
+    expect(onCourse(relaySession(), [relayLeg0()], leg0 + 29_999)[0].confirm?.remaining_s).toBe(1);
+    expect(onCourse(relaySession(), [relayLeg0()], leg0 + 30_000)[0].confirm).toBeNull();
+  });
+
+  it('keeps a finished entry listed while its finish can still be confirmed, then drops it', () => {
+    const finish = T0 + 30 * MIN;
+    const marks = [
+      makeMark({ at: T0 + 10 * MIN, entry_id: 'en1', leg_index: 0 }),
+      makeMark({ at: finish, entry_id: 'en1', leg_index: 1 }),
+    ];
+    const during = onCourse(session(), marks, finish + 10 * SEC);
+    expect(during).toHaveLength(1);
+    expect(during[0].timing.status).toBe('finished');
+    expect(during[0]).toMatchObject({ legIndex: null, legLabel: 'Corrida', athleteName: 'Ana Souza' });
+    expect(during[0].confirm).toEqual({ leg_index: 1, leg_label: 'Corrida', leg_ms: 20 * MIN, crossing_ms: finish, remaining_s: 20, mine: false });
+
+    expect(onCourse(session(), marks, finish + 31 * SEC)).toEqual([]);
+  });
+
+  it('orders pinned rows by most recent crossing, then the rest by leg time, longest first', () => {
+    const now = T0 + 30 * MIN + 10 * SEC;
+    const s = session({
+      entries: [
+        solo({ id: 'A', bib: '1' }), // leg 0 at 10 min → on the run for 20 min
+        solo({ id: 'B', bib: '2' }), // finished 10 s ago
+        solo({ id: 'C', bib: '3' }), // swim ended 5 s ago
+        solo({ id: 'D', bib: '4' }), // no crossing yet → swimming for 30 min
+      ],
+    });
+    const marks = [
+      makeMark({ at: T0 + 10 * MIN, entry_id: 'A', leg_index: 0 }),
+      makeMark({ at: T0 + 12 * MIN, entry_id: 'B', leg_index: 0 }),
+      makeMark({ at: T0 + 30 * MIN, entry_id: 'B', leg_index: 1 }),
+      makeMark({ at: T0 + 30 * MIN + 5 * SEC, entry_id: 'C', leg_index: 0 }),
+    ];
+    const list = onCourse(s, marks, now);
+    expect(list.map(i => i.entry.id)).toEqual(['C', 'B', 'D', 'A']);
+    expect(list.map(i => i.confirm?.remaining_s ?? null)).toEqual([25, 20, null, null]);
+  });
+});
+
+describe('onCourse: crossings this timekeeper already marked (Ruling 44 M8)', () => {
+  const relaySession = () => session({ races: [relayRace], waves: [relayWave], entries: [relayEntry()] });
+  const leg0 = T0 + 10 * MIN;
+
+  it('flags a pinned crossing that has a mark of this timekeeper', () => {
+    const marks = [
+      makeMark({ id: 'o', at: leg0, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 }),
+      makeMark({ id: 'm', at: leg0 + 2 * SEC, timekeeper_id: ME, entry_id: 'en-relay', leg_index: 0 }),
+    ];
+    expect(onCourse(relaySession(), marks, leg0 + 5 * SEC, ME)[0].confirm).toMatchObject({ leg_index: 0, mine: true });
+  });
+
+  it('does not flag a crossing only other timekeepers (or discarded marks of mine) marked', () => {
+    const marks = [
+      makeMark({ id: 'o', at: leg0, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 }),
+      { ...makeMark({ id: 'm', at: leg0 + 2 * SEC, timekeeper_id: ME, entry_id: 'en-relay', leg_index: 0 }), discarded: true },
+    ];
+    expect(onCourse(relaySession(), marks, leg0 + 5 * SEC, ME)[0].confirm).toMatchObject({ mine: false });
+    expect(onCourse(relaySession(), marks, leg0 + 5 * SEC)[0].confirm).toMatchObject({ mine: false });
+  });
+});
+
+describe('burst selection (Ruling 53)', () => {
+  const now = T0 + 10 * MIN;
+  const un = (id: string, agoMs: number) => makeMark({ id, at: now - agoMs, timekeeper_id: ME, entry_id: null, leg_index: null });
+  const stale = un('stale', 3 * MIN);
+  // A pack identified slowly: its head is already 70 s old, the newest only 10 s.
+  const p0 = un('p0', 70 * SEC);
+  const p1 = un('p1', 40 * SEC);
+  const p2 = un('p2', 10 * SEC);
+  const ids = (marks: { id: string }[]) => marks.map(m => m.id);
+
+  it('the burst is the marks tapped up to 60 s before the newest, while the newest is fresh', () => {
+    expect(ids(currentBurst([p2, stale, p0, p1], now))).toEqual(['p0', 'p1', 'p2']);
+    expect(ids(currentBurst([un('edge', 70 * SEC), un('out', 70 * SEC + 1), un('newest', 10 * SEC)], now))).toEqual(['edge', 'newest']);
+    // The newest decides: exactly 60 s old is still fresh, 1 ms more and nothing is picked on its own.
+    expect(ids(currentBurst([un('x', 90 * SEC), un('y', 60 * SEC)], now))).toEqual(['x', 'y']);
+    expect(currentBurst([un('x', 90 * SEC), un('y', 60 * SEC + 1)], now)).toEqual([]);
+    expect(currentBurst([stale], now)).toEqual([]);
+    expect(currentBurst([], now)).toEqual([]);
+    // Only marks still without an athlete count (a discarded or identified one does not keep a burst alive).
+    const discarded = { ...un('d', 5 * SEC), discarded: true };
+    const assigned = { ...un('e', 5 * SEC), entry_id: 'en1', leg_index: 0 };
+    expect(currentBurst([stale, discarded, assigned], now)).toEqual([]);
+  });
+
+  it('burstHead is the oldest mark of the burst, however old, and nothing once the burst went stale', () => {
+    expect(burstHead([stale, p0, p1, p2], now)?.id).toBe('p0');
+    expect(burstHead([stale], now)).toBeNull();
+  });
+
+  it('a typed bib goes to the burst head, or to a selection of either origin while its mark waits', () => {
+    expect(selectedMarkId({ mode: 'auto' }, [stale, p0, p1, p2], now)).toBe('p0');
+    expect(selectedMarkId({ mode: 'auto' }, [stale], now)).toBeNull();
+    expect(selectedMarkId({ mode: 'none' }, [stale, p0, p1, p2], now)).toBeNull();
+    expect(selectedMarkId({ mode: 'id', id: 'p1', origin: 'user' }, [stale, p0, p1, p2], now)).toBe('p1');
+    expect(selectedMarkId({ mode: 'id', id: 'stale', origin: 'user' }, [stale, p0, p1, p2], now)).toBe('stale');
+    expect(selectedMarkId({ mode: 'id', id: 'stale', origin: 'app' }, [stale, p0, p1, p2], now)).toBe('stale');
+    expect(selectedMarkId({ mode: 'id', id: 'stale', origin: 'app' }, [stale], now)).toBe('stale');
+    // A selected mark that got an athlete (or was discarded) hands over to the automatic pick.
+    expect(selectedMarkId({ mode: 'id', id: 'gone', origin: 'user' }, [stale, p0, p1, p2], now)).toBe('p0');
+  });
+
+  it('an "Em prova" tap honours a user selection always, an app selection only inside the live burst (Ruling 54)', () => {
+    const all = [stale, p0, p1, p2];
+    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'user' }, all, now)).toBe('stale');
+    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'app' }, all, now)).toBe('p0'); // behaves as auto
+    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'app' }, [stale], now)).toBeNull(); // no burst: a new mark now
+    expect(tapTargetId({ mode: 'id', id: 'p1', origin: 'app' }, all, now)).toBe('p1');
+    expect(tapTargetId({ mode: 'auto' }, all, now)).toBe('p0');
+    expect(tapTargetId({ mode: 'none' }, all, now)).toBeNull();
+    // An app selection lapses with its burst (p2 is 61 s old here); a user selection does not.
+    expect(tapTargetId({ mode: 'id', id: 'p2', origin: 'app' }, [p2], now + 51 * SEC)).toBeNull();
+    expect(tapTargetId({ mode: 'id', id: 'p2', origin: 'user' }, [p2], now + 51 * SEC)).toBe('p2');
+    expect(tapTargetId({ mode: 'id', id: 'gone', origin: 'user' }, all, now)).toBe('p0');
+  });
+
+  it('MARCAR after a deselection goes back to the automatic pick; so does a selection from before its burst (Ruling 55)', () => {
+    const fresh = { id: 'new', ts: iso(now) };
+    expect(selectionAfterMark({ mode: 'auto' }, [p0, p1, p2], fresh)).toEqual({ mode: 'auto' });
+    // The deselected mark is set aside, so the automatic pick can no longer reach it: the new mark
+    // heads its burst and lapses with it, instead of a `user` selection that never lapses.
+    expect(selectionAfterMark({ mode: 'none' }, [p0, p1, p2], fresh)).toEqual({ mode: 'auto' });
+    expect(selectionAfterMark({ mode: 'id', id: 'stale', origin: 'user' }, [stale, p2], fresh)).toEqual({ mode: 'auto' });
+    expect(selectionAfterMark({ mode: 'id', id: 'stale', origin: 'app' }, [stale, p2], fresh)).toEqual({ mode: 'auto' });
+    expect(selectionAfterMark({ mode: 'id', id: 'edge', origin: 'app' }, [un('edge', 60 * SEC)], fresh))
+      .toEqual({ mode: 'id', id: 'edge', origin: 'app' });
+    expect(selectionAfterMark({ mode: 'id', id: 'p1', origin: 'user' }, [p0, p1, p2], fresh)).toEqual({ mode: 'id', id: 'p1', origin: 'user' });
+  });
+});
+
+describe('set-aside marks (Ruling 55)', () => {
+  const now = T0 + 10 * MIN;
+  const un = (id: string, agoMs: number) => makeMark({ id, at: now - agoMs, timekeeper_id: ME, entry_id: null, leg_index: null });
+  const stale = un('stale', 3 * MIN);
+  const p0 = un('p0', 70 * SEC);
+  const p1 = un('p1', 40 * SEC);
+  const p2 = un('p2', 10 * SEC);
+  const all = [stale, p0, p1, p2];
+  const aside = (...list: string[]) => new Set(list);
+  const ids = (marks: { id: string }[]) => marks.map(m => m.id);
+
+  it('the burst is computed over the marks not set aside: a set-aside mark neither heads it nor keeps it alive', () => {
+    expect(ids(currentBurst(all, now, aside('p0')))).toEqual(['p1', 'p2']);
+    // With p2 set aside the newest is p1 (40 s): p0 is 30 s older, still in.
+    expect(ids(currentBurst(all, now, aside('p2')))).toEqual(['p0', 'p1']);
+    // Only a stale mark is left once the fresh one is set aside: nothing is picked on its own.
+    expect(currentBurst([stale, p2], now, aside('p2'))).toEqual([]);
+    expect(burstHead(all, now, aside('p0'))?.id).toBe('p1');
+    expect(burstHead([p0], now, aside('p0'))).toBeNull();
+  });
+
+  it('no automatic target reaches a set-aside mark: typed bib, the fallback after an identification, arrival taps', () => {
+    expect(selectedMarkId({ mode: 'auto' }, all, now, aside('p0'))).toBe('p1');
+    expect(selectedMarkId({ mode: 'none' }, all, now, aside('p0'))).toBeNull();
+    // The selected mark was identified: the pick falls back past the set-aside one.
+    expect(selectedMarkId({ mode: 'id', id: 'gone', origin: 'user' }, all, now, aside('p0'))).toBe('p1');
+    expect(selectedMarkId({ mode: 'auto' }, [p0], now, aside('p0'))).toBeNull();
+    expect(tapTargetId({ mode: 'auto' }, all, now, aside('p0'))).toBe('p1');
+    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'app' }, all, now, aside('p0'))).toBe('p1');
+    expect(tapTargetId({ mode: 'id', id: 'gone', origin: 'user' }, [p0], now, aside('p0'))).toBeNull();
+    // An explicit selection is honoured as before.
+    expect(selectedMarkId({ mode: 'id', id: 'p2', origin: 'user' }, all, now, aside('p0'))).toBe('p2');
+    expect(tapTargetId({ mode: 'id', id: 'stale', origin: 'user' }, all, now, aside('p0'))).toBe('stale');
+  });
+
+  it('keeps only the set-aside ids of marks still in "Sem atleta"', () => {
+    expect(keepAside(['p0', 'gone', 'p2', 'p0'], [p0, p1, p2])).toEqual(['p0', 'p2']);
+    expect(keepAside([], all)).toEqual([]);
+    expect(keepAside(['p0'], [])).toEqual([]);
+  });
+});
+
+describe('sessionIndex', () => {
+  it('names entries from the member names embedded by tk_open', () => {
+    const idx = sessionIndex(session({ entries: [relayEntry({ team_name: null })] }));
+    expect(idx.athletesById.get('a2')?.name).toBe('Matheus');
+  });
+});
+
+describe('applyWaveStarts', () => {
+  it('updates the start of known waves and keeps the same session when nothing changed', () => {
+    const s = session({ waves: [makeWave({ id: 'w1', start_at: null }), makeWave({ id: 'w2', race_id: 'r1', start_at: iso(T0) })] });
+    const next = applyWaveStarts(s, [{ id: 'w1', start_at: iso(T0 + MIN) }, { id: 'w2', start_at: iso(T0) }, { id: 'zz', start_at: iso(T0) }]);
+    expect(next.waves.map(w => w.start_at)).toEqual([iso(T0 + MIN), iso(T0)]);
+    expect(next.waves[1]).toBe(s.waves[1]);
+    expect(applyWaveStarts(next, [{ id: 'w1', start_at: iso(T0 + MIN) }])).toBe(next);
+  });
+});

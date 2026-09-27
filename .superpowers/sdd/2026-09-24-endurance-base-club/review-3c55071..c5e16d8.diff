@@ -1,0 +1,573 @@
+# Review package: 3c55071..c5e16d8 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+c5e16d8 fix(events): share page helpers, keep unsaved general-tab edits
+
+## Files changed
+ src/features/events/EventGeneralTab.tsx  | 120 ++++++++++++++++++++-----------
+ src/features/events/EventsPage.tsx       |  15 +---
+ src/features/events/eventHelpers.test.ts |  40 +++++++++++
+ src/features/events/eventHelpers.ts      |  27 +++++++
+ src/features/events/events.test.tsx      |  79 +++++++++++++++++++-
+ src/features/settings/SettingsPage.tsx   |  15 +---
+ 6 files changed, 224 insertions(+), 72 deletions(-)
+
+## Diff
+diff --git a/src/features/events/EventGeneralTab.tsx b/src/features/events/EventGeneralTab.tsx
+index 7ce694c..d6ef239 100644
+--- a/src/features/events/EventGeneralTab.tsx
++++ b/src/features/events/EventGeneralTab.tsx
+@@ -1,93 +1,112 @@
+-import { useEffect, useState } from 'react';
++import { useEffect, useRef, useState } from 'react';
+ import type { FormEvent } from 'react';
+ import { useNavigate } from 'react-router';
+ import { Button, Card, Checkbox, Input, Select, Textarea, useConfirm, useToast } from '../../components/ui';
+ import { api } from '../../lib/api';
+-import type { EventStatus } from '../../lib/types';
++import type { EventRow, EventStatus } from '../../lib/types';
+ import { useEventContext } from './EventContext';
++import { copyToClipboard, errorMessage, parseLevels } from './eventHelpers';
+ 
+ const STATUS_OPTIONS: { value: EventStatus; label: string }[] = [
+   { value: 'planejado', label: 'Planejado' },
+   { value: 'ao_vivo', label: 'Ao vivo' },
+   { value: 'encerrado', label: 'Encerrado' },
+ ];
+ 
+-/** Comma-separated free text ("Elite, Base, Elite") into a trimmed, order-preserving unique list. */
+-function parseLevels(text: string): string[] {
+-  const out: string[] = [];
+-  for (const raw of text.split(',')) {
+-    const v = raw.trim();
+-    if (v && !out.includes(v)) out.push(v);
+-  }
+-  return out;
+-}
+-
+-function errorMessage(err: unknown, fallback: string): string {
+-  return err instanceof Error && err.message ? err.message : fallback;
+-}
+-
+-async function copyToClipboard(text: string): Promise<boolean> {
+-  try {
+-    if (!navigator.clipboard?.writeText) return false;
+-    await navigator.clipboard.writeText(text);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ export default function EventGeneralTab() {
+   const { agg, refresh } = useEventContext();
+   const { event } = agg;
+   const navigate = useNavigate();
+   const toast = useToast();
+   const confirm = useConfirm();
+ 
+   const [name, setName] = useState(event.name);
+   const [date, setDate] = useState(event.date);
+   const [location, setLocation] = useState(event.location);
+   const [description, setDescription] = useState(event.description);
+   const [levels, setLevels] = useState(event.levels.join(', '));
+   const [status, setStatus] = useState<EventStatus>(event.status);
+   const [isPublic, setIsPublic] = useState(event.is_public);
+   const [slug, setSlug] = useState(event.public_slug ?? '');
+   const [busy, setBusy] = useState(false);
+   const [deleting, setDeleting] = useState(false);
+ 
+-  // A save (or a poll bringing a newer version) replaces `event`: pick up its fields again.
++  // Whether the organizer has typed anything since the form was last seeded from the server.
++  const [dirty, setDirty] = useState(false);
++  // The server's copy changed (another tab, another organizer, a live poll) while this one had
++  // unsaved edits: the form keeps the organizer's values instead of silently discarding them.
++  const [serverChanged, setServerChanged] = useState(false);
++  const eventIdRef = useRef(event.id);
++
++  function seedFromEvent(ev: EventRow) {
++    setName(ev.name);
++    setDate(ev.date);
++    setLocation(ev.location);
++    setDescription(ev.description);
++    setLevels(ev.levels.join(', '));
++    setStatus(ev.status);
++    setIsPublic(ev.is_public);
++    setSlug(ev.public_slug ?? '');
++  }
++
++  // Re-seed the form from a fresh `event` — but only when there's nothing to lose: either this
++  // is a different event altogether (navigated here from another one), or the organizer hasn't
++  // touched the form yet. A dirty form on the *same* event keeps its values and flags
++  // `serverChanged` instead, so a background refetch never silently overwrites in-progress edits
++  // (Ruling 40).
+   useEffect(() => {
+-    setName(event.name);
+-    setDate(event.date);
+-    setLocation(event.location);
+-    setDescription(event.description);
+-    setLevels(event.levels.join(', '));
+-    setStatus(event.status);
+-    setIsPublic(event.is_public);
+-    setSlug(event.public_slug ?? '');
++    const isDifferentEvent = event.id !== eventIdRef.current;
++    eventIdRef.current = event.id;
++    if (isDifferentEvent || !dirty) {
++      seedFromEvent(event);
++      setDirty(false);
++      setServerChanged(false);
++      return;
++    }
++    setServerChanged(true);
++    // `dirty` is read intentionally without being a dependency: this must only re-run when the
++    // event itself changes, never merely because the organizer started typing.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [event]);
+ 
++  function reloadFromServer() {
++    seedFromEvent(event);
++    setDirty(false);
++    setServerChanged(false);
++  }
++
++  /** Wraps a field setter so any edit marks the form dirty. */
++  function edited<T>(setter: (v: T) => void, value: T) {
++    setter(value);
++    setDirty(true);
++  }
++
+   async function onSubmit(e: FormEvent<HTMLFormElement>) {
+     e.preventDefault();
+     setBusy(true);
+     try {
+       await api.admin.saveEvent({
+         id: event.id,
+         name: name.trim(),
+         date,
+         location: location.trim(),
+         description,
+         levels: parseLevels(levels),
+         status,
+         is_public: isPublic,
+         public_slug: isPublic ? slug.trim() || null : event.public_slug,
+       });
++      // Clear before `refresh()` resolves, so the resulting `event` update is treated as "our own
++      // save landing", not as someone else's concurrent change.
++      setDirty(false);
++      setServerChanged(false);
+       await refresh();
+       toast.show({ message: 'Evento salvo', tone: 'success' });
+     } catch (err) {
+       toast.show({ message: errorMessage(err, 'Não foi possível salvar o evento'), tone: 'danger' });
+     } finally {
+       setBusy(false);
+     }
+   }
+ 
+   async function onDelete() {
+@@ -111,66 +130,81 @@ export default function EventGeneralTab() {
+ 
+   const publicUrl = `${window.location.origin}/#/p/${slug}`;
+ 
+   async function onCopyLink() {
+     const ok = await copyToClipboard(publicUrl);
+     toast.show({ message: ok ? 'Link copiado' : 'Não foi possível copiar o link', tone: ok ? 'success' : 'danger' });
+   }
+ 
+   return (
+     <form onSubmit={(e) => void onSubmit(e)} noValidate className="flex flex-col gap-6">
++      {serverChanged && (
++        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
++          <p>Os dados do evento mudaram em outro lugar — salve para sobrescrever ou recarregue.</p>
++          <Button type="button" size="sm" variant="secondary" onClick={reloadFromServer}>
++            Recarregar
++          </Button>
++        </div>
++      )}
++
+       <Card className="flex flex-col gap-4">
+         <h2 className="font-semibold">Dados do evento</h2>
+-        <Input label="Nome do evento" required value={name} onChange={(e) => setName(e.target.value)} data-testid="event-name" />
++        <Input
++          label="Nome do evento"
++          required
++          value={name}
++          onChange={(e) => edited(setName, e.target.value)}
++          data-testid="event-name"
++        />
+         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+           <Input
+             label="Data"
+             type="date"
+             required
+             value={date}
+-            onChange={(e) => setDate(e.target.value)}
++            onChange={(e) => edited(setDate, e.target.value)}
+             data-testid="event-date"
+           />
+           <Input
+             label="Local"
+             value={location}
+-            onChange={(e) => setLocation(e.target.value)}
++            onChange={(e) => edited(setLocation, e.target.value)}
+             data-testid="event-location"
+           />
+         </div>
+-        <Textarea label="Descrição" value={description} onChange={(e) => setDescription(e.target.value)} />
++        <Textarea label="Descrição" value={description} onChange={(e) => edited(setDescription, e.target.value)} />
+         <Input
+           label="Níveis"
+           hint="Ex.: Elite, Base"
+           value={levels}
+-          onChange={(e) => setLevels(e.target.value)}
++          onChange={(e) => edited(setLevels, e.target.value)}
+           data-testid="event-levels"
+         />
+         <Select
+           label="Status"
+           value={status}
+-          onChange={(e) => setStatus(e.target.value as EventStatus)}
++          onChange={(e) => edited(setStatus, e.target.value as EventStatus)}
+           options={STATUS_OPTIONS}
+         />
+       </Card>
+ 
+       <Card className="flex flex-col gap-4">
+         <h2 className="font-semibold">Público</h2>
+         <Checkbox
+           label="Resultados públicos"
+           checked={isPublic}
+-          onChange={(e) => setIsPublic(e.target.checked)}
++          onChange={(e) => edited(setIsPublic, e.target.checked)}
+           data-testid="event-public"
+         />
+         {isPublic && (
+           <div className="flex flex-col gap-2">
+-            <Input label="Endereço público (slug)" value={slug} onChange={(e) => setSlug(e.target.value)} />
++            <Input label="Endereço público (slug)" value={slug} onChange={(e) => edited(setSlug, e.target.value)} />
+             <div className="flex flex-wrap items-center gap-3">
+               <p className="break-all text-sm text-muted tabular">…/#/p/{slug || '—'}</p>
+               <Button type="button" size="sm" variant="secondary" onClick={() => void onCopyLink()}>
+                 Copiar link
+               </Button>
+             </div>
+           </div>
+         )}
+       </Card>
+ 
+diff --git a/src/features/events/EventsPage.tsx b/src/features/events/EventsPage.tsx
+index 4d84a02..03c15bb 100644
+--- a/src/features/events/EventsPage.tsx
++++ b/src/features/events/EventsPage.tsx
+@@ -1,40 +1,27 @@
+ import { useMemo, useState } from 'react';
+ import type { FormEvent } from 'react';
+ import { Link, useNavigate } from 'react-router';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { Badge, Button, Card, EmptyState, Input, Modal, Spinner, useConfirm, useToast } from '../../components/ui';
+ import type { BadgeTone } from '../../components/ui';
+ import { api } from '../../lib/api';
+ import { formatDateBR } from '../../lib/format';
+ import type { EventStatus, EventSummary } from '../../lib/types';
++import { errorMessage, parseLevels } from './eventHelpers';
+ 
+ const STATUS: Record<EventStatus, { label: string; tone: BadgeTone }> = {
+   planejado: { label: 'Planejado', tone: 'neutral' },
+   ao_vivo: { label: 'Ao vivo', tone: 'success' },
+   encerrado: { label: 'Encerrado', tone: 'info' },
+ };
+ 
+-/** Comma-separated free text ("Elite, Base, Elite") into a trimmed, order-preserving unique list. */
+-export function parseLevels(text: string): string[] {
+-  const out: string[] = [];
+-  for (const raw of text.split(',')) {
+-    const v = raw.trim();
+-    if (v && !out.includes(v)) out.push(v);
+-  }
+-  return out;
+-}
+-
+-function errorMessage(err: unknown, fallback: string): string {
+-  return err instanceof Error && err.message ? err.message : fallback;
+-}
+-
+ export default function EventsPage() {
+   const navigate = useNavigate();
+   const toast = useToast();
+   const confirm = useConfirm();
+   const queryClient = useQueryClient();
+   const { data: events, isLoading, error } = useQuery({
+     queryKey: ['events'],
+     queryFn: () => api.admin.listEvents(),
+   });
+ 
+diff --git a/src/features/events/eventHelpers.test.ts b/src/features/events/eventHelpers.test.ts
+new file mode 100644
+index 0000000..efd29b2
+--- /dev/null
++++ b/src/features/events/eventHelpers.test.ts
+@@ -0,0 +1,40 @@
++import { describe, expect, it } from 'vitest';
++import { errorMessage, parseLevels } from './eventHelpers';
++
++describe('parseLevels', () => {
++  it('trims, drops empties and de-duplicates while keeping the first-seen order', () => {
++    expect(parseLevels('Elite, Base, Elite')).toEqual(['Elite', 'Base']);
++    expect(parseLevels('  Elite ,  , Base  ,,')).toEqual(['Elite', 'Base']);
++    expect(parseLevels('')).toEqual([]);
++    expect(parseLevels('   ')).toEqual([]);
++  });
++
++  it('is case-sensitive (does not fold "Elite" and "elite")', () => {
++    expect(parseLevels('Elite, elite')).toEqual(['Elite', 'elite']);
++  });
++
++  it('keeps a single level as-is', () => {
++    expect(parseLevels('Base')).toEqual(['Base']);
++  });
++});
++
++describe('errorMessage', () => {
++  // `errorMessage` only cares that the value is an `Error` with a message; `ApiError` (whose
++  // pt-BR message this is meant to surface) is one, so a plain `Error` covers it here without
++  // pulling in `lib/api` → `lib/supabase`, which throws outside a browser env with no
++  // VITE_SUPABASE_URL set (see events.test.tsx's own note on this).
++  it('returns a plain Error message', () => {
++    expect(errorMessage(new Error('algo quebrou'), 'fallback')).toBe('algo quebrou');
++  });
++
++  it('falls back when the error has no message', () => {
++    expect(errorMessage(new Error(''), 'fallback')).toBe('fallback');
++  });
++
++  it('falls back for anything that is not an Error (string, object, null, undefined)', () => {
++    expect(errorMessage('boom', 'fallback')).toBe('fallback');
++    expect(errorMessage({ message: 'not an Error instance' }, 'fallback')).toBe('fallback');
++    expect(errorMessage(null, 'fallback')).toBe('fallback');
++    expect(errorMessage(undefined, 'fallback')).toBe('fallback');
++  });
++});
+diff --git a/src/features/events/eventHelpers.ts b/src/features/events/eventHelpers.ts
+new file mode 100644
+index 0000000..1beb297
+--- /dev/null
++++ b/src/features/events/eventHelpers.ts
+@@ -0,0 +1,27 @@
++/** Small helpers shared by the Events, event general-tab and settings screens. */
++
++/** Comma-separated free text ("Elite, Base, Elite") into a trimmed, order-preserving unique list. */
++export function parseLevels(text: string): string[] {
++  const out: string[] = [];
++  for (const raw of text.split(',')) {
++    const v = raw.trim();
++    if (v && !out.includes(v)) out.push(v);
++  }
++  return out;
++}
++
++/** The error's own message when it has one (an `ApiError`'s is already pt-BR), else a fallback. */
++export function errorMessage(err: unknown, fallback: string): string {
++  return err instanceof Error && err.message ? err.message : fallback;
++}
++
++/** Best-effort clipboard write; jsdom, older browsers and a denied permission all resolve `false`. */
++export async function copyToClipboard(text: string): Promise<boolean> {
++  try {
++    if (!navigator.clipboard?.writeText) return false;
++    await navigator.clipboard.writeText(text);
++    return true;
++  } catch {
++    return false;
++  }
++}
+diff --git a/src/features/events/events.test.tsx b/src/features/events/events.test.tsx
+index fad9e04..0f8f3f9 100644
+--- a/src/features/events/events.test.tsx
++++ b/src/features/events/events.test.tsx
+@@ -1,15 +1,15 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { render, screen, waitFor } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+-import { createMemoryRouter, RouterProvider } from 'react-router';
++import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router';
+ import type { RouteObject } from 'react-router';
+ 
+ import { ConfirmProvider, ToastProvider } from '../../components/ui';
+ import { ApiError } from '../../lib/api';
+ import type { AdminMe, EventAggregate, EventSummary, OrganizerRow } from '../../lib/types';
+ import { makeEvent } from '../../domain/testing/fixtures';
+ import { SessionContext } from '../auth/session';
+ import type { SessionValue } from '../auth/session';
+ import { EventContext } from './EventContext';
+ import type { EventContextValue } from './EventContext';
+@@ -201,20 +201,44 @@ describe('EventsPage', () => {
+ 
+ describe('EventGeneralTab', () => {
+   function renderTab(ctx: EventContextValue) {
+     const routes: RouteObject[] = [
+       { path: '/eventos/:id/geral', element: <EventContext.Provider value={ctx}><EventGeneralTab /></EventContext.Provider> },
+       { path: '/eventos', element: <p>Lista de eventos</p> },
+     ];
+     return renderRoutes(`/eventos/${ctx.eventId}/geral`, routes);
+   }
+ 
++  // A stable `MemoryRouter` (unlike swapping `createMemoryRouter` instances) lets `rerender` feed
++  // a new context value while keeping `EventGeneralTab`'s own component instance — and therefore
++  // its `useState` — exactly as a real `agg` update from EventProvider would.
++  function renderTabDirect(ctx: EventContextValue) {
++    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
++    const tree = (c: EventContextValue) => (
++      <SessionContext.Provider value={fakeSession(OWNER)}>
++        <QueryClientProvider client={queryClient}>
++          <ToastProvider>
++            <ConfirmProvider>
++              <MemoryRouter initialEntries={[`/eventos/${c.eventId}/geral`]}>
++                <EventContext.Provider value={c}>
++                  <EventGeneralTab />
++                </EventContext.Provider>
++              </MemoryRouter>
++            </ConfirmProvider>
++          </ToastProvider>
++        </QueryClientProvider>
++      </SessionContext.Provider>
++    );
++    const result = render(tree(ctx));
++    return { ...result, rerenderWithContext: (next: EventContextValue) => result.rerender(tree(next)) };
++  }
++
+   it("shows the event's current data, including the public link preview", () => {
+     const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC', date: '2026-10-11', location: 'Vila Velha', levels: ['Elite', 'Base'], is_public: true, public_slug: 'copa-ebc' }) });
+     renderTab(fakeContext(agg));
+ 
+     expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC');
+     expect(screen.getByTestId('event-date')).toHaveValue('2026-10-11');
+     expect(screen.getByTestId('event-location')).toHaveValue('Vila Velha');
+     expect(screen.getByTestId('event-levels')).toHaveValue('Elite, Base');
+     expect(screen.getByTestId('event-public')).toBeChecked();
+     expect(screen.getByText('…/#/p/copa-ebc')).toBeInTheDocument();
+@@ -259,20 +283,73 @@ describe('EventGeneralTab', () => {
+     const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+     const { router } = renderTab(fakeContext(agg));
+ 
+     await user.click(screen.getByRole('button', { name: 'Excluir evento' }));
+     await user.click(screen.getByTestId('confirm-ok'));
+ 
+     await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
+     expect(await screen.findByText('Lista de eventos')).toBeInTheDocument();
+     expect(router.state.location.pathname).toBe('/eventos');
+   });
++
++  it('keeps unsaved edits when the event changes elsewhere, and offers to reload (Ruling 40)', async () => {
++    const user = userEvent.setup();
++    const agg1 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
++    const { rerenderWithContext } = renderTabDirect(fakeContext(agg1));
++
++    await user.clear(screen.getByTestId('event-name'));
++    await user.type(screen.getByTestId('event-name'), 'Nome em edição');
++    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
++
++    // Someone else (another tab, another organizer, a live poll) saved over the same event.
++    const agg2 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC (renomeada em outro lugar)' }) });
++    rerenderWithContext(fakeContext(agg2));
++
++    expect(screen.getByTestId('event-name')).toHaveValue('Nome em edição');
++    expect(screen.getByText(/Os dados do evento mudaram em outro lugar/)).toBeInTheDocument();
++
++    await user.click(screen.getByRole('button', { name: 'Recarregar' }));
++
++    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC (renomeada em outro lugar)');
++    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
++  });
++
++  it('re-seeds freely from a fresh event while the form is untouched', () => {
++    const agg1 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
++    const { rerenderWithContext } = renderTabDirect(fakeContext(agg1));
++
++    const agg2 = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC (atualizada)' }) });
++    rerenderWithContext(fakeContext(agg2));
++
++    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC (atualizada)');
++    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
++  });
++
++  it('does not warn about its own save landing', async () => {
++    const user = userEvent.setup();
++    mocks.saveEvent.mockResolvedValue(makeEvent());
++    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
++    const { rerenderWithContext } = renderTabDirect(fakeContext(agg));
++
++    await user.clear(screen.getByTestId('event-name'));
++    await user.type(screen.getByTestId('event-name'), 'Copa EBC 2027');
++    await user.click(screen.getByTestId('event-save'));
++    await waitFor(() => expect(mocks.saveEvent).toHaveBeenCalled());
++
++    // `refresh()` on this fixture is a no-op mock, so simulate the aggregate it would normally
++    // bring back: the same event, saved, as a fresh object.
++    const savedAgg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC 2027' }) });
++    rerenderWithContext(fakeContext(savedAgg));
++
++    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC 2027');
++    expect(screen.queryByText(/Os dados do evento mudaram em outro lugar/)).not.toBeInTheDocument();
++  });
+ });
+ 
+ describe('SettingsPage', () => {
+   function renderSettings(session: SessionValue) {
+     return renderRoutes('/config', [{ path: '/config', element: <SettingsPage /> }], session);
+   }
+ 
+   it('shows "Adicionar organizador" for the owner', async () => {
+     mocks.listOrganizers.mockResolvedValue([]);
+     renderSettings(fakeSession(OWNER));
+diff --git a/src/features/settings/SettingsPage.tsx b/src/features/settings/SettingsPage.tsx
+index 6c1bdca..b3d27ce 100644
+--- a/src/features/settings/SettingsPage.tsx
++++ b/src/features/settings/SettingsPage.tsx
+@@ -1,45 +1,32 @@
+ import { useState } from 'react';
+ import type { FormEvent } from 'react';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { Badge, Button, Card, Input, Spinner, useConfirm, useToast } from '../../components/ui';
+ import { api } from '../../lib/api';
+ import { useSession } from '../auth/session';
+ import type { OrganizerRow } from '../../lib/types';
++import { copyToClipboard, errorMessage } from '../events/eventHelpers';
+ 
+ const MIN_LENGTH = 8;
+ // No 0/O, 1/l/I: every character the generator can produce reads unambiguously out loud or on paper.
+ const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+ const PASSWORD_LENGTH = 12;
+ 
+ function generateTempPassword(): string {
+   const bytes = new Uint32Array(PASSWORD_LENGTH);
+   crypto.getRandomValues(bytes);
+   let out = '';
+   for (let i = 0; i < PASSWORD_LENGTH; i++) out += PASSWORD_ALPHABET[bytes[i] % PASSWORD_ALPHABET.length];
+   return out;
+ }
+ 
+-function errorMessage(err: unknown, fallback: string): string {
+-  return err instanceof Error && err.message ? err.message : fallback;
+-}
+-
+-async function copyToClipboard(text: string): Promise<boolean> {
+-  try {
+-    if (!navigator.clipboard?.writeText) return false;
+-    await navigator.clipboard.writeText(text);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ export default function SettingsPage() {
+   const { me } = useSession();
+   const toast = useToast();
+   const confirm = useConfirm();
+   const queryClient = useQueryClient();
+   const isOwner = me?.role === 'owner';
+ 
+   const { data: organizers, isLoading, error } = useQuery({
+     queryKey: ['organizers'],
+     queryFn: () => api.admin.listOrganizers(),

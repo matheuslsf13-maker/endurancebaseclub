@@ -1,0 +1,833 @@
+# Review package: bae2379..884253b (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+884253b feat(results): classification, podiums, finalize and XLSX export
+
+## Files changed
+ src/features/results/ClassificationTable.tsx | 150 +++++++++++
+ src/features/results/PodiumView.tsx          |  60 +++++
+ src/features/results/ResultsTab.tsx          | 165 +++++++++++-
+ src/features/results/exportWorkbook.ts       |  32 +++
+ src/features/results/results.test.tsx        | 383 +++++++++++++++++++++++++++
+ 5 files changed, 789 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/features/results/ClassificationTable.tsx b/src/features/results/ClassificationTable.tsx
+new file mode 100644
+index 0000000..bb0a868
+--- /dev/null
++++ b/src/features/results/ClassificationTable.tsx
+@@ -0,0 +1,150 @@
++import { Link } from 'react-router';
++import { Table } from '../../components/ui';
++import { groupLabel } from '../../domain/categories';
++import { STATUS_LABEL } from '../../domain/labels';
++import type { RaceClassification } from '../../domain/ranking';
++import { formatDuration, formatGap } from '../../lib/format';
++import type { AthleteRow, EntryRow, RaceRow, RankingDim } from '../../lib/types';
++import type { EntryTiming } from '../../domain/consolidation';
++
++export type AthleteLinkMode = 'admin' | 'public' | false;
++
++export interface ClassificationTableProps {
++  race: RaceRow;
++  cls: RaceClassification;
++  showLegs?: boolean;
++  linkAthletes?: AthleteLinkMode;
++  /** Resolves a member's display name; entries only carry `athlete_id` (spec §6, `admin_get_event`
++   * does not embed member names). Required even though the brief's prop list omits it — there is
++   * no other way to go from an entry to a human name (see report). */
++  athletesById: Map<string, AthleteRow>;
++}
++
++/** `Nome (Perna label)` per member, `·`-joined — the plain-text form used where links do not make
++ * sense (podium cards). A team's members are always shown with the leg(s) they cover so a relay's
++ * card reads e.g. "Ana (Natação) · Beto (Corrida)"; an individual entry (`team_size <= 1`) is just
++ * the athlete's name, since there is nothing to disambiguate. */
++export function entryLabel(entry: EntryRow, race: RaceRow, athletesById: Map<string, AthleteRow>): string {
++  const members = entry.members.slice().sort((a, b) => a.position - b.position);
++  if (race.team_size <= 1) {
++    return members.map(m => athletesById.get(m.athlete_id)?.name ?? '?').join(' / ');
++  }
++  return members
++    .map(m => {
++      const name = athletesById.get(m.athlete_id)?.name ?? '?';
++      const legLabels = m.legs.map(k => race.legs[k]?.label).filter((l): l is string => !!l).join('/');
++      return legLabels ? `${name} (${legLabels})` : name;
++    })
++    .join(' · ');
++}
++
++const PROFILE_PATH: Record<Exclude<AthleteLinkMode, false>, string> = { admin: '/atletas', public: '/atleta' };
++
++/** Same breakdown as `entryLabel`, but each member's name links to their profile (admin: always;
++ * public: only athletes with `public_profile`), per Task 26's "athlete names link … when
++ * `public_profile`" rule. */
++function MemberNames({
++  entry, race, athletesById, linkAthletes,
++}: { entry: EntryRow; race: RaceRow; athletesById: Map<string, AthleteRow>; linkAthletes: AthleteLinkMode }) {
++  const members = entry.members.slice().sort((a, b) => a.position - b.position);
++  const isTeam = race.team_size > 1;
++
++  return (
++    <>
++      {members.map((m, i) => {
++        const athlete = athletesById.get(m.athlete_id);
++        const name = athlete?.name ?? '?';
++        const legLabels = isTeam ? m.legs.map(k => race.legs[k]?.label).filter((l): l is string => !!l).join('/') : '';
++        const text = legLabels ? `${name} (${legLabels})` : name;
++        const canLink = linkAthletes === 'admin' || (linkAthletes === 'public' && athlete?.public_profile === true);
++        return (
++          <span key={m.athlete_id}>
++            {i > 0 ? ' · ' : ''}
++            {canLink ? (
++              <Link to={`${PROFILE_PATH[linkAthletes as Exclude<AthleteLinkMode, false>]}/${m.athlete_id}`} className="underline underline-offset-2 hover:text-accent">
++                {text}
++              </Link>
++            ) : (
++              text
++            )}
++          </span>
++        );
++      })}
++    </>
++  );
++}
++
++/** pt-BR status text for a classification row, with Controller Ruling 9's hint: a `finished`
++ * status with no resolvable `final_ms` (a finish mark with no wave start to time it from) is
++ * unranked but did cross the line, so it is called out rather than shown as a plain "Concluiu". */
++function statusText(timing: EntryTiming): string {
++  const label = STATUS_LABEL[timing.status];
++  return timing.status === 'finished' && timing.final_ms === null ? `${label} (sem largada)` : label;
++}
++
++const PODIUM_ROW_CLASS = 'bg-warning/10';
++
++export function ClassificationTable({ race, cls, showLegs = false, linkAthletes = false, athletesById }: ClassificationTableProps) {
++  const legCount = race.legs.length;
++  // "Categoria" merges sex/age/level into one column (spec §9's dimensions); level is included
++  // only when this race actually uses levels, so a race without them does not show "Sem nível" on
++  // every row.
++  const hasLevels = cls.rows.some(r => r.category.level !== null);
++  const catDims: RankingDim[] = hasLevels ? ['sex', 'age', 'level'] : ['sex', 'age'];
++
++  return (
++    <Table data-testid="classification-table">
++      <thead>
++        <tr>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Pos</th>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Nº</th>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Atleta/Equipe</th>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Categoria</th>
++          {showLegs && Array.from({ length: legCount }, (_, k) => (
++            <th key={k} className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">
++              Perna {k + 1} ({race.legs[k].label})
++            </th>
++          ))}
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Total</th>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Penal.</th>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Final</th>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Dif. 1º</th>
++          <th className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">Status</th>
++        </tr>
++      </thead>
++      <tbody>
++        {cls.rows.map(row => {
++          const isPodium = row.overall_pos !== null && row.overall_pos <= 3;
++          return (
++            <tr
++              key={row.entry.id}
++              data-testid="classification-row"
++              className={`border-t border-border tabular ${isPodium ? PODIUM_ROW_CLASS : ''}`}
++            >
++              <td className="px-3 py-2">{row.overall_pos ?? '—'}</td>
++              <td className="px-3 py-2">{row.entry.bib}</td>
++              <td className="px-3 py-2 whitespace-nowrap">
++                {linkAthletes ? (
++                  <MemberNames entry={row.entry} race={race} athletesById={athletesById} linkAthletes={linkAthletes} />
++                ) : (
++                  entryLabel(row.entry, race, athletesById)
++                )}
++              </td>
++              <td className="px-3 py-2 whitespace-nowrap">{groupLabel(catDims, row.category)}</td>
++              {showLegs && Array.from({ length: legCount }, (_, k) => (
++                <td key={k} className="px-3 py-2">
++                  {formatDuration(row.timing.legs.find(l => l.leg_index === k)?.leg_ms ?? null)}
++                </td>
++              ))}
++              <td className="px-3 py-2">{formatDuration(row.timing.total_ms)}</td>
++              <td className="px-3 py-2">{formatGap(row.entry.penalty_ms)}</td>
++              <td className="px-3 py-2 font-medium">{formatDuration(row.timing.final_ms)}</td>
++              <td className="px-3 py-2">{formatGap(row.gap_ms)}</td>
++              <td className="px-3 py-2 whitespace-nowrap">{statusText(row.timing)}</td>
++            </tr>
++          );
++        })}
++      </tbody>
++    </Table>
++  );
++}
+diff --git a/src/features/results/PodiumView.tsx b/src/features/results/PodiumView.tsx
+new file mode 100644
+index 0000000..63c2f98
+--- /dev/null
++++ b/src/features/results/PodiumView.tsx
+@@ -0,0 +1,60 @@
++import { Card, EmptyState } from '../../components/ui';
++import { entryLabel } from './ClassificationTable';
++import type { PodiumGroup, RaceClassification } from '../../domain/ranking';
++import { formatDuration } from '../../lib/format';
++import type { AthleteRow, RankingDef } from '../../lib/types';
++
++export interface PodiumViewProps {
++  cls: RaceClassification;
++  /** Same requirement as `ClassificationTable`'s: entries only carry `athlete_id`, so a name
++   * needs a lookup map. See that component's doc comment. */
++  athletesById: Map<string, AthleteRow>;
++}
++
++const PLACE_LABEL = ['1º', '2º', '3º'];
++
++interface RankingBlock { ranking: RankingDef; groups: PodiumGroup[] }
++
++/** `cls.podiums` is already ranking-then-group ordered (spec §9, `classifyRace`); this just folds
++ * the flat list back into one block per ranking so each renders under a single heading. */
++function byRanking(podiums: PodiumGroup[]): RankingBlock[] {
++  const blocks: RankingBlock[] = [];
++  for (const group of podiums) {
++    const last = blocks[blocks.length - 1];
++    if (last && last.ranking.id === group.ranking.id) last.groups.push(group);
++    else blocks.push({ ranking: group.ranking, groups: [group] });
++  }
++  return blocks;
++}
++
++export function PodiumView({ cls, athletesById }: PodiumViewProps) {
++  const blocks = byRanking(cls.podiums);
++
++  return (
++    <div data-testid="podiums" className="flex flex-col gap-6">
++      {blocks.length === 0 && <EmptyState title="Ainda sem pódio">Nenhum atleta concluiu esta prova até o momento.</EmptyState>}
++      {blocks.map(({ ranking, groups }) => (
++        <section key={ranking.id} className="flex flex-col gap-3">
++          <h3 className="brand-title text-sm font-semibold uppercase tracking-wide text-muted">{ranking.name}</h3>
++          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
++            {groups.map(group => (
++              <Card key={group.group_key}>
++                <p className="mb-2 text-sm font-semibold">{group.group_label}</p>
++                <ol className="flex flex-col gap-1.5">
++                  {group.places.map(place => (
++                    <li key={place.ranked.entry.id} className="flex items-center gap-2 text-sm tabular">
++                      <span className="w-7 shrink-0 font-semibold">{PLACE_LABEL[place.podium_pos - 1] ?? `${place.podium_pos}º`}</span>
++                      <span className="min-w-0 flex-1 truncate">{entryLabel(place.ranked.entry, cls.race, athletesById)}</span>
++                      <span className="shrink-0 text-muted">Nº {place.ranked.entry.bib}</span>
++                      <span className="shrink-0 font-medium">{formatDuration(place.ranked.timing.final_ms)}</span>
++                    </li>
++                  ))}
++                </ol>
++              </Card>
++            ))}
++          </div>
++        </section>
++      ))}
++    </div>
++  );
++}
+diff --git a/src/features/results/ResultsTab.tsx b/src/features/results/ResultsTab.tsx
+index 5004252..5c96979 100644
+--- a/src/features/results/ResultsTab.tsx
++++ b/src/features/results/ResultsTab.tsx
+@@ -1 +1,164 @@
+-export default function ResultsTab() { return <h1 className="p-6 brand-title">ResultsTab</h1>; }
++import { useMemo, useState } from 'react';
++import { Link } from 'react-router';
++import { Badge, Button, EmptyState, Select } from '../../components/ui';
++import { useConfirm } from '../../components/ui/Confirm';
++import { useToast } from '../../components/ui/Toast';
++import { buildFinalizeRows } from '../../domain/snapshot';
++import { api, ApiError } from '../../lib/api';
++import { formatDateTimeBR } from '../../lib/format';
++import { useEventContext } from '../events/EventContext';
++import { ClassificationTable } from './ClassificationTable';
++import { exportWorkbook } from './exportWorkbook';
++import { PodiumView } from './PodiumView';
++
++export default function ResultsTab() {
++  const { agg, index, timing, classifications, refresh } = useEventContext();
++  const toast = useToast();
++  const confirm = useConfirm();
++  const [busy, setBusy] = useState(false);
++
++  const races = useMemo(() => [...agg.races].sort((a, b) => a.position - b.position), [agg.races]);
++  const [selectedRaceId, setSelectedRaceId] = useState<string>(() => races[0]?.id ?? '');
++  const race = races.find(r => r.id === selectedRaceId) ?? races[0] ?? null;
++  const cls = race ? classifications.get(race.id) : undefined;
++
++  if (!race || !cls) {
++    return <EmptyState title="Nenhuma prova cadastrada">Cadastre uma prova em Provas para ver os resultados aqui.</EmptyState>;
++  }
++
++  const raceIssues = timing.issues.filter(i => i.race_id === race.id);
++  const openIssues = raceIssues.filter(i => i.severity !== 'info');
++  const errorCount = openIssues.filter(i => i.severity === 'error').length;
++  const warningCount = openIssues.filter(i => i.severity === 'warning').length;
++  const onCourseCount = [...timing.byEntry.values()].filter(t => t.race_id === race.id && t.status === 'on_course').length;
++
++  function reportError(e: unknown) {
++    toast.show({ message: e instanceof ApiError ? e.message : 'Não foi possível concluir a ação.', tone: 'danger' });
++  }
++
++  async function handleFinalize() {
++    if (!race || !cls) return;
++    const ok = await confirm({
++      title: `Finalizar "${race.name}"?`,
++      message: (
++        <div className="flex flex-col gap-2">
++          <p>
++            {errorCount} erro(s) e {warningCount} aviso(s) pendentes em Revisão.
++          </p>
++          {onCourseCount > 0 && (
++            <p>
++              Ainda há {onCourseCount} atleta(s) em prova — eles ficarão como Em prova/DNF conforme o status atual ao
++              finalizar.
++            </p>
++          )}
++          <p>Os resultados desta prova passam a ser oficiais e a planilha/pódios não mudam mais sozinhos.</p>
++        </div>
++      ),
++      confirmLabel: 'Finalizar',
++      danger: errorCount > 0,
++    });
++    if (!ok) return;
++    setBusy(true);
++    try {
++      const rows = buildFinalizeRows(agg.event, cls, index.athletesById);
++      await api.admin.finalizeRace(race.id, rows);
++      toast.show({ message: 'Prova finalizada.', tone: 'success' });
++      await refresh();
++    } catch (e) {
++      reportError(e);
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function handleUnfinalize() {
++    if (!race) return;
++    const ok = await confirm({
++      title: `Reabrir "${race.name}"?`,
++      message: 'Os resultados oficiais desta prova são removidos e ela volta a mostrar a classificação parcial (ao vivo).',
++      confirmLabel: 'Reabrir',
++      danger: true,
++    });
++    if (!ok) return;
++    setBusy(true);
++    try {
++      await api.admin.unfinalizeRace(race.id);
++      toast.show({ message: 'Prova reaberta.', tone: 'success' });
++      await refresh();
++    } catch (e) {
++      reportError(e);
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  function handleExport() {
++    try {
++      exportWorkbook(agg, timing, [...classifications.values()]);
++    } catch {
++      toast.show({ message: 'Não foi possível gerar a planilha.', tone: 'danger' });
++    }
++  }
++
++  return (
++    <div className="flex flex-col gap-6">
++      {/* Print-only header: guarantees the printed page shows the event title and race name even
++          if the surrounding shell's own header is styled for screen use. */}
++      <div className="hidden print:block">
++        <h1 className="brand-title text-xl font-semibold">{agg.event.name}</h1>
++        <h2 className="text-lg">{race.name}</h2>
++      </div>
++
++      <div className="no-print max-w-xs">
++        <Select
++          label="Prova"
++          data-testid="race-select"
++          value={race.id}
++          onChange={e => setSelectedRaceId(e.target.value)}
++          options={races.map(r => ({ value: r.id, label: r.name }))}
++        />
++      </div>
++
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <div className="flex flex-wrap items-center gap-3">
++          <h2 className="text-lg font-semibold">{race.name}</h2>
++          {race.finalized_at ? (
++            <Badge tone="info">Oficial · finalizada em {formatDateTimeBR(Date.parse(race.finalized_at))}</Badge>
++          ) : (
++            <Badge tone="warning">Parcial (ao vivo)</Badge>
++          )}
++          {openIssues.length > 0 && (
++            <Link
++              to={`/eventos/${agg.event.id}/revisao`}
++              className="no-print text-sm text-muted underline underline-offset-2 hover:text-fg"
++            >
++              {openIssues.length} pendência(s) — ver Revisão
++            </Link>
++          )}
++        </div>
++
++        <div className="no-print flex flex-wrap items-center gap-2">
++          <Button variant="secondary" size="sm" onClick={handleExport} data-testid="export-xlsx">
++            Exportar planilha
++          </Button>
++          <Button variant="secondary" size="sm" onClick={() => window.print()} data-testid="print">
++            Imprimir
++          </Button>
++          {race.finalized_at ? (
++            <Button variant="secondary" size="sm" loading={busy} onClick={() => void handleUnfinalize()} data-testid="unfinalize-race">
++              Reabrir prova
++            </Button>
++          ) : (
++            <Button size="sm" loading={busy} onClick={() => void handleFinalize()} data-testid="finalize-race">
++              Finalizar prova
++            </Button>
++          )}
++        </div>
++      </div>
++
++      <ClassificationTable race={race} cls={cls} showLegs={race.legs.length > 1} linkAthletes="admin" athletesById={index.athletesById} />
++
++      <PodiumView cls={cls} athletesById={index.athletesById} />
++    </div>
++  );
++}
+diff --git a/src/features/results/exportWorkbook.ts b/src/features/results/exportWorkbook.ts
+new file mode 100644
+index 0000000..e26882e
+--- /dev/null
++++ b/src/features/results/exportWorkbook.ts
+@@ -0,0 +1,32 @@
++import { buildEventWorkbook, workbookFileName } from '../../domain/workbook';
++import type { EventTiming } from '../../domain/consolidation';
++import type { RaceClassification } from '../../domain/ranking';
++import { writeXlsx } from '../../lib/xlsx/writer';
++import type { EventAggregate } from '../../lib/types';
++
++const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
++
++/**
++ * Builds the whole event's "planilha de conferência" (spec §11) and downloads it as
++ * `workbookFileName(agg.event)` through a temporary `<a download>`, then revokes the object URL
++ * (Controller Ruling: exact filename, exact MIME, revoke after the click).
++ */
++export function exportWorkbook(agg: EventAggregate, timing: EventTiming, classifications: RaceClassification[]): void {
++  const model = buildEventWorkbook(agg, timing, classifications, Date.now());
++  const bytes = writeXlsx(model);
++  // `Blob`'s DOM typings want a plain `ArrayBuffer` `BlobPart`, not `Uint8Array<ArrayBufferLike>`
++  // (TS 5.7's stricter typed-array generics) — slice into a fresh, exactly-sized `ArrayBuffer`.
++  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
++  const blob = new Blob([buffer], { type: XLSX_MIME });
++  const url = URL.createObjectURL(blob);
++  try {
++    const a = document.createElement('a');
++    a.href = url;
++    a.download = workbookFileName(agg.event);
++    document.body.appendChild(a);
++    a.click();
++    document.body.removeChild(a);
++  } finally {
++    URL.revokeObjectURL(url);
++  }
++}
+diff --git a/src/features/results/results.test.tsx b/src/features/results/results.test.tsx
+new file mode 100644
+index 0000000..3f938ac
+--- /dev/null
++++ b/src/features/results/results.test.tsx
+@@ -0,0 +1,383 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { fireEvent, screen, within } from '@testing-library/react';
++
++import { renderWithProviders } from '../../test/renderWithProviders';
++import { EventContext } from '../events/EventContext';
++import type { EventContextValue } from '../events/EventContext';
++import { indexEvent } from '../../domain/eventModel';
++import { computeEventTiming } from '../../domain/consolidation';
++import { classifyRace } from '../../domain/ranking';
++import type { RaceClassification } from '../../domain/ranking';
++import { workbookFileName } from '../../domain/workbook';
++import { formatDuration, formatGap } from '../../lib/format';
++import type { ClockSync } from '../../lib/clock';
++import type { EventAggregate, RaceRow } from '../../lib/types';
++import {
++  iso, makeAthlete, makeEntry, makeEvent, makeMark, makeRace, makeTimekeeper, makeWave, MIN, T0,
++} from '../../domain/testing/fixtures';
++
++import ResultsTab from './ResultsTab';
++import { ClassificationTable } from './ClassificationTable';
++import { PodiumView } from './PodiumView';
++import { exportWorkbook } from './exportWorkbook';
++
++const mocks = vi.hoisted(() => ({
++  finalizeRace: vi.fn(),
++  unfinalizeRace: vi.fn(),
++}));
++vi.mock('../../lib/supabase', () => ({ supabase: {} }));
++vi.mock('../../lib/api', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('../../lib/api')>()),
++  api: { admin: { finalizeRace: mocks.finalizeRace, unfinalizeRace: mocks.unfinalizeRace } },
++}));
++
++// ---------------------------------------------------------------------------
++// Fixture: an individual (team_size 1) single-leg race with 3 finishers (25/26/27 min) plus one
++// DNF entry — the exact context the brief's Step 1 calls for.
++// ---------------------------------------------------------------------------
++const NOW = T0 + 40 * MIN;
++
++function buildIndividualRaceFixture() {
++  const event = makeEvent();
++  const race = makeRace({ legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
++  const wave = makeWave();
++  const athletes = [
++    makeAthlete({ id: 'a1', name: 'Ana Souza' }),
++    makeAthlete({ id: 'a2', name: 'Beto Lima', sex: 'M' }),
++    makeAthlete({ id: 'a3', name: 'Carla Dias' }),
++    makeAthlete({ id: 'a4', name: 'Duda Reis', sex: 'M' }),
++  ];
++  const entries = [
++    makeEntry({ id: 'en1', bib: '101', members: [{ athlete_id: 'a1', position: 0, legs: [0] }] }),
++    makeEntry({ id: 'en2', bib: '102', members: [{ athlete_id: 'a2', position: 0, legs: [0] }] }),
++    makeEntry({ id: 'en3', bib: '103', members: [{ athlete_id: 'a3', position: 0, legs: [0] }] }),
++    makeEntry({ id: 'en4', bib: '104', status: 'dnf', members: [{ athlete_id: 'a4', position: 0, legs: [0] }] }),
++  ];
++  const marks = [
++    makeMark({ entry_id: 'en1', leg_index: 0, at: T0 + 25 * MIN }),
++    makeMark({ entry_id: 'en2', leg_index: 0, at: T0 + 26 * MIN }),
++    makeMark({ entry_id: 'en3', leg_index: 0, at: T0 + 27 * MIN }),
++  ];
++  const agg: EventAggregate = {
++    event, races: [race], waves: [wave], entries, athletes, timekeepers: [makeTimekeeper()],
++    marks, resolutions: [], results: [], version: 1, server_now: iso(NOW),
++  };
++  const index = indexEvent(agg);
++  const timing = computeEventTiming(agg, NOW);
++  const classifications = new Map([[race.id, classifyRace(race, entries, timing.byEntry, index.athletesById, event)]]);
++  return { event, race, agg, index, timing, classifications };
++}
++
++type Fixture = ReturnType<typeof buildIndividualRaceFixture>;
++
++function contextValue(fx: Fixture, overrides: Partial<EventContextValue> = {}): EventContextValue {
++  return {
++    eventId: fx.event.id, agg: fx.agg, index: fx.index, timing: fx.timing, classifications: fx.classifications,
++    nowMs: NOW, refresh: vi.fn(async () => {}), patchAgg: vi.fn(), clock: {} as ClockSync,
++    ...overrides,
++  };
++}
++
++function renderResultsTab(fx: Fixture, overrides: Partial<EventContextValue> = {}) {
++  const ctx = contextValue(fx, overrides);
++  const utils = renderWithProviders(
++    <EventContext.Provider value={ctx}>
++      <ResultsTab />
++    </EventContext.Provider>,
++  );
++  return { ...utils, ctx };
++}
++
++beforeEach(() => {
++  mocks.finalizeRace.mockReset().mockResolvedValue({ finalized_at: iso(NOW), count: 4 });
++  mocks.unfinalizeRace.mockReset().mockResolvedValue(undefined);
++});
++
++// ---------------------------------------------------------------------------
++
++describe('ClassificationTable', () => {
++  it('lists rows in classification order with positions, gaps, status and podium highlight', () => {
++    const fx = buildIndividualRaceFixture();
++    const cls = fx.classifications.get(fx.race.id) as RaceClassification;
++
++    renderWithProviders(
++      <ClassificationTable race={fx.race} cls={cls} athletesById={fx.index.athletesById} />,
++    );
++
++    const table = screen.getByTestId('classification-table');
++    const rows = within(table).getAllByTestId('classification-row');
++    expect(rows).toHaveLength(4);
++
++    // 1st: Ana, no gap, podium highlight (Total and Final both read 25:00 — no penalty).
++    expect(within(rows[0]).getByText('1')).toBeInTheDocument();
++    expect(within(rows[0]).getByText('101')).toBeInTheDocument();
++    expect(within(rows[0]).getAllByText(formatDuration(25 * MIN))).toHaveLength(2);
++    expect(rows[0].className).toContain('bg-warning/10');
++
++    // 2nd/3rd: gaps to the leader.
++    expect(within(rows[1]).getByText('2')).toBeInTheDocument();
++    expect(within(rows[1]).getByText(formatGap(1 * MIN))).toBeInTheDocument();
++    expect(within(rows[2]).getByText('3')).toBeInTheDocument();
++    expect(within(rows[2]).getByText(formatGap(2 * MIN))).toBeInTheDocument();
++
++    // 4th: the DNF, unranked (no position), not highlighted.
++    expect(within(rows[3]).getByText('104')).toBeInTheDocument();
++    expect(within(rows[3]).getByText('DNF')).toBeInTheDocument();
++    expect(rows[3].className).not.toContain('bg-warning/10');
++  });
++
++  it('Ruling 9: a finish with no wave start is unranked, listed first among the unranked, with a "sem largada" hint', () => {
++    const race = makeRace({ id: 'rns', legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
++    const wave = makeWave({ id: 'wns', race_id: 'rns', start_at: null });
++    const finisher = makeEntry({ id: 'e-fin', race_id: 'rns', wave_id: 'wns', bib: '9' });
++    const onCourse = makeEntry({ id: 'e-oc', race_id: 'rns', wave_id: 'wns', bib: '10', members: [{ athlete_id: 'a1', position: 0, legs: [0] }] });
++    const athletes = [makeAthlete({ id: 'a1' })];
++    const marks = [makeMark({ entry_id: 'e-fin', leg_index: 0, at: T0 + 20 * MIN })];
++    const event = makeEvent();
++    const agg: EventAggregate = {
++      event, races: [race], waves: [wave], entries: [finisher, onCourse], athletes, timekeepers: [makeTimekeeper()],
++      marks, resolutions: [], results: [], version: 1, server_now: iso(NOW),
++    };
++    const index = indexEvent(agg);
++    const timing = computeEventTiming(agg, NOW);
++    const cls = classifyRace(race, [finisher, onCourse], timing.byEntry, index.athletesById, event);
++
++    // Sanity: the finisher really is the Ruling 9 case (finished, no resolvable final time).
++    expect(timing.byEntry.get('e-fin')?.status).toBe('finished');
++    expect(timing.byEntry.get('e-fin')?.final_ms).toBeNull();
++
++    renderWithProviders(<ClassificationTable race={race} cls={cls} athletesById={index.athletesById} />);
++
++    const rows = within(screen.getByTestId('classification-table')).getAllByTestId('classification-row');
++    // Both unranked; the finish-with-no-start row comes first (before on_course).
++    expect(within(rows[0]).getByText('9')).toBeInTheDocument();
++    expect(within(rows[0]).getByText('Concluiu (sem largada)')).toBeInTheDocument();
++    expect(within(rows[1]).getByText('10')).toBeInTheDocument();
++  });
++
++  it('shows a team entry\'s members with their leg — "Nome (Perna) · Nome (Perna)"', () => {
++    const race = makeRace({
++      id: 'rt', team_size: 2,
++      legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }],
++    });
++    const wave = makeWave({ id: 'wt', race_id: 'rt' });
++    const athletes = [makeAthlete({ id: 'ta1', name: 'Ana' }), makeAthlete({ id: 'ta2', name: 'Beto', sex: 'M' })];
++    const entry = makeEntry({
++      id: 'te1', race_id: 'rt', wave_id: 'wt', bib: '1', team_name: 'Tubarões',
++      members: [{ athlete_id: 'ta1', position: 0, legs: [0] }, { athlete_id: 'ta2', position: 1, legs: [1] }],
++    });
++    const marks = [makeMark({ entry_id: 'te1', leg_index: 0, at: T0 + 10 * MIN }), makeMark({ entry_id: 'te1', leg_index: 1, at: T0 + 40 * MIN })];
++    const event = makeEvent();
++    const agg: EventAggregate = {
++      event, races: [race], waves: [wave], entries: [entry], athletes, timekeepers: [makeTimekeeper()],
++      marks, resolutions: [], results: [], version: 1, server_now: iso(NOW),
++    };
++    const index = indexEvent(agg);
++    const timing = computeEventTiming(agg, NOW);
++    const cls = classifyRace(race, [entry], timing.byEntry, index.athletesById, event);
++
++    renderWithProviders(<ClassificationTable race={race} cls={cls} athletesById={index.athletesById} />);
++
++    expect(screen.getByText('Ana (Natação) · Beto (Corrida)')).toBeInTheDocument();
++  });
++
++  it('shows a "Perna k (label)" column with the split time for each leg when showLegs is true', () => {
++    const race = makeRace({
++      id: 'rt2', team_size: 2,
++      legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }],
++    });
++    const wave = makeWave({ id: 'wt2', race_id: 'rt2' });
++    const athletes = [makeAthlete({ id: 'ta1', name: 'Ana' }), makeAthlete({ id: 'ta2', name: 'Beto', sex: 'M' })];
++    const entry = makeEntry({
++      id: 'te2', race_id: 'rt2', wave_id: 'wt2', bib: '1',
++      members: [{ athlete_id: 'ta1', position: 0, legs: [0] }, { athlete_id: 'ta2', position: 1, legs: [1] }],
++    });
++    // leg 0: T0 -> T0+10min (10:00 split); leg 1: T0+10min -> T0+40min (30:00 split).
++    const marks = [makeMark({ entry_id: 'te2', leg_index: 0, at: T0 + 10 * MIN }), makeMark({ entry_id: 'te2', leg_index: 1, at: T0 + 40 * MIN })];
++    const event = makeEvent();
++    const agg: EventAggregate = {
++      event, races: [race], waves: [wave], entries: [entry], athletes, timekeepers: [makeTimekeeper()],
++      marks, resolutions: [], results: [], version: 1, server_now: iso(NOW),
++    };
++    const index = indexEvent(agg);
++    const timing = computeEventTiming(agg, NOW);
++    const cls = classifyRace(race, [entry], timing.byEntry, index.athletesById, event);
++
++    renderWithProviders(<ClassificationTable race={race} cls={cls} athletesById={index.athletesById} showLegs />);
++
++    expect(screen.getByText('Perna 1 (Natação)')).toBeInTheDocument();
++    expect(screen.getByText('Perna 2 (Corrida)')).toBeInTheDocument();
++    expect(screen.getByText(formatDuration(10 * MIN))).toBeInTheDocument();
++    expect(screen.getByText(formatDuration(30 * MIN))).toBeInTheDocument();
++  });
++});
++
++describe('PodiumView', () => {
++  it('renders group cards with 1º/2º/3º name, bib and time', () => {
++    const fx = buildIndividualRaceFixture();
++    const cls = fx.classifications.get(fx.race.id) as RaceClassification;
++
++    renderWithProviders(<PodiumView cls={cls} athletesById={fx.index.athletesById} />);
++
++    const podiums = screen.getByTestId('podiums');
++    expect(within(podiums).getAllByText('1º').length).toBeGreaterThan(0);
++    expect(within(podiums).getAllByText('Ana Souza').length).toBeGreaterThan(0);
++    expect(within(podiums).getAllByText('Nº 101').length).toBeGreaterThan(0);
++    expect(within(podiums).getAllByText(formatDuration(25 * MIN)).length).toBeGreaterThan(0);
++  });
++});
++
++describe('exportWorkbook', () => {
++  let createObjectURL: ReturnType<typeof vi.fn>;
++  let revokeObjectURL: ReturnType<typeof vi.fn>;
++  let capturedDownload: string | undefined;
++
++  beforeEach(() => {
++    capturedDownload = undefined;
++    createObjectURL = vi.fn(() => 'blob:mock-url');
++    revokeObjectURL = vi.fn();
++    URL.createObjectURL = createObjectURL as unknown as typeof URL.createObjectURL;
++    URL.revokeObjectURL = revokeObjectURL as unknown as typeof URL.revokeObjectURL;
++    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
++      capturedDownload = this.download;
++    });
++  });
++  afterEach(() => {
++    vi.restoreAllMocks();
++  });
++
++  it('downloads a Blob with the XLSX MIME type, the exact filename, and revokes the URL afterwards', () => {
++    const fx = buildIndividualRaceFixture();
++
++    exportWorkbook(fx.agg, fx.timing, [...fx.classifications.values()]);
++
++    expect(createObjectURL).toHaveBeenCalledTimes(1);
++    const blob = createObjectURL.mock.calls[0][0] as Blob;
++    expect(blob.type).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
++    expect(capturedDownload).toBe(workbookFileName(fx.event));
++    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
++  });
++});
++
++describe('ResultsTab', () => {
++  let createObjectURL: ReturnType<typeof vi.fn>;
++  let revokeObjectURL: ReturnType<typeof vi.fn>;
++
++  beforeEach(() => {
++    createObjectURL = vi.fn(() => 'blob:mock-url');
++    revokeObjectURL = vi.fn();
++    URL.createObjectURL = createObjectURL as unknown as typeof URL.createObjectURL;
++    URL.revokeObjectURL = revokeObjectURL as unknown as typeof URL.revokeObjectURL;
++    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
++    vi.spyOn(window, 'print').mockImplementation(() => {});
++  });
++  afterEach(() => {
++    vi.restoreAllMocks();
++  });
++
++  it('shows the race selector, the "Parcial (ao vivo)" badge and the classification table', () => {
++    const fx = buildIndividualRaceFixture();
++    renderResultsTab(fx);
++
++    expect(screen.getByTestId('race-select')).toHaveValue(fx.race.id);
++    expect(screen.getByText('Parcial (ao vivo)')).toBeInTheDocument();
++    expect(screen.getByTestId('classification-table')).toBeInTheDocument();
++    expect(screen.getByTestId('podiums')).toBeInTheDocument();
++  });
++
++  it('shows the "Oficial" badge with the finalized timestamp when the race is finalized', () => {
++    const fx = buildIndividualRaceFixture();
++    fx.race.finalized_at = iso(NOW);
++    renderResultsTab(fx);
++
++    expect(screen.getByText(/^Oficial · finalizada em/)).toBeInTheDocument();
++    expect(screen.getByTestId('unfinalize-race')).toBeInTheDocument();
++    expect(screen.queryByTestId('finalize-race')).not.toBeInTheDocument();
++  });
++
++  it('finalize-race + confirm-ok calls finalizeRace(raceId, rows) with every row and overall_pos 1 for the winner', async () => {
++    const fx = buildIndividualRaceFixture();
++    renderResultsTab(fx);
++
++    fireEvent.click(screen.getByTestId('finalize-race'));
++    fireEvent.click(await screen.findByTestId('confirm-ok'));
++
++    await vi.waitFor(() => expect(mocks.finalizeRace).toHaveBeenCalledTimes(1));
++    const [raceIdArg, rowsArg] = mocks.finalizeRace.mock.calls[0];
++    expect(raceIdArg).toBe(fx.race.id);
++    expect(rowsArg).toHaveLength(4);
++    const winner = rowsArg.find((r: { entry_id: string }) => r.entry_id === 'en1');
++    expect(winner?.overall_pos).toBe(1);
++
++    expect(await screen.findByText('Prova finalizada.')).toBeInTheDocument();
++  });
++
++  it('cancelling the finalize confirmation does not call finalizeRace', async () => {
++    const fx = buildIndividualRaceFixture();
++    renderResultsTab(fx);
++
++    fireEvent.click(screen.getByTestId('finalize-race'));
++    fireEvent.click(await screen.findByTestId('confirm-cancel'));
++
++    expect(mocks.finalizeRace).not.toHaveBeenCalled();
++  });
++
++  it('unfinalize-race + confirm-ok calls unfinalizeRace(raceId)', async () => {
++    const fx = buildIndividualRaceFixture();
++    fx.race.finalized_at = iso(NOW);
++    renderResultsTab(fx);
++
++    fireEvent.click(screen.getByTestId('unfinalize-race'));
++    fireEvent.click(await screen.findByTestId('confirm-ok'));
++
++    await vi.waitFor(() => expect(mocks.unfinalizeRace).toHaveBeenCalledWith(fx.race.id));
++  });
++
++  it('export-xlsx downloads the workbook with the exact filename and MIME type', () => {
++    const fx = buildIndividualRaceFixture();
++    renderResultsTab(fx);
++
++    fireEvent.click(screen.getByTestId('export-xlsx'));
++
++    expect(createObjectURL).toHaveBeenCalledTimes(1);
++    const blob = createObjectURL.mock.calls[0][0] as Blob;
++    expect(blob.type).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
++    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
++  });
++
++  it('print calls window.print()', () => {
++    const fx = buildIndividualRaceFixture();
++    renderResultsTab(fx);
++
++    fireEvent.click(screen.getByTestId('print'));
++
++    expect(window.print).toHaveBeenCalledTimes(1);
++  });
++
++  it('shows a link to Revisão with the pending-issue count when there are open issues', () => {
++    const race: RaceRow = makeRace({ id: 'rp', legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
++    const wave = makeWave({ id: 'wp', race_id: 'rp' });
++    const entry = makeEntry({ id: 'ep', race_id: 'rp', wave_id: 'wp', bib: '9', members: [{ athlete_id: 'a1', position: 0, legs: [0] }] });
++    const athletes = [makeAthlete({ id: 'a1' })];
++    // Two timekeepers marking the same leg 10 s apart (> divergence_threshold_s 3) with no
++    // resolution yet — a race-scoped 'divergence' warning (spec §8), unlike an unassigned mark
++    // (which carries no `race_id` at all, so it never shows under a specific race here).
++    const marks = [
++      makeMark({ id: 'm1', entry_id: 'ep', leg_index: 0, timekeeper_id: 'tk1', at: T0 + 25 * MIN }),
++      makeMark({ id: 'm2', entry_id: 'ep', leg_index: 0, timekeeper_id: 'tk2', at: T0 + 25 * MIN + 10_000 }),
++    ];
++    const event = makeEvent();
++    const agg: EventAggregate = {
++      event, races: [race], waves: [wave], entries: [entry], athletes, timekeepers: [makeTimekeeper({ id: 'tk1' }), makeTimekeeper({ id: 'tk2', name: 'Bia' })],
++      marks, resolutions: [], results: [], version: 1, server_now: iso(NOW),
++    };
++    const index = indexEvent(agg);
++    const timing = computeEventTiming(agg, NOW);
++    expect(timing.issues.some(i => i.type === 'divergence' && i.race_id === race.id)).toBe(true);
++    const classifications = new Map([[race.id, classifyRace(race, [entry], timing.byEntry, index.athletesById, event)]]);
++
++    renderResultsTab({ event, race, agg, index, timing, classifications });
++
++    expect(screen.getByText(/pendência\(s\) — ver Revisão/)).toBeInTheDocument();
++  });
++});

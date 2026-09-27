@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git merge:*)",
+      "Bash(git worktree:*)",
+      "Bash(git checkout:*)",
+      "Bash(npm run:*)",
+      "Bash(npm ci)",
+      "Bash(npx vitest:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite:*)",
+      "Bash(node dev/shim/server.mjs)",
+      "Bash(bash scripts/:*)",
+      "Bash(bash tests/e2e/:*)",
+      "Bash(python3 scripts/verify-xlsx.py:*)",
+      "Bash(agent-browser:*)"
+    ]
+  }
+}

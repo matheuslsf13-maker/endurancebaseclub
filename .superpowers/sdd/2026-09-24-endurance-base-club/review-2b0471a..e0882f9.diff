@@ -1,0 +1,2494 @@
+# Review package: 2b0471a..e0882f9 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+e0882f9 fix(timekeeper): readable status and toasts on a 390 px phone
+61ed433 Merge branch 'feat/ebc-app' into task/22
+d7250c4 feat(timekeeper): offline-first timekeeper app with synced clock
+
+## Files changed
+ index.html                                  |   5 +-
+ src/features/timekeeper/TimekeeperPage.tsx  | 722 +++++++++++++++++++++++++++-
+ src/features/timekeeper/timekeeper.test.tsx | 665 +++++++++++++++++++++++++
+ src/features/timekeeper/tkStore.test.ts     | 262 ++++++++++
+ src/features/timekeeper/tkStore.ts          | 225 +++++++++
+ src/features/timekeeper/useTimekeeper.ts    | 547 +++++++++++++++++++++
+ 6 files changed, 2423 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/index.html b/index.html
+index 6eb1c00..9f7a5ac 100644
+--- a/index.html
++++ b/index.html
+@@ -1,19 +1,20 @@
+ <!doctype html>
+ <html lang="pt-BR">
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+     <meta name="theme-color" content="#191513" />
+     <title>EnduranceBaseClub</title>
+     <link rel="icon" href="/favicon.png" />
+     <link rel="apple-touch-icon" href="/icon-192.png" />
+     <script>
+-      try { var t = localStorage.getItem('ebc.theme'); document.documentElement.dataset.theme = (t === 'light' || t === 'dark') ? t : 'dark'; }
+-      catch (e) { document.documentElement.dataset.theme = 'dark'; }
++      var d = location.hash.indexOf('#/c/') === 0 ? 'light' : 'dark'; /* timekeeper link: light by default (sun glare) */
++      try { var t = localStorage.getItem('ebc.theme'); document.documentElement.dataset.theme = (t === 'light' || t === 'dark') ? t : d; }
++      catch (e) { document.documentElement.dataset.theme = d; }
+     </script>
+   </head>
+   <body>
+     <div id="root"></div>
+     <script type="module" src="/src/main.tsx"></script>
+   </body>
+ </html>
+diff --git a/src/features/timekeeper/TimekeeperPage.tsx b/src/features/timekeeper/TimekeeperPage.tsx
+index c5eabaf..2fe17b0 100644
+--- a/src/features/timekeeper/TimekeeperPage.tsx
++++ b/src/features/timekeeper/TimekeeperPage.tsx
+@@ -1 +1,721 @@
+-export default function TimekeeperPage() { return <h1 className="p-6 brand-title">TimekeeperPage</h1>; }
++// The timekeeper app (`#/c/:token`, spec §7.3): mobile-first, no admin layout. One big MARCAR
++// button stamps the synced instant; marks are identified by bib or by tapping the entry in
++// "Em prova". Everything a timekeeper does is kept on the device first (useTimekeeper).
++
++import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
++import type { FormEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
++import { useParams } from 'react-router';
++import { Button, Input, Modal, Spinner, useToast } from '../../components/ui';
++import { Logo } from '../../components/Logo';
++import { ThemeToggle } from '../../components/ThemeToggle';
++import type { ClockSync } from '../../lib/clock';
++import { formatClock, formatDateBR, formatDuration } from '../../lib/format';
++import { safeLocalStorage } from '../../lib/storage';
++import type { MarkRow } from '../../lib/types';
++import { legAthleteId } from '../../domain/eventModel';
++import { legText, memberName } from './tkStore';
++import type { OnCourseItem } from './tkStore';
++import { useTimekeeper } from './useTimekeeper';
++import type { AssignResult, MyMark, Timekeeper } from './useTimekeeper';
++
++export default function TimekeeperPage() {
++  const { token = '' } = useParams();
++  // A different link is a different app state (session, registration, outbox).
++  return <TimekeeperApp key={token} token={token} />;
++}
++
++/**
++ * Ruling 21: on the timekeeper link the light theme is the default — a dark screen in the sun
++ * turns into a mirror. A theme chosen on this device (`ebc.theme`) always wins; index.html applies
++ * the same rule on load, this covers arriving here from another screen of the app.
++ */
++function useLightThemeByDefault() {
++  useLayoutEffect(() => {
++    const saved = () => {
++      const t = safeLocalStorage().getItem('ebc.theme');
++      return t === 'light' || t === 'dark';
++    };
++    if (!saved()) document.documentElement.dataset.theme = 'light';
++    return () => {
++      if (!saved()) document.documentElement.dataset.theme = 'dark';
++    };
++  }, []);
++}
++
++/** Keeps the screen on while timing; re-acquired when the page becomes visible again. */
++function useWakeLock(active: boolean) {
++  useEffect(() => {
++    const wakeLock = (navigator as Navigator & { wakeLock?: WakeLock }).wakeLock;
++    if (!active || !wakeLock) return;
++    let cancelled = false;
++    let held: WakeLockSentinel | null = null;
++    const release = (s: WakeLockSentinel | null) => {
++      if (s) s.release().catch(() => {});
++    };
++    const request = () => {
++      if (document.visibilityState !== 'visible') return;
++      wakeLock.request('screen').then(
++        s => {
++          if (cancelled) return release(s);
++          release(held);
++          held = s;
++        },
++        () => {
++          // Not allowed (battery saver, no user gesture yet…): the app works without it.
++        },
++      );
++    };
++    request();
++    document.addEventListener('visibilitychange', request);
++    return () => {
++      cancelled = true;
++      document.removeEventListener('visibilitychange', request);
++      release(held);
++    };
++  }, [active]);
++}
++
++function vibrate() {
++  try {
++    navigator.vibrate?.(50);
++  } catch {
++    // Unsupported: the row appearing in "Sem atleta" is the feedback.
++  }
++}
++
++const clockText = (ms: number) => formatClock(ms, { tenths: true });
++const markTime = (m: MarkRow) => clockText(Date.parse(m.ts));
++const qualityFmt = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++const fold = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
++
++function TimekeeperApp({ token }: { token: string }) {
++  useLightThemeByDefault();
++  const tk = useTimekeeper(token);
++  useWakeLock(tk.phase === 'main');
++
++  switch (tk.phase) {
++    case 'loading':
++      return (
++        <Centered>
++          <Spinner size={32} />
++          <p className="text-muted">Carregando a cronometragem…</p>
++          {tk.loadError && (
++            <>
++              <p role="alert" className="text-sm text-danger">{tk.loadError} — tentando de novo…</p>
++              <Button variant="secondary" onClick={tk.retry}>Tentar agora</Button>
++            </>
++          )}
++        </Centered>
++      );
++    case 'invalid':
++      return (
++        <Centered>
++          <Logo size={64} />
++          <h1 className="brand-title text-lg font-semibold">Link inválido</h1>
++          <p>Link de cronometragem inválido ou desativado. Peça um novo link à organização.</p>
++        </Centered>
++      );
++    case 'disabled':
++      return (
++        <Centered>
++          <Logo size={64} />
++          <h1 className="brand-title text-lg font-semibold">Acesso desativado</h1>
++          <p>Seu acesso foi desativado pela organização.</p>
++          <p className="text-sm text-muted">Suas marcações continuam guardadas neste aparelho.</p>
++          <Button variant="secondary" onClick={tk.retry}>Tentar novamente</Button>
++        </Centered>
++      );
++    case 'register':
++      return <RegisterScreen tk={tk} />;
++    case 'main':
++      return <MainScreen tk={tk} />;
++  }
++}
++
++function Centered({ children }: { children: ReactNode }) {
++  return (
++    <main className="mx-auto flex min-h-full max-w-md flex-col items-center justify-center gap-4 bg-bg p-6 text-center text-fg">
++      {children}
++    </main>
++  );
++}
++
++function RegisterScreen({ tk }: { tk: Timekeeper }) {
++  const [name, setName] = useState('');
++  const [nameError, setNameError] = useState<string | undefined>();
++  const [formError, setFormError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const event = tk.session?.event;
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setFormError(null);
++    if (!name.trim()) {
++      setNameError('Informe seu nome');
++      return;
++    }
++    setNameError(undefined);
++    setBusy(true);
++    try {
++      await tk.register(name);
++    } catch (err) {
++      setFormError(err instanceof Error && err.message ? err.message : 'Não foi possível entrar');
++      setBusy(false);
++    }
++  }
++
++  return (
++    <Centered>
++      <Logo size={72} />
++      <div>
++        <p className="brand-title text-xs text-muted">Cronometragem</p>
++        <h1 className="text-2xl font-bold">{event?.name}</h1>
++        {event && (
++          <p className="text-sm text-muted">
++            {formatDateBR(event.date)}{event.location ? ` · ${event.location}` : ''}
++          </p>
++        )}
++      </div>
++      <form onSubmit={submit} noValidate className="flex w-full flex-col gap-3 text-left">
++        <Input
++          label="Seu nome"
++          data-testid="tk-name"
++          autoComplete="name"
++          maxLength={60}
++          value={name}
++          error={nameError}
++          onChange={e => setName(e.target.value)}
++        />
++        <Button type="submit" size="xl" data-testid="tk-register" loading={busy}>Começar a cronometrar</Button>
++        {formError && <p role="alert" className="text-sm text-danger">{formError}</p>}
++      </form>
++      <p className="text-xs text-muted">Seu nome aparece para a organização junto com as suas marcações.</p>
++    </Centered>
++  );
++}
++
++/** Which "Sem atleta" mark a bib or an "Em prova" tap goes to. `auto` = the oldest one, so marks
++ * taken in a burst are identified in arrival order; `none` = the user deselected (taps on
++ * "Em prova" then mark new arrivals). */
++type Selection = { mode: 'auto' } | { mode: 'none' } | { mode: 'id'; id: string };
++
++function selectedMarkId(sel: Selection, unassigned: MarkRow[]): string | null {
++  if (sel.mode === 'none') return null;
++  if (sel.mode === 'id' && unassigned.some(m => m.id === sel.id)) return sel.id;
++  return unassigned[0]?.id ?? null;
++}
++
++function MainScreen({ tk }: { tk: Timekeeper }) {
++  const toast = useToast();
++  const [bib, setBib] = useState('');
++  const [sel, setSel] = useState<Selection>({ mode: 'auto' });
++  const [legSheet, setLegSheet] = useState<string | null>(null);
++  const assignToastId = useRef<string | null>(null);
++  const pointerMarked = useRef(false);
++  const bibId = useId();
++  const selectedId = selectedMarkId(sel, tk.unassigned);
++  const selectedMark = selectedId ? tk.unassigned.find(m => m.id === selectedId) ?? null : null;
++
++  function showAssigned(r: Extract<AssignResult, { ok: true }>) {
++    if (assignToastId.current) toast.dismiss(assignToastId.current);
++    const markId = r.markId;
++    const warned = r.warning !== null || r.suggestion.warning !== null;
++    let id = '';
++    const act = (fn: () => void) => () => {
++      toast.dismiss(id);
++      fn();
++    };
++    // Neutral tone (opaque) and the actions under the text: the kit's tinted tones are see-through
++    // and its action row leaves the message a narrow column on a phone.
++    id = toast.show({
++      testid: 'assign-toast',
++      durationMs: 8_000,
++      message: (
++        <div className="flex flex-col gap-1">
++          <p className="font-semibold">
++            {warned && <span aria-hidden="true" className="text-warning">⚠ </span>}
++            {r.message}
++          </p>
++          {r.warning && r.warning !== r.message && <p className="text-warning">{r.warning}</p>}
++          <p className="tabular text-xs text-muted">Marcação das {clockText(Date.parse(r.ts))}</p>
++          <div className="mt-1 flex flex-wrap gap-2">
++            <Button
++              size="sm" variant="secondary" data-testid="toast-undo"
++              onClick={act(() => {
++                tk.unassign(markId);
++                setSel({ mode: 'id', id: markId });
++              })}
++            >
++              Desfazer
++            </Button>
++            {r.race.legs.length > 1 && (
++              <Button size="sm" variant="secondary" data-testid="toast-change-leg" onClick={act(() => setLegSheet(markId))}>
++                Trocar perna
++              </Button>
++            )}
++          </div>
++        </div>
++      ),
++    });
++    assignToastId.current = id;
++  }
++
++  /** Error toast: opaque neutral tone (see showAssigned) announced as an alert by its content. */
++  function showError(message: string) {
++    toast.show({
++      message: (
++        <p role="alert" className="font-semibold">
++          <span aria-hidden="true" className="text-danger">⚠ </span>
++          {message}
++        </p>
++      ),
++    });
++  }
++
++  function report(r: AssignResult) {
++    if (r.ok) showAssigned(r);
++    else showError(r.error);
++  }
++
++  function doMark() {
++    // useTimekeeper reads the synced clock first thing in mark(): nothing here may run before it.
++    const { markId, assignment } = tk.mark(bib);
++    vibrate();
++    if (assignment?.ok) {
++      setBib('');
++      showAssigned(assignment);
++      return;
++    }
++    if (assignment) {
++      // The bib typed belongs to this mark: select it so the corrected bib goes to it, not to an
++      // older mark still waiting.
++      showError(assignment.error);
++      setSel({ mode: 'id', id: markId });
++      return;
++    }
++    // A burst of taps keeps the oldest selected, so bibs are then typed in arrival order.
++    if (selectedId === null) setSel({ mode: 'id', id: markId });
++  }
++
++  // Marks on pointerdown — the instant the finger lands, and a tap that turns into a slight drag
++  // still counts. The click that follows the same press is ignored; keyboard presses (detail 0)
++  // and clicks without a pointerdown still mark.
++  function onMarkPointerDown(e: PointerEvent<HTMLButtonElement>) {
++    if (e.pointerType === 'mouse' && e.button !== 0) return;
++    pointerMarked.current = true;
++    doMark();
++  }
++  function onMarkClick(e: MouseEvent<HTMLButtonElement>) {
++    const fromPointer = pointerMarked.current && e.detail > 0;
++    pointerMarked.current = false;
++    if (!fromPointer) doMark();
++  }
++
++  function onBibSubmit(e: FormEvent) {
++    e.preventDefault();
++    const text = bib.trim();
++    if (!text) {
++      toast.show({ message: 'Digite o nº de peito' });
++      return;
++    }
++    const target = selectedId ?? tk.unassigned[0]?.id ?? null;
++    if (!target) {
++      toast.show({ message: 'Toque em MARCAR primeiro' });
++      return;
++    }
++    const r = tk.assignBib(target, text);
++    if (r.ok) setBib('');
++    report(r);
++  }
++
++  function onRowTap(item: OnCourseItem) {
++    // Ruling 10: never pass the row's current athlete — confirming a relay handoff shows the
++    // next athlete as current, and the leg must come from the crossing times.
++    if (selectedId) {
++      report(tk.assign(selectedId, item.entry.id));
++      return;
++    }
++    const { markId } = tk.mark(); // arrival tap: marks now, then identifies
++    vibrate();
++    const r = tk.assign(markId, item.entry.id);
++    if (!r.ok) setSel({ mode: 'id', id: markId });
++    report(r);
++  }
++
++  function toggleSelect(id: string) {
++    setSel(id === selectedId ? { mode: 'none' } : { mode: 'id', id });
++  }
++
++  function onDiscard(m: MarkRow) {
++    tk.discard(m.id);
++    toast.show({
++      testid: 'discard-toast',
++      message: `Marcação das ${markTime(m)} descartada`,
++      actions: [{ label: 'Desfazer', testid: 'discard-undo', onClick: () => tk.restore(m.id) }],
++    });
++  }
++
++  function onReassign(m: MarkRow) {
++    tk.unassign(m.id);
++    setSel({ mode: 'id', id: m.id });
++  }
++
++  function onChangeLeg(markId: string, legIndex: number) {
++    setLegSheet(null);
++    report(tk.changeLeg(markId, legIndex));
++  }
++
++  return (
++    <div className="min-h-full bg-bg text-fg">
++      <Header tk={tk} />
++      <main className="mx-auto flex max-w-xl flex-col gap-5 px-4 pt-3 pb-28">
++        <ClockPanel clock={tk.clock} quality={tk.clockQuality} />
++
++        <form onSubmit={onBibSubmit} className="flex flex-col gap-1.5">
++          <label htmlFor={bibId} className="text-sm font-medium">Nº de peito</label>
++          <div className="flex gap-2">
++            <input
++              id={bibId}
++              data-testid="bib-input"
++              inputMode="numeric"
++              enterKeyHint="done"
++              autoComplete="off"
++              value={bib}
++              onChange={e => setBib(e.target.value)}
++              placeholder="—"
++              className="tabular min-h-14 w-full min-w-0 flex-1 rounded-xl border border-border bg-surface px-3 text-center text-3xl font-bold text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++            />
++            <Button type="submit" size="xl" variant="secondary" data-testid="bib-submit">Atribuir</Button>
++          </div>
++          <p className="text-xs text-muted">Com o nº digitado, MARCAR já atribui. Sem nº, marque e identifique depois.</p>
++        </form>
++
++        <button
++          type="button"
++          data-testid="mark-button"
++          onPointerDown={onMarkPointerDown}
++          onClick={onMarkClick}
++          onContextMenu={e => e.preventDefault()}
++          className="brand-title min-h-[35vh] w-full touch-none select-none rounded-2xl bg-accent text-5xl font-bold text-accent-fg shadow-lg transition-transform active:scale-[0.98] focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-accent"
++        >
++          Marcar
++        </button>
++
++        <UnassignedList marks={tk.unassigned} selectedId={selectedId} onSelect={toggleSelect} onDiscard={onDiscard} />
++
++        <OnCourseList tk={tk} selectedMark={selectedMark} onTap={onRowTap} />
++
++        <MyMarksList tk={tk} onDiscard={onDiscard} onRestore={id => tk.restore(id)} onReassign={onReassign} onChangeLeg={setLegSheet} />
++      </main>
++
++      <LegSheet tk={tk} markId={legSheet} onClose={() => setLegSheet(null)} onPick={onChangeLeg} />
++    </div>
++  );
++}
++
++function Header({ tk }: { tk: Timekeeper }) {
++  const n = tk.pendingCount;
++  let text: string;
++  let dot: string;
++  if (!tk.online) {
++    text = `Sem internet · ${n} ${n === 1 ? 'marcação guardada' : 'marcações guardadas'} no aparelho`;
++    dot = 'bg-danger';
++  } else if (n > 0) {
++    text = `Sincronizando ${n}…`;
++    dot = 'bg-warning';
++  } else if (tk.synced) {
++    text = 'Online · tudo sincronizado';
++    dot = 'bg-success';
++  } else {
++    text = 'Conectando…';
++    dot = 'bg-warning';
++  }
++  return (
++    <header className="sticky top-0 z-20 border-b border-border bg-bg">
++      <div className="mx-auto flex max-w-xl items-center gap-3 px-4 py-2">
++        <Logo size={28} />
++        <div className="min-w-0 flex-1">
++          <p className="truncate text-sm font-semibold">{tk.session?.event.name}</p>
++          <p data-testid="tk-sync-status" role="status" aria-live="polite" className="flex items-start gap-1.5 text-xs leading-tight text-muted">
++            <span aria-hidden="true" className={`mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full ${dot}`} />
++            {/* Wraps instead of truncating: the offline count is what the timekeeper must see. */}
++            <span>{text}</span>
++          </p>
++        </div>
++        <ThemeToggle />
++      </div>
++      {tk.rejectedCount > 0 && (
++        <p className="mx-auto max-w-xl px-4 pb-2 text-xs font-medium text-warning">
++          ⚠ {tk.rejectedCount === 1 ? '1 marcação recusada' : `${tk.rejectedCount} marcações recusadas`} — veja “Minhas marcações”
++        </p>
++      )}
++      {tk.syncError && (
++        <p className="mx-auto max-w-xl px-4 pb-2 text-xs font-medium text-danger">
++          Erro ao sincronizar: {tk.syncError} — tentando de novo
++        </p>
++      )}
++    </header>
++  );
++}
++
++/** The big synced clock; re-renders on its own every 100 ms so the rest of the page does not. */
++function ClockPanel({ clock, quality }: { clock: ClockSync; quality: number | null }) {
++  const [now, setNow] = useState(() => clock.now());
++  useEffect(() => {
++    const id = setInterval(() => setNow(clock.now()), 100);
++    return () => clearInterval(id);
++  }, [clock]);
++  return (
++    <section aria-label="Relógio" className="flex flex-col items-center gap-0.5">
++      <p data-testid="tk-clock" className="tabular text-5xl font-bold tracking-tight sm:text-6xl">{clockText(now)}</p>
++      {quality !== null ? (
++        <p className="tabular text-xs text-muted">Horário de Brasília · ±{qualityFmt.format(quality / 1000)} s</p>
++      ) : (
++        <p className="text-sm font-semibold text-warning">Relógio não sincronizado</p>
++      )}
++    </section>
++  );
++}
++
++function SectionTitle({ id, children }: { id: string; children: ReactNode }) {
++  return <h2 id={id} className="brand-title text-xs font-semibold text-muted">{children}</h2>;
++}
++
++function UnassignedList({ marks, selectedId, onSelect, onDiscard }: {
++  marks: MarkRow[]; selectedId: string | null; onSelect: (id: string) => void; onDiscard: (m: MarkRow) => void;
++}) {
++  const titleId = useId();
++  return (
++    <section aria-labelledby={titleId} className="flex flex-col gap-2">
++      <SectionTitle id={titleId}>Sem atleta ({marks.length})</SectionTitle>
++      <ul data-testid="unassigned-list" className="flex flex-col gap-2">
++        {marks.map(m => {
++          const selected = m.id === selectedId;
++          return (
++            <li key={m.id} className="flex items-stretch gap-2">
++              <button
++                type="button"
++                aria-pressed={selected}
++                onClick={() => onSelect(m.id)}
++                className={`flex min-h-12 flex-1 items-center justify-between gap-2 rounded-xl border px-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
++                  selected ? 'border-accent bg-surface-2 ring-2 ring-accent' : 'border-border bg-surface'
++                }`}
++              >
++                <span className="tabular text-lg font-semibold">{markTime(m)}</span>
++                <span className="text-xs text-muted">{selected ? 'Selecionada' : 'Tocar para selecionar'}</span>
++              </button>
++              <button
++                type="button"
++                aria-label={`Descartar marcação das ${markTime(m)}`}
++                onClick={() => onDiscard(m)}
++                className="inline-flex min-h-12 min-w-12 items-center justify-center rounded-xl border border-border bg-surface text-xl text-muted hover:text-danger focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++              >
++                <span aria-hidden="true">×</span>
++              </button>
++            </li>
++          );
++        })}
++      </ul>
++      {marks.length === 0 && <p className="text-sm text-muted">Nenhuma marcação sem atleta.</p>}
++    </section>
++  );
++}
++
++function OnCourseList({ tk, selectedMark, onTap }: {
++  tk: Timekeeper; selectedMark: MarkRow | null; onTap: (item: OnCourseItem) => void;
++}) {
++  const titleId = useId();
++  const [query, setQuery] = useState('');
++  const [raceId, setRaceId] = useState<string | null>(null);
++  const races = tk.session?.races ?? [];
++  const multiRace = races.length > 1;
++  const chips: { id: string | null; name: string }[] = [{ id: null, name: 'Todas' }, ...races.map(r => ({ id: r.id, name: r.name }))];
++
++  const items = useMemo(() => {
++    const q = fold(query.trim());
++    return tk.onCourse.filter(item => {
++      if (raceId !== null && item.race.id !== raceId) return false;
++      if (!q) return true;
++      const names = [item.displayName, ...item.entry.members.map(m => m.name ?? '')];
++      return fold(item.entry.bib).includes(q) || names.some(n => fold(n).includes(q));
++    });
++  }, [tk.onCourse, query, raceId]);
++
++  return (
++    <section aria-labelledby={titleId} className="flex flex-col gap-2">
++      <SectionTitle id={titleId}>Em prova ({tk.onCourse.length})</SectionTitle>
++      <p className="text-xs text-muted">
++        {selectedMark
++          ? `Toque na inscrição para atribuir a marcação das ${markTime(selectedMark)}.`
++          : 'Toque na inscrição na hora da passagem: marca e atribui de uma vez.'}
++      </p>
++      <input
++        type="search"
++        aria-label="Buscar nº ou nome"
++        placeholder="Buscar nº ou nome"
++        value={query}
++        onChange={e => setQuery(e.target.value)}
++        className="min-h-11 w-full rounded-xl border border-border bg-surface px-3 text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
++      />
++      {multiRace && (
++        <div role="group" aria-label="Filtrar por prova" className="-mx-4 flex gap-2 overflow-x-auto px-4">
++          {chips.map(r => (
++            <button
++              key={r.id ?? 'all'}
++              type="button"
++              aria-pressed={raceId === r.id}
++              onClick={() => setRaceId(r.id)}
++              className={`inline-flex min-h-11 shrink-0 items-center rounded-full border px-4 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
++                raceId === r.id ? 'border-accent bg-accent text-accent-fg' : 'border-border bg-surface text-fg'
++              }`}
++            >
++              {r.name}
++            </button>
++          ))}
++        </div>
++      )}
++      <ul data-testid="oncourse-list" className="flex flex-col gap-2">
++        {items.map(item => (
++          <li key={item.entry.id}>
++            <OnCourseRow item={item} showRace={multiRace} onTap={() => onTap(item)} />
++          </li>
++        ))}
++      </ul>
++      {items.length === 0 && (
++        <p className="text-sm text-muted">
++          {tk.onCourse.length === 0
++            ? 'Ninguém em prova ainda — a lista aparece quando a largada é dada.'
++            : 'Nenhuma inscrição encontrada.'}
++        </p>
++      )}
++    </section>
++  );
++}
++
++function OnCourseRow({ item, showRace, onTap }: { item: OnCourseItem; showRace: boolean; onTap: () => void }) {
++  const { entry, race, confirm } = item;
++  const confirmText = confirm
++    ? `✓ ${confirm.leg_label}${confirm.leg_ms !== null ? ` ${formatDuration(confirm.leg_ms)}` : ''} — toque para confirmar (${confirm.remaining_s}s)`
++    : null;
++  return (
++    <button
++      type="button"
++      onClick={onTap}
++      className={`flex min-h-16 w-full flex-col gap-0.5 rounded-xl border px-3 py-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
++        confirm ? 'border-success bg-success/10' : 'border-border bg-surface'
++      }`}
++    >
++      <span className="flex items-baseline justify-between gap-3">
++        <span className="tabular text-2xl font-bold">Nº {entry.bib}</span>
++        {item.legIndex !== null && <span className="tabular text-lg font-semibold">{formatDuration(item.legElapsedMs)}</span>}
++      </span>
++      <span className="truncate text-sm font-medium">
++        {item.displayName}{showRace ? ` · ${race.name}` : ''}
++      </span>
++      {confirmText && <span className="tabular text-sm font-semibold text-success">{confirmText}</span>}
++      <span className="text-sm text-muted">
++        {item.legIndex !== null
++          ? `${item.athleteName} · Perna ${item.legIndex + 1}/${race.legs.length} · ${item.legLabel}`
++          : 'Concluiu'}
++      </span>
++    </button>
++  );
++}
++
++const STATE_LABEL: Record<MyMark['state'], string> = { pending: '⏳ pendente', synced: '✓ sincronizada', rejected: '⚠ rejeitada' };
++
++function MyMarksList({ tk, onDiscard, onRestore, onReassign, onChangeLeg }: {
++  tk: Timekeeper; onDiscard: (m: MarkRow) => void; onRestore: (id: string) => void;
++  onReassign: (m: MarkRow) => void; onChangeLeg: (id: string) => void;
++}) {
++  const index = tk.index;
++  return (
++    <details data-testid="my-marks" className="rounded-xl border border-border bg-surface">
++      <summary className="flex min-h-12 cursor-pointer items-center px-4 font-semibold">
++        Minhas marcações ({tk.myMarks.length}){tk.rejectedCount > 0 ? ` · ⚠ ${tk.rejectedCount}` : ''}
++      </summary>
++      <ul className="divide-y divide-border border-t border-border">
++        {tk.myMarks.map(({ mark, state, reason }) => {
++          const entry = mark.entry_id ? index?.entriesById.get(mark.entry_id) : undefined;
++          const race = entry ? index?.racesById.get(entry.race_id) : undefined;
++          const time = markTime(mark);
++          const what = mark.discarded
++            ? `Descartada${mark.discarded_by === 'organizer' ? ' pela organização' : ''}`
++            : entry && race && mark.leg_index !== null
++              ? `Nº ${entry.bib} · ${legText(race, mark.leg_index)}`
++              : 'Sem atleta';
++          return (
++            <li key={mark.id} className="flex flex-col gap-1.5 px-4 py-3">
++              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
++                <span className="tabular font-semibold">{time}</span>
++                <span className="text-sm">{what}</span>
++                <span className={`ml-auto text-xs ${state === 'rejected' ? 'text-danger' : 'text-muted'}`}>{STATE_LABEL[state]}</span>
++              </div>
++              {state === 'rejected' && reason && <p className="text-sm text-danger">⚠ {reason}</p>}
++              <div className="flex flex-wrap gap-2">
++                {!mark.discarded && entry && race && race.legs.length > 1 && (
++                  <Button size="sm" variant="secondary" aria-label={`Trocar perna da marcação das ${time}`} onClick={() => onChangeLeg(mark.id)}>
++                    Perna
++                  </Button>
++                )}
++                {!mark.discarded && entry && (
++                  <Button size="sm" variant="secondary" aria-label={`Reatribuir a marcação das ${time}`} onClick={() => onReassign(mark)}>
++                    Reatribuir
++                  </Button>
++                )}
++                {!mark.discarded && (
++                  <Button size="sm" variant="ghost" aria-label={`Descartar marcação das ${time}`} onClick={() => onDiscard(mark)}>
++                    Descartar
++                  </Button>
++                )}
++                {mark.discarded && mark.discarded_by !== 'organizer' && (
++                  <Button size="sm" variant="secondary" aria-label={`Restaurar a marcação das ${time}`} onClick={() => onRestore(mark.id)}>
++                    Restaurar
++                  </Button>
++                )}
++              </div>
++            </li>
++          );
++        })}
++      </ul>
++      {tk.myMarks.length === 0 && <p className="px-4 pb-3 text-sm text-muted">Nenhuma marcação ainda.</p>}
++    </details>
++  );
++}
++
++function LegSheet({ tk, markId, onClose, onPick }: {
++  tk: Timekeeper; markId: string | null; onClose: () => void; onPick: (markId: string, legIndex: number) => void;
++}) {
++  const mark = markId ? tk.marks.find(m => m.id === markId) : undefined;
++  const entry = mark?.entry_id ? tk.index?.entriesById.get(mark.entry_id) : undefined;
++  const race = entry ? tk.index?.racesById.get(entry.race_id) : undefined;
++  return (
++    <Modal open={markId !== null && !!entry && !!race} onClose={onClose} title="Trocar perna">
++      {mark && entry && race && (
++        <div className="flex flex-col gap-3">
++          <p className="text-sm text-muted">
++            Nº {entry.bib} · marcação das <span className="tabular">{markTime(mark)}</span>
++          </p>
++          <ul className="flex flex-col gap-2">
++            {race.legs.map((leg, k) => {
++              const athlete = memberName(entry, legAthleteId(entry, k));
++              return (
++                <li key={k}>
++                  <Button
++                    variant={mark.leg_index === k ? 'primary' : 'secondary'}
++                    size="lg"
++                    className="w-full justify-start"
++                    aria-current={mark.leg_index === k ? 'true' : undefined}
++                    onClick={() => onPick(mark.id, k)}
++                  >
++                    Perna {k + 1}/{race.legs.length} · {leg.label}{athlete ? ` — ${athlete}` : ''}
++                  </Button>
++                </li>
++              );
++            })}
++          </ul>
++        </div>
++      )}
++    </Modal>
++  );
++}
+diff --git a/src/features/timekeeper/timekeeper.test.tsx b/src/features/timekeeper/timekeeper.test.tsx
+new file mode 100644
+index 0000000..800731e
+--- /dev/null
++++ b/src/features/timekeeper/timekeeper.test.tsx
+@@ -0,0 +1,665 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { act, fireEvent, screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { readFileSync } from 'node:fs';
++import { resolve } from 'node:path';
++
++import { ApiError } from '../../lib/api';
++import { ClockSync } from '../../lib/clock';
++import { formatClock, formatDuration } from '../../lib/format';
++import type { EntryMember, EntryRow, MarkRow, TkMarkInput, TkRegistration, TkSession, TkSyncResult } from '../../lib/types';
++import { iso, makeEntry, makeMark, makeRace, makeWave, MIN, SEC, T0 } from '../../domain/testing/fixtures';
++import { renderWithProviders } from '../../test/renderWithProviders';
++import TimekeeperPage from './TimekeeperPage';
++
++const mocks = vi.hoisted(() => ({
++  open: vi.fn<(token: string) => Promise<TkSession>>(),
++  register: vi.fn<(token: string, name: string, deviceLabel: string) => Promise<TkRegistration>>(),
++  sync: vi.fn<(token: string, tkId: string, secret: string, marks: TkMarkInput[], since: string | null) => Promise<TkSyncResult>>(),
++  serverTime: vi.fn<() => Promise<number>>(),
++  clock: { current: null as ClockSync | null },
++}));
++vi.mock('../../lib/supabase', () => ({ supabase: {} }));
++vi.mock('../../lib/api', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('../../lib/api')>()),
++  api: { serverTime: mocks.serverTime, tk: { open: mocks.open, register: mocks.register, sync: mocks.sync } },
++}));
++// The app-wide clock singleton (useClock) is covered by its own tests; here each test gets a
++// fresh clock that runs on the fake timers and sits OFFSET ms ahead of the device.
++vi.mock('../../hooks/useClock', () => ({ useClock: () => mocks.clock.current }));
++
++const TOKEN = 'tok123';
++const OFFSET = 1_500;
++const NOW0 = T0 + 10 * MIN; // both waves started at T0
++const REG = { timekeeper_id: 'tk-me', secret: 's3cret', name: 'Ana TK' };
++const REG_KEY = `ebc.tk.reg.${TOKEN}`;
++const SESSION_KEY = `ebc.tk.session.${TOKEN}`;
++const OUTBOX_KEY = 'ebc.tk.e1.tk-me';
++
++function entry(id: string, bib: string, race: string, teamName: string | null, members: [string, string, number[]][]): EntryRow {
++  const m: EntryMember[] = members.map(([athlete_id, name, legs], position) => ({ athlete_id, name, legs, position }));
++  return makeEntry({ id, bib, race_id: race, wave_id: race === 'r1' ? 'w1' : 'w2', team_name: teamName, members: m });
++}
++const ENTRIES = [
++  entry('en1', '101', 'r1', null, [['a1', 'Matheus', [0, 1]]]),
++  entry('en2', '202', 'r2', 'Tubarões', [['a2', 'Ana', [0]], ['a3', 'Beto', [1]]]),
++  entry('en3', '303', 'r1', null, [['a4', 'Caio', [0, 1]]]),
++];
++function session(p: Partial<TkSession> = {}): TkSession {
++  return {
++    event: { id: 'e1', name: 'Desafio EBC', date: '2026-10-11', location: 'Vila Velha' },
++    races: [makeRace({ id: 'r1', name: 'Aquathlon' }), makeRace({ id: 'r2', name: 'Revezamento', team_size: 2, position: 1 })],
++    waves: [makeWave({ id: 'w1', race_id: 'r1' }), makeWave({ id: 'w2', race_id: 'r2' })],
++    entries: ENTRIES, timekeepers: [], version: 1, server_now: iso(NOW0), ...p,
++  };
++}
++
++const okSync = (p: Partial<TkSyncResult> = {}) =>
++  async (_t: string, _id: string, _s: string, marks: TkMarkInput[]): Promise<TkSyncResult> => ({
++    accepted: marks.map(m => m.id), rejected: [], server_now: iso(Date.now() + OFFSET), version: 1, marks: [], waves: [], ...p,
++  });
++const networkError = () => new ApiError('Sem conexão com o servidor', 'network');
++
++let visibility: DocumentVisibilityState;
++
++beforeEach(() => {
++  vi.useFakeTimers();
++  vi.setSystemTime(NOW0);
++  window.localStorage.clear();
++  delete document.documentElement.dataset.theme;
++  visibility = 'visible';
++  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
++  const clock = new ClockSync({ now: () => Date.now() });
++  clock.addSample({ t0: NOW0, t1: NOW0 + 100, server: NOW0 + 50 + OFFSET }); // offset 1.5 s, ±0,05 s
++  mocks.clock.current = clock;
++  mocks.open.mockReset().mockResolvedValue(session());
++  mocks.register.mockReset().mockResolvedValue({ timekeeper_id: 'tk-me', secret: 's3cret' });
++  mocks.sync.mockReset().mockImplementation(okSync());
++  mocks.serverTime.mockReset().mockImplementation(async () => Date.now() + OFFSET);
++});
++
++afterEach(() => {
++  vi.clearAllTimers();
++  vi.useRealTimers();
++  vi.unstubAllGlobals();
++});
++
++async function flush(ms = 0) {
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(ms);
++  });
++}
++function renderPage() {
++  return renderWithProviders(<TimekeeperPage />, { route: `/c/${TOKEN}`, path: '/c/:token' });
++}
++async function renderMain() {
++  window.localStorage.setItem(REG_KEY, JSON.stringify(REG));
++  const r = renderPage();
++  await flush();
++  expect(screen.getByTestId('mark-button')).toBeInTheDocument();
++  return r;
++}
++type StoredItem = { mark: TkMarkInput & { local_updated_at: number }; state: string; reason?: string };
++function storedItems(key = OUTBOX_KEY): StoredItem[] {
++  const raw = window.localStorage.getItem(key);
++  const items = raw ? Object.values((JSON.parse(raw) as { items: Record<string, StoredItem> }).items) : [];
++  return items.sort((a, b) => (a.mark.ts < b.mark.ts ? -1 : a.mark.ts > b.mark.ts ? 1 : 0));
++}
++const stored = () => storedItems().map(i => i.mark);
++const status = () => screen.getByTestId('tk-sync-status');
++const unassignedRows = () => within(screen.getByTestId('unassigned-list')).queryAllByRole('listitem');
++const onCourseRows = () => within(screen.getByTestId('oncourse-list')).queryAllByRole('listitem');
++const rowFor = (bib: string) => onCourseRows().find(r => r.textContent?.includes(`Nº ${bib}`))!;
++const tapMark = () => fireEvent.click(screen.getByTestId('mark-button'));
++const typeBib = (value: string) => fireEvent.change(screen.getByTestId('bib-input'), { target: { value } });
++const submitBib = () => fireEvent.click(screen.getByTestId('bib-submit'));
++const at = (ms: number) => formatClock(ms, { tenths: true });
++
++describe('registration', () => {
++  it('asks for the name once and opens the main screen', async () => {
++    renderPage();
++    await flush();
++    expect(screen.getByText('Desafio EBC')).toBeInTheDocument();
++    expect(screen.queryByTestId('mark-button')).not.toBeInTheDocument();
++
++    fireEvent.change(screen.getByTestId('tk-name'), { target: { value: '  Ana TK ' } });
++    fireEvent.click(screen.getByTestId('tk-register'));
++    await flush();
++
++    expect(mocks.register).toHaveBeenCalledWith(TOKEN, 'Ana TK', expect.any(String));
++    expect(screen.getByTestId('mark-button')).toBeInTheDocument();
++    expect(JSON.parse(window.localStorage.getItem(REG_KEY)!)).toEqual(REG);
++    expect(JSON.parse(window.localStorage.getItem(SESSION_KEY)!)).toMatchObject({ event: { id: 'e1' } });
++  });
++
++  it('requires a name and shows server errors next to the button', async () => {
++    renderPage();
++    await flush();
++    fireEvent.click(screen.getByTestId('tk-register'));
++    expect(screen.getByRole('alert')).toHaveTextContent('Informe seu nome');
++    expect(mocks.register).not.toHaveBeenCalled();
++
++    mocks.register.mockRejectedValueOnce(networkError());
++    fireEvent.change(screen.getByTestId('tk-name'), { target: { value: 'Ana' } });
++    fireEvent.click(screen.getByTestId('tk-register'));
++    await flush();
++    expect(screen.getByRole('alert')).toHaveTextContent('Sem conexão com o servidor');
++  });
++
++  it('shows the invalid-link message when tk_open refuses the token', async () => {
++    mocks.open.mockRejectedValue(new ApiError('Link de cronometragem inválido ou desativado', 'P0001'));
++    renderPage();
++    await flush();
++    expect(screen.getByText('Link de cronometragem inválido ou desativado. Peça um novo link à organização.')).toBeInTheDocument();
++  });
++
++  it('keeps retrying while offline without a cached session', async () => {
++    mocks.open.mockRejectedValueOnce(networkError());
++    renderPage();
++    await flush();
++    expect(screen.getByText(/Sem conexão com o servidor/)).toBeInTheDocument();
++    await flush(5 * SEC);
++    expect(mocks.open).toHaveBeenCalledTimes(2);
++    expect(screen.getByTestId('tk-register')).toBeInTheDocument();
++  });
++
++  it('opens straight from the cache while offline and keeps marking', async () => {
++    window.localStorage.setItem(SESSION_KEY, JSON.stringify(session()));
++    window.localStorage.setItem(REG_KEY, JSON.stringify(REG));
++    mocks.open.mockRejectedValue(networkError());
++    mocks.sync.mockRejectedValue(networkError());
++    renderPage();
++    await flush();
++    expect(status()).toHaveTextContent('Sem internet · 0 marcações guardadas no aparelho');
++    tapMark();
++    expect(status()).toHaveTextContent('Sem internet · 1 marcação guardada no aparelho');
++    expect(unassignedRows()).toHaveLength(1);
++  });
++});
++
++describe('marking', () => {
++  it('adds an unassigned row stamped with the synced clock', async () => {
++    await renderMain();
++    tapMark();
++    expect(unassignedRows()).toHaveLength(1);
++    expect(unassignedRows()[0]).toHaveTextContent(at(NOW0 + OFFSET));
++    expect(stored()).toEqual([expect.objectContaining({
++      ts: iso(NOW0 + OFFSET), device_ts: iso(NOW0), clock_offset_ms: OFFSET, clock_rtt_ms: 100,
++      entry_id: null, leg_index: null, athlete_id: null, discarded: false,
++    })]);
++  });
++
++  it('assigns the typed bib, and Desfazer sends the mark back to "Sem atleta"', async () => {
++    await renderMain();
++    tapMark();
++    typeBib('101');
++    submitBib();
++
++    expect(screen.getByTestId('assign-toast')).toHaveTextContent('✓ Nº 101 · Matheus · fim da perna 1/2 (Natação)');
++    expect(unassignedRows()).toHaveLength(0);
++    expect(stored()[0]).toMatchObject({ entry_id: 'en1', leg_index: 0, athlete_id: 'a1' });
++    expect(screen.getByTestId('bib-input')).toHaveValue('');
++
++    fireEvent.click(screen.getByTestId('toast-undo'));
++    expect(unassignedRows()).toHaveLength(1);
++    expect(stored()[0]).toMatchObject({ entry_id: null, leg_index: null, athlete_id: null });
++  });
++
++  it('with a bib already typed, MARCAR marks and assigns at once', async () => {
++    await renderMain();
++    typeBib('202');
++    tapMark();
++    expect(screen.getByTestId('assign-toast')).toHaveTextContent('✓ Nº 202 · Ana · fim da perna 1/2 (Natação)');
++    expect(unassignedRows()).toHaveLength(0);
++    expect(stored()[0]).toMatchObject({ ts: iso(NOW0 + OFFSET), entry_id: 'en2', leg_index: 0, athlete_id: 'a2' });
++  });
++
++  it('keeps the mark in "Sem atleta" when the typed bib does not resolve', async () => {
++    await renderMain();
++    typeBib('999');
++    tapMark();
++    expect(screen.getByRole('alert')).toHaveTextContent('Nº 999 não encontrado');
++    expect(unassignedRows()).toHaveLength(1);
++    expect(screen.getByTestId('bib-input')).toHaveValue('999');
++  });
++
++  it('after a mistyped bib, the corrected bib goes to that mark and not to an older one', async () => {
++    await renderMain();
++    tapMark(); // an earlier arrival still waiting
++    await flush(3 * SEC);
++    typeBib('999');
++    tapMark();
++    typeBib('303');
++    submitBib();
++    expect(stored().map(m => [m.ts, m.entry_id])).toEqual([
++      [iso(NOW0 + OFFSET), null],
++      [iso(NOW0 + OFFSET + 3 * SEC), 'en3'],
++    ]);
++  });
++
++  it('adds the DNS/DSQ warning of the bib to the assignment toast', async () => {
++    mocks.open.mockResolvedValue(session({ entries: ENTRIES.map(e => (e.bib === '303' ? { ...e, status: 'dns' as const } : e)) }));
++    await renderMain();
++    typeBib('303');
++    tapMark();
++    const toast = screen.getByTestId('assign-toast');
++    expect(toast).toHaveTextContent('✓ Nº 303 · Caio · fim da perna 1/2 (Natação)');
++    expect(toast).toHaveTextContent('Nº 303 está marcado como DNS');
++  });
++
++  it('asks for a mark first when a bib is submitted with nothing to assign', async () => {
++    await renderMain();
++    typeBib('101');
++    submitBib();
++    expect(screen.getByText('Toque em MARCAR primeiro')).toBeInTheDocument();
++    expect(stored()).toEqual([]);
++  });
++
++  it('stays responsive under rapid taps: 4 arrivals → 4 rows, oldest first and selected', async () => {
++    await renderMain();
++    const button = screen.getByTestId('mark-button');
++    for (let i = 0; i < 4; i++) {
++      fireEvent.pointerDown(button, { button: 0, pointerType: 'touch' });
++      fireEvent.click(button, { detail: 1 }); // the click that follows the touch must not mark again
++      await flush(100);
++    }
++    const rows = unassignedRows();
++    expect(rows).toHaveLength(4);
++    rows.forEach((row, i) => expect(row).toHaveTextContent(at(NOW0 + OFFSET + i * 100)));
++    expect(within(rows[0]).getByRole('button', { pressed: true })).toBeInTheDocument();
++
++    typeBib('303');
++    submitBib();
++    expect(stored().map(m => m.entry_id)).toEqual(['en3', null, null, null]);
++  });
++
++  it('records one mark per real click and per keyboard press', async () => {
++    // Testing Library's async wrapper waits on a real setTimeout(0): let fake time follow real time.
++    vi.useFakeTimers({ shouldAdvanceTime: true });
++    vi.setSystemTime(NOW0);
++    await renderMain();
++    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
++    await user.click(screen.getByTestId('mark-button'));
++    expect(stored()).toHaveLength(1);
++    screen.getByTestId('mark-button').focus();
++    await user.keyboard('{Enter}');
++    expect(stored()).toHaveLength(2);
++  });
++
++  it('vibrates for 50 ms when the device can', async () => {
++    const vibrate = vi.fn(() => true);
++    Object.defineProperty(navigator, 'vibrate', { configurable: true, value: vibrate });
++    try {
++      await renderMain();
++      tapMark();
++      expect(vibrate).toHaveBeenCalledWith(50);
++    } finally {
++      delete (navigator as { vibrate?: unknown }).vibrate;
++    }
++  });
++
++  it('stamps the mark at the tap even while a slow sync is in flight, and never overlaps requests', async () => {
++    let release: (r: TkSyncResult) => void = () => {};
++    mocks.sync.mockImplementationOnce(() => new Promise<TkSyncResult>(resolve => { release = resolve; }));
++    await renderMain();
++    expect(mocks.sync).toHaveBeenCalledTimes(1);
++
++    await flush(3 * SEC);
++    const tappedAt = Date.now();
++    tapMark();
++    expect(stored()[0].ts).toBe(iso(tappedAt + OFFSET));
++
++    // Events that normally trigger an immediate sync must not start a second request.
++    act(() => { window.dispatchEvent(new Event('online')); });
++    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
++    await flush(10 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(1);
++    await act(async () => {
++      release({ accepted: [], rejected: [], server_now: iso(Date.now()), version: 1, marks: [], waves: [] });
++    });
++    await flush(2 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(2);
++    expect(mocks.sync.mock.calls[1][3]).toEqual([expect.objectContaining({ ts: iso(tappedAt + OFFSET), entry_id: null })]);
++  });
++
++  it('discards a mark with ×, and Desfazer restores it', async () => {
++    await renderMain();
++    tapMark();
++    fireEvent.click(within(unassignedRows()[0]).getByRole('button', { name: /Descartar/ }));
++    expect(unassignedRows()).toHaveLength(0);
++    expect(stored()[0].discarded).toBe(true);
++    fireEvent.click(screen.getByRole('button', { name: 'Desfazer' }));
++    expect(unassignedRows()).toHaveLength(1);
++    expect(stored()[0].discarded).toBe(false);
++  });
++
++  it('changes the leg from the assignment toast', async () => {
++    await renderMain();
++    typeBib('101');
++    tapMark();
++    fireEvent.click(screen.getByRole('button', { name: 'Trocar perna' }));
++    const dialog = screen.getByRole('dialog');
++    fireEvent.click(within(dialog).getByRole('button', { name: /Perna 2\/2 · Corrida/ }));
++    expect(stored()[0]).toMatchObject({ entry_id: 'en1', leg_index: 1, athlete_id: 'a1' });
++    expect(screen.getByTestId('assign-toast')).toHaveTextContent('✓ Nº 101 · Matheus · fim da perna 2/2 (Corrida)');
++    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
++  });
++});
++
++describe('"Em prova" list', () => {
++  const handoffAt = NOW0 + OFFSET - 5 * SEC; // another timekeeper marked the relay handoff 5 s ago
++  const otherMark = () => makeMark({ id: 'other', at: handoffAt, timekeeper_id: 'tk2', entry_id: 'en2', leg_index: 0, athlete_id: 'a2' });
++
++  it('lists entries on course with the current athlete, leg and leg timer', async () => {
++    await renderMain();
++    expect(onCourseRows()).toHaveLength(3);
++    const row = rowFor('101');
++    expect(row).toHaveTextContent('Matheus');
++    expect(row).toHaveTextContent('Perna 1/2 · Natação');
++    expect(row).toHaveTextContent(formatDuration(NOW0 + OFFSET - T0));
++  });
++
++  it('an arrival tap without a selected mark marks now and assigns it', async () => {
++    await renderMain();
++    await flush(4 * SEC);
++    const tappedAt = Date.now();
++    fireEvent.click(within(rowFor('303')).getByRole('button'));
++    expect(stored()).toEqual([expect.objectContaining({ ts: iso(tappedAt + OFFSET), entry_id: 'en3', leg_index: 0 })]);
++    expect(screen.getByTestId('assign-toast')).toHaveTextContent('✓ Nº 303 · Caio · fim da perna 1/2 (Natação)');
++  });
++
++  it('a tap assigns the selected mark instead of creating a new one', async () => {
++    await renderMain();
++    tapMark();
++    await flush(6 * SEC);
++    fireEvent.click(within(rowFor('101')).getByRole('button'));
++    expect(stored()).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET), entry_id: 'en1', leg_index: 0 })]);
++  });
++
++  it('pins a fresh relay handoff on top to confirm, on the same leg (Rulings 22 and 10)', async () => {
++    mocks.sync.mockImplementationOnce(okSync({ marks: [otherMark()] }));
++    await renderMain();
++    const top = onCourseRows()[0];
++    expect(top).toHaveTextContent('Nº 202');
++    expect(top).toHaveTextContent(`✓ Natação ${formatDuration(handoffAt - T0)} — toque para confirmar (25s)`);
++    expect(top).toHaveTextContent('Beto'); // who is running now
++    expect(top).toHaveTextContent('Perna 2/2 · Corrida');
++
++    await flush(10 * SEC);
++    expect(onCourseRows()[0]).toHaveTextContent('toque para confirmar (15s)');
++
++    // Confirming 15 s after the handoff: no mark selected → a new mark now, filed on the handoff
++    // leg (same crossing) even though the row shows Beto running leg 2.
++    const tappedAt = Date.now();
++    fireEvent.click(within(onCourseRows()[0]).getByRole('button'));
++    expect(stored()).toEqual([expect.objectContaining({ ts: iso(tappedAt + OFFSET), entry_id: 'en2', leg_index: 0, athlete_id: 'a2' })]);
++    expect(screen.getByTestId('assign-toast')).toHaveTextContent('✓ Nº 202 · Ana · fim da perna 1/2 (Natação)');
++
++    // The median is now 7.5 s after the first mark: the window closes 37.5 s after it.
++    await flush(22 * SEC);
++    expect(onCourseRows()[0]).toHaveTextContent('toque para confirmar (1s)');
++    await flush(1 * SEC);
++    expect(screen.getByTestId('oncourse-list')).not.toHaveTextContent('toque para confirmar');
++  });
++
++  it('keeps a finished entry listed until its finish can no longer be confirmed', async () => {
++    const finishAt = NOW0 + OFFSET - 2 * SEC;
++    mocks.sync.mockImplementationOnce(okSync({
++      marks: [
++        makeMark({ id: 'f0', at: T0 + 5 * MIN, timekeeper_id: 'tk2', entry_id: 'en1', leg_index: 0 }),
++        makeMark({ id: 'f1', at: finishAt, timekeeper_id: 'tk2', entry_id: 'en1', leg_index: 1 }),
++      ],
++    }));
++    await renderMain();
++    expect(onCourseRows()[0]).toHaveTextContent('Nº 101');
++    expect(onCourseRows()[0]).toHaveTextContent('✓ Corrida');
++    await flush(29 * SEC);
++    expect(rowFor('101')).toBeUndefined();
++  });
++
++  it('filters by bib/name and by race', async () => {
++    await renderMain();
++    fireEvent.change(screen.getByRole('searchbox', { name: /Buscar/ }), { target: { value: 'caio' } });
++    expect(onCourseRows().map(r => r.textContent)).toEqual([expect.stringContaining('Nº 303')]);
++    fireEvent.change(screen.getByRole('searchbox', { name: /Buscar/ }), { target: { value: '' } });
++    fireEvent.click(screen.getByRole('button', { name: 'Revezamento' }));
++    expect(onCourseRows().map(r => r.textContent)).toEqual([expect.stringContaining('Nº 202')]);
++  });
++});
++
++describe('sync loop', () => {
++  it('sends pending marks every 2 s and reports "tudo sincronizado"', async () => {
++    await renderMain();
++    expect(status()).toHaveTextContent('Online · tudo sincronizado');
++    const firstServerNow = iso(NOW0 + OFFSET);
++    expect(mocks.sync).toHaveBeenLastCalledWith(TOKEN, 'tk-me', 's3cret', [], null);
++
++    tapMark();
++    expect(status()).toHaveTextContent('Sincronizando 1…');
++    await flush(2 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(2);
++    expect(mocks.sync.mock.calls[1][3]).toEqual([expect.objectContaining({ ts: iso(NOW0 + OFFSET) })]);
++    expect(mocks.sync.mock.calls[1][4]).toBe(iso(Date.parse(firstServerNow) - 10 * SEC));
++    expect(status()).toHaveTextContent('Online · tudo sincronizado');
++    expect(storedItems()[0].state).toBe('synced');
++  });
++
++  it('sends at most 200 pending marks per request, oldest first', async () => {
++    const items: Record<string, StoredItem> = {};
++    for (let i = 0; i < 205; i++) {
++      const id = `m${String(i).padStart(3, '0')}`;
++      const ts = iso(T0 + i * SEC);
++      items[id] = {
++        state: 'pending',
++        mark: { id, ts, device_ts: ts, clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null, discarded: false, local_updated_at: T0 },
++      };
++    }
++    window.localStorage.setItem(OUTBOX_KEY, JSON.stringify({ items }));
++    await renderMain();
++    expect(mocks.sync.mock.calls[0][3]).toHaveLength(200);
++    expect(mocks.sync.mock.calls[0][3][0]).toEqual({
++      id: 'm000', ts: iso(T0), device_ts: iso(T0), clock_offset_ms: 0, clock_rtt_ms: 80,
++      entry_id: null, leg_index: null, athlete_id: null, discarded: false,
++    });
++    await flush(2 * SEC);
++    expect(mocks.sync.mock.calls[1][3].map(m => m.id)).toEqual(['m200', 'm201', 'm202', 'm203', 'm204']);
++    expect(status()).toHaveTextContent('Online · tudo sincronizado');
++  });
++
++  it('shows "Sem internet" and backs off ×2 up to 10 s on network errors, then recovers', async () => {
++    mocks.sync.mockRejectedValue(networkError());
++    await renderMain();
++    expect(status()).toHaveTextContent('Sem internet');
++    expect(mocks.sync).toHaveBeenCalledTimes(1);
++    await flush(4 * SEC - 1);
++    expect(mocks.sync).toHaveBeenCalledTimes(1);
++    await flush(1);
++    expect(mocks.sync).toHaveBeenCalledTimes(2);
++    await flush(8 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(3);
++    await flush(10 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(4);
++
++    mocks.sync.mockImplementation(okSync());
++    await flush(10 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(5);
++    expect(status()).toHaveTextContent('Online · tudo sincronizado');
++    await flush(2 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(6);
++  });
++
++  it('goes offline at once on the browser "offline" event and retries on "online"', async () => {
++    await renderMain();
++    act(() => { window.dispatchEvent(new Event('offline')); });
++    expect(status()).toHaveTextContent('Sem internet');
++    act(() => { window.dispatchEvent(new Event('online')); });
++    await flush();
++    expect(mocks.sync).toHaveBeenCalledTimes(2);
++    expect(status()).toHaveTextContent('Online · tudo sincronizado');
++  });
++
++  it('shows a mark the organization changed as rejected, with the server copy winning (Ruling 27)', async () => {
++    await renderMain();
++    typeBib('101');
++    tapMark();
++    const id = stored()[0].id;
++    const moved: MarkRow = {
++      ...makeMark({ id, at: NOW0 + OFFSET, timekeeper_id: 'tk-me', entry_id: 'en3', leg_index: 1, athlete_id: 'a4' }),
++      updated_at: iso(NOW0 + 20 * SEC),
++    };
++    mocks.sync.mockImplementationOnce(okSync({ accepted: [], rejected: [{ id, reason: 'Alterada pela organização' }], marks: [moved] }));
++    await flush(2 * SEC);
++
++    const mine = within(screen.getByTestId('my-marks')).getAllByRole('listitem');
++    expect(mine).toHaveLength(1);
++    expect(mine[0]).toHaveTextContent('⚠');
++    expect(mine[0]).toHaveTextContent('Alterada pela organização');
++    expect(mine[0]).toHaveTextContent('Nº 303');
++    expect(status()).toHaveTextContent('Online · tudo sincronizado');
++  });
++
++  it('keeps marks the server neither accepted nor rejected pending and re-sends them (Ruling 28)', async () => {
++    await renderMain();
++    tapMark();
++    const id = stored()[0].id;
++    mocks.sync.mockImplementationOnce(okSync({ accepted: [] }));
++    await flush(2 * SEC);
++    expect(status()).toHaveTextContent('Sincronizando 1…');
++    expect(within(screen.getByTestId('my-marks')).getByRole('listitem')).toHaveTextContent('⏳');
++    await flush(2 * SEC);
++    expect(mocks.sync.mock.calls[2][3]).toEqual([expect.objectContaining({ id })]);
++    expect(within(screen.getByTestId('my-marks')).getByRole('listitem')).toHaveTextContent('✓');
++  });
++
++  it('pauses while the page is hidden and resumes as soon as it is visible', async () => {
++    await renderMain();
++    visibility = 'hidden';
++    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
++    await flush(20 * SEC);
++    expect(mocks.sync).toHaveBeenCalledTimes(1);
++    visibility = 'visible';
++    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
++    await flush();
++    expect(mocks.sync).toHaveBeenCalledTimes(2);
++  });
++
++  it('re-opens the session when the event version changes and applies wave starts', async () => {
++    const waiting = session({ waves: [makeWave({ id: 'w1', race_id: 'r1' }), makeWave({ id: 'w2', race_id: 'r2', start_at: null })] });
++    mocks.open.mockResolvedValue(waiting);
++    await renderMain();
++    expect(rowFor('202')).toBeUndefined();
++
++    mocks.sync.mockImplementationOnce(okSync({ waves: [{ id: 'w1', start_at: iso(T0) }, { id: 'w2', start_at: iso(T0) }] }));
++    await flush(2 * SEC);
++    expect(rowFor('202')).toBeDefined();
++    expect(mocks.open).toHaveBeenCalledTimes(1);
++
++    const extra = entry('en4', '404', 'r1', null, [['a5', 'Duda', [0, 1]]]);
++    mocks.open.mockResolvedValue(session({ version: 2, entries: [...ENTRIES, extra] }));
++    mocks.sync.mockImplementation(okSync({ version: 2 }));
++    await flush(2 * SEC);
++    expect(mocks.open).toHaveBeenCalledTimes(2);
++    expect(rowFor('404')).toBeDefined();
++    expect(JSON.parse(window.localStorage.getItem(SESSION_KEY)!).version).toBe(2);
++  });
++
++  it('shows the disabled message when the organization turned this timekeeper off', async () => {
++    mocks.sync.mockRejectedValue(new ApiError('Seu acesso foi desativado pela organização', 'P0001'));
++    window.localStorage.setItem(REG_KEY, JSON.stringify(REG));
++    renderPage();
++    await flush();
++    expect(screen.getByText('Seu acesso foi desativado pela organização.')).toBeInTheDocument();
++    expect(screen.queryByTestId('mark-button')).not.toBeInTheDocument();
++  });
++
++  it('drops an unknown registration, and the new one sends the marks still pending', async () => {
++    await renderMain();
++    tapMark();
++    const id = stored()[0].id;
++    mocks.sync.mockRejectedValueOnce(new ApiError('Cronometrista não autorizado', 'P0001'));
++    await flush(2 * SEC);
++    expect(screen.getByTestId('tk-register')).toBeInTheDocument();
++    expect(window.localStorage.getItem(REG_KEY)).toBeNull();
++
++    mocks.register.mockResolvedValueOnce({ timekeeper_id: 'tk-new', secret: 'n3w' });
++    fireEvent.change(screen.getByTestId('tk-name'), { target: { value: 'Ana TK' } });
++    fireEvent.click(screen.getByTestId('tk-register'));
++    await flush();
++    const last = mocks.sync.mock.calls.at(-1)!;
++    expect(last[1]).toBe('tk-new');
++    expect(last[3]).toEqual([expect.objectContaining({ id, ts: iso(NOW0 + OFFSET) })]);
++    expect(unassignedRows()).toHaveLength(1);
++  });
++});
++
++describe('clock and screen', () => {
++  it('shows the synced Brasília time with tenths and its uncertainty', async () => {
++    await renderMain();
++    expect(screen.getByTestId('tk-clock')).toHaveTextContent(at(NOW0 + OFFSET));
++    await flush(300);
++    expect(screen.getByTestId('tk-clock')).toHaveTextContent(at(NOW0 + OFFSET + 300));
++    expect(screen.getByText(/±0,05 s/)).toBeInTheDocument();
++  });
++
++  it('warns when the clock never synced', async () => {
++    mocks.clock.current = new ClockSync({ now: () => Date.now() });
++    await renderMain();
++    expect(screen.getByText('Relógio não sincronizado')).toBeInTheDocument();
++    expect(screen.getByTestId('tk-clock')).toHaveTextContent(at(NOW0));
++  });
++
++  it('keeps the screen awake and ignores wake-lock failures', async () => {
++    const request = vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) });
++    Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: { request } });
++    try {
++      await renderMain();
++      expect(request).toHaveBeenCalledWith('screen');
++      request.mockRejectedValueOnce(new Error('NotAllowedError'));
++      visibility = 'visible';
++      act(() => { document.dispatchEvent(new Event('visibilitychange')); });
++      await flush();
++      expect(request).toHaveBeenCalledTimes(2);
++    } finally {
++      delete (navigator as { wakeLock?: unknown }).wakeLock;
++    }
++  });
++
++  it('opens in the light theme unless a theme was chosen on this device (Ruling 21)', async () => {
++    await renderMain();
++    expect(document.documentElement.dataset.theme).toBe('light');
++  });
++
++  it('keeps a theme saved on this device', async () => {
++    window.localStorage.setItem('ebc.theme', 'dark');
++    document.documentElement.dataset.theme = 'dark';
++    await renderMain();
++    expect(document.documentElement.dataset.theme).toBe('dark');
++  });
++});
++
++describe('index.html theme bootstrap (Ruling 21)', () => {
++  const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
++  const script = /<script>([\s\S]*?)<\/script>/.exec(html)![1];
++  const boot = (hash: string, saved: string | null) => {
++    window.location.hash = hash;
++    if (saved) window.localStorage.setItem('ebc.theme', saved);
++    delete document.documentElement.dataset.theme;
++    new Function(script)();
++    return document.documentElement.dataset.theme;
++  };
++  afterEach(() => {
++    window.location.hash = '';
++  });
++
++  it('uses light on the timekeeper link and dark elsewhere when nothing is saved', () => {
++    expect(boot('#/c/abc', null)).toBe('light');
++    expect(boot('#/eventos', null)).toBe('dark');
++    expect(boot('', null)).toBe('dark');
++  });
++
++  it('always honors a saved choice', () => {
++    expect(boot('#/c/abc', 'dark')).toBe('dark');
++    window.localStorage.clear();
++    expect(boot('#/eventos', 'light')).toBe('light');
++  });
++});
+diff --git a/src/features/timekeeper/tkStore.test.ts b/src/features/timekeeper/tkStore.test.ts
+new file mode 100644
+index 0000000..9132e9d
+--- /dev/null
++++ b/src/features/timekeeper/tkStore.test.ts
+@@ -0,0 +1,262 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import type { EntryRow, MarkRow, TkSession } from '../../lib/types';
++import type { LocalMark, OutboxItem } from '../../lib/outbox';
++import {
++  iso, makeEntry, makeMark, makeRace, makeTimekeeper, makeWave, MIN, SEC, T0,
++} from '../../domain/testing/fixtures';
++import {
++  applyWaveStarts, assignMark, assignmentMessage, localToMarkRow, markToInput, mergedMarks, newMark, onCourse, sessionIndex,
++} from './tkStore';
++
++const ME = 'tk-me';
++
++// Solo entry (Ana does both legs), with the member name tk_open embeds.
++const solo = (p: Partial<EntryRow> = {}): EntryRow =>
++  makeEntry({ members: [{ athlete_id: 'a1', position: 0, legs: [0, 1], name: 'Ana Souza' }], ...p });
++
++function session(p: Partial<TkSession> = {}): TkSession {
++  return {
++    event: { id: 'e1', name: 'Evento Teste', date: '2026-10-11', location: 'Vila Velha' },
++    races: [makeRace()], waves: [makeWave()], entries: [solo()], timekeepers: [makeTimekeeper()],
++    version: 1, server_now: iso(T0), ...p,
++  };
++}
++
++// Relay pair: João swims (leg 0), Matheus runs (leg 1). Member names come embedded (tk_open).
++const relayRace = makeRace({ id: 'r2', name: 'Revezamento', team_size: 2 });
++const relayWave = makeWave({ id: 'w2', race_id: 'r2' });
++function relayEntry(p: Partial<EntryRow> = {}): EntryRow {
++  return makeEntry({
++    id: 'en-relay', race_id: 'r2', wave_id: 'w2', bib: '101', team_name: 'Tubarões',
++    members: [
++      { athlete_id: 'a1', position: 0, legs: [0], name: 'João' },
++      { athlete_id: 'a2', position: 1, legs: [1], name: 'Matheus' },
++    ],
++    ...p,
++  });
++}
++
++function local(p: Partial<LocalMark> & { id: string; ts: string }): LocalMark {
++  return {
++    device_ts: p.ts, clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null,
++    discarded: false, local_updated_at: Date.parse(p.ts), ...p,
++  };
++}
++const item = (mark: LocalMark, state: OutboxItem['state'], reason?: string): OutboxItem => ({ mark, state, reason });
++
++afterEach(() => {
++  vi.unstubAllGlobals();
++});
++
++describe('localToMarkRow', () => {
++  it('fills the server-only fields from the local mark', () => {
++    const m = local({ id: 'm1', ts: iso(T0 + MIN), discarded: true, local_updated_at: T0 + 2 * MIN });
++    expect(localToMarkRow(m, 'e1', ME)).toEqual({
++      id: 'm1', event_id: 'e1', timekeeper_id: ME, ts: iso(T0 + MIN), device_ts: iso(T0 + MIN),
++      clock_offset_ms: 0, clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null,
++      discarded: true, discarded_by: 'timekeeper', created_at: iso(T0 + MIN), updated_at: iso(T0 + 2 * MIN),
++    });
++    expect(localToMarkRow({ ...m, discarded: false }, 'e1', ME).discarded_by).toBeNull();
++  });
++});
++
++describe('mergedMarks', () => {
++  it('prefers a pending local edit over the server copy and keeps synced server marks', () => {
++    const serverEdited = makeMark({ id: 'm1', at: T0 + MIN, timekeeper_id: ME, entry_id: null, leg_index: null });
++    const serverOther = makeMark({ id: 'm2', at: T0 + 2 * MIN, timekeeper_id: 'tk2' });
++    const serverSynced = makeMark({ id: 'm3', at: T0 + 3 * MIN, timekeeper_id: ME });
++    const localEdit = local({ id: 'm1', ts: iso(T0 + MIN), entry_id: 'en1', leg_index: 1 });
++    const localSynced = local({ id: 'm3', ts: iso(T0 + 3 * MIN), entry_id: null, leg_index: null });
++
++    const merged = mergedMarks(
++      [serverEdited, serverOther, serverSynced],
++      [item(localEdit, 'pending'), item(localSynced, 'synced')],
++      'e1', ME,
++    );
++
++    expect(merged.map(m => m.id)).toEqual(['m1', 'm2', 'm3']);
++    expect(merged[0]).toMatchObject({ entry_id: 'en1', leg_index: 1, timekeeper_id: ME });
++    expect(merged[1]).toBe(serverOther);
++    expect(merged[2]).toBe(serverSynced); // not pending: the server copy wins
++  });
++
++  it('lets the server copy win over a rejected edit (the organizer moved the mark)', () => {
++    const moved = makeMark({ id: 'm1', at: T0 + MIN, timekeeper_id: ME, entry_id: 'en1', leg_index: 1 });
++    const mine = local({ id: 'm1', ts: iso(T0 + MIN), entry_id: 'en1', leg_index: 0 });
++    const merged = mergedMarks([moved], [item(mine, 'rejected', 'Alterada pela organização')], 'e1', ME);
++    expect(merged).toEqual([moved]);
++  });
++
++  it('adds local marks the server has not returned yet, but not rejected new marks', () => {
++    const fresh = local({ id: 'new', ts: iso(T0 + 5 * MIN) });
++    const acked = local({ id: 'acked', ts: iso(T0 + 4 * MIN) });
++    const refused = local({ id: 'refused', ts: iso(T0 + 6 * MIN), entry_id: 'gone', leg_index: 0 });
++    const merged = mergedMarks(
++      [],
++      [item(acked, 'synced'), item(fresh, 'pending'), item(refused, 'rejected', 'Atleta não encontrado neste evento')],
++      'e1', ME,
++    );
++    expect(merged.map(m => m.id)).toEqual(['acked', 'new']);
++    expect(merged[1]).toEqual(localToMarkRow(fresh, 'e1', ME));
++  });
++});
++
++describe('newMark', () => {
++  it('stamps ts with the synced time and keeps the device time and clock state for auditing', () => {
++    const mark = newMark(T0 + 5 * SEC, T0 + 5 * SEC - 1234, { offset_ms: 1234, rtt_ms: 90, synced_at: T0 });
++    expect(mark).toEqual({
++      id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
++      ts: iso(T0 + 5 * SEC), device_ts: iso(T0 + 5 * SEC - 1234), clock_offset_ms: 1234, clock_rtt_ms: 90,
++      entry_id: null, leg_index: null, athlete_id: null, discarded: false,
++    });
++  });
++
++  it('leaves the clock fields empty when the clock never synced', () => {
++    const mark = newMark(T0, T0, null);
++    expect(mark.clock_offset_ms).toBeNull();
++    expect(mark.clock_rtt_ms).toBeNull();
++  });
++
++  it('still creates a v4 id where crypto.randomUUID is missing (plain-http origins)', () => {
++    const real = globalThis.crypto;
++    vi.stubGlobal('crypto', { getRandomValues: (a: Uint8Array<ArrayBuffer>) => real.getRandomValues(a) });
++    const a = newMark(T0, T0, null).id;
++    const b = newMark(T0, T0, null).id;
++    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
++    expect(a).not.toBe(b);
++  });
++});
++
++describe('assignMark', () => {
++  it('suggests the selected athlete leg on a relay (second member → leg 1)', () => {
++    const mark = markToInput(makeMark({ id: 'x', at: T0 + 20 * MIN, entry_id: null, leg_index: null }));
++    const { mark: assigned, suggestion } = assignMark(mark, relayEntry(), relayRace, [], 'a2');
++    expect(suggestion).toMatchObject({ leg_index: 1, athlete_id: 'a2', reason: 'next' });
++    expect(assigned).toEqual({ ...mark, entry_id: 'en-relay', leg_index: 1, athlete_id: 'a2' });
++  });
++
++  it('ignores the mark itself when it was already filed on a leg', () => {
++    // Filed by mistake on leg 1 (and nothing else is known): counting itself would say "same crossing, leg 1".
++    const self = makeMark({ id: 'x', at: T0 + 10 * MIN, entry_id: 'en1', leg_index: 1 });
++    const { suggestion } = assignMark(markToInput(self), solo(), makeRace(), [self]);
++    expect(suggestion).toMatchObject({ leg_index: 0, reason: 'next' });
++  });
++
++  it('confirms the crossing another timekeeper already marked', () => {
++    const other = makeMark({ at: T0 + 10 * MIN, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 });
++    const mine = markToInput(makeMark({ id: 'x', at: T0 + 10 * MIN + 3 * SEC, entry_id: null, leg_index: null }));
++    const { mark, suggestion } = assignMark(mine, relayEntry(), relayRace, [other]);
++    expect(suggestion).toMatchObject({ leg_index: 0, reason: 'same_crossing', athlete_id: 'a1' });
++    expect(mark.leg_index).toBe(0);
++  });
++});
++
++describe('assignmentMessage', () => {
++  it('names the bib, the athlete and the leg (Ruling 8 wording)', () => {
++    expect(assignmentMessage(relayEntry(), relayRace, { leg_index: 1, athlete_id: 'a2', reason: 'next', warning: null }, 'Matheus'))
++      .toBe('✓ Nº 101 · Matheus · fim da perna 2/2 (Corrida)');
++  });
++
++  it('warns when the entry had already finished', () => {
++    expect(assignmentMessage(relayEntry(), relayRace, { leg_index: 1, athlete_id: 'a2', reason: 'next', warning: 'already_finished' }, 'Matheus'))
++      .toBe('Nº 101 já concluiu — registrada como fim da perna 2/2 (Corrida)');
++  });
++});
++
++describe('onCourse', () => {
++  const relaySession = (entries: EntryRow[] = [relayEntry()]) => session({ races: [relayRace], waves: [relayWave], entries });
++  const leg0 = T0 + 10 * MIN;
++  const relayLeg0 = () => makeMark({ at: leg0, timekeeper_id: 'tk2', entry_id: 'en-relay', leg_index: 0 });
++
++  it('lists a relay whose leg 0 was marked with the next athlete and the leg timer', () => {
++    const now = leg0 + 2 * MIN;
++    const list = onCourse(relaySession(), [relayLeg0()], now);
++    expect(list).toHaveLength(1);
++    expect(list[0]).toMatchObject({
++      athleteName: 'Matheus', legLabel: 'Corrida', legIndex: 1, legElapsedMs: now - leg0, displayName: 'Tubarões', confirm: null,
++    });
++    expect(list[0].entry.id).toBe('en-relay');
++    expect(list[0].race.id).toBe('r2');
++    expect(list[0].timing.status).toBe('on_course');
++  });
++
++  it('lists started entries without crossings on their first leg, and leaves out entries not started or out of the race', () => {
++    const waiting = makeWave({ id: 'w3', race_id: 'r1', start_at: null });
++    const list = onCourse(session({
++      waves: [makeWave(), waiting],
++      entries: [
++        solo({ id: 'a', bib: '1' }),
++        solo({ id: 'b', bib: '2', wave_id: 'w3' }),
++        solo({ id: 'c', bib: '3', status: 'dns' }),
++        solo({ id: 'd', bib: '4', status: 'dnf' }),
++      ],
++    }), [], T0 + 5 * MIN);
++    expect(list.map(i => i.entry.bib)).toEqual(['1']);
++    expect(list[0]).toMatchObject({ legIndex: 0, legLabel: 'Natação', athleteName: 'Ana Souza', legElapsedMs: 5 * MIN });
++  });
++
++  it('pins a crossing inside the same-crossing window at the top with the seconds left to confirm', () => {
++    const now = leg0 + 10_200;
++    const list = onCourse(relaySession([relayEntry(), solo({ id: 'solo', race_id: 'r2', wave_id: 'w2', bib: '7' })]), [relayLeg0()], now);
++    expect(list.map(i => i.entry.id)).toEqual(['en-relay', 'solo']);
++    expect(list[0].confirm).toEqual({ leg_index: 0, leg_label: 'Natação', leg_ms: 10 * MIN, crossing_ms: leg0, remaining_s: 20 });
++    // Still on course: the row keeps showing who is running now.
++    expect(list[0]).toMatchObject({ athleteName: 'Matheus', legIndex: 1, legElapsedMs: 10_200 });
++
++    expect(onCourse(relaySession(), [relayLeg0()], leg0 + 29_999)[0].confirm?.remaining_s).toBe(1);
++    expect(onCourse(relaySession(), [relayLeg0()], leg0 + 30_000)[0].confirm).toBeNull();
++  });
++
++  it('keeps a finished entry listed while its finish can still be confirmed, then drops it', () => {
++    const finish = T0 + 30 * MIN;
++    const marks = [
++      makeMark({ at: T0 + 10 * MIN, entry_id: 'en1', leg_index: 0 }),
++      makeMark({ at: finish, entry_id: 'en1', leg_index: 1 }),
++    ];
++    const during = onCourse(session(), marks, finish + 10 * SEC);
++    expect(during).toHaveLength(1);
++    expect(during[0].timing.status).toBe('finished');
++    expect(during[0]).toMatchObject({ legIndex: null, legLabel: 'Corrida', athleteName: 'Ana Souza' });
++    expect(during[0].confirm).toEqual({ leg_index: 1, leg_label: 'Corrida', leg_ms: 20 * MIN, crossing_ms: finish, remaining_s: 20 });
++
++    expect(onCourse(session(), marks, finish + 31 * SEC)).toEqual([]);
++  });
++
++  it('orders pinned rows by most recent crossing, then the rest by leg time, longest first', () => {
++    const now = T0 + 30 * MIN + 10 * SEC;
++    const s = session({
++      entries: [
++        solo({ id: 'A', bib: '1' }), // leg 0 at 10 min → on the run for 20 min
++        solo({ id: 'B', bib: '2' }), // finished 10 s ago
++        solo({ id: 'C', bib: '3' }), // swim ended 5 s ago
++        solo({ id: 'D', bib: '4' }), // no crossing yet → swimming for 30 min
++      ],
++    });
++    const marks = [
++      makeMark({ at: T0 + 10 * MIN, entry_id: 'A', leg_index: 0 }),
++      makeMark({ at: T0 + 12 * MIN, entry_id: 'B', leg_index: 0 }),
++      makeMark({ at: T0 + 30 * MIN, entry_id: 'B', leg_index: 1 }),
++      makeMark({ at: T0 + 30 * MIN + 5 * SEC, entry_id: 'C', leg_index: 0 }),
++    ];
++    const list = onCourse(s, marks, now);
++    expect(list.map(i => i.entry.id)).toEqual(['C', 'B', 'D', 'A']);
++    expect(list.map(i => i.confirm?.remaining_s ?? null)).toEqual([25, 20, null, null]);
++  });
++});
++
++describe('sessionIndex', () => {
++  it('names entries from the member names embedded by tk_open', () => {
++    const idx = sessionIndex(session({ entries: [relayEntry({ team_name: null })] }));
++    expect(idx.athletesById.get('a2')?.name).toBe('Matheus');
++  });
++});
++
++describe('applyWaveStarts', () => {
++  it('updates the start of known waves and keeps the same session when nothing changed', () => {
++    const s = session({ waves: [makeWave({ id: 'w1', start_at: null }), makeWave({ id: 'w2', race_id: 'r1', start_at: iso(T0) })] });
++    const next = applyWaveStarts(s, [{ id: 'w1', start_at: iso(T0 + MIN) }, { id: 'w2', start_at: iso(T0) }, { id: 'zz', start_at: iso(T0) }]);
++    expect(next.waves.map(w => w.start_at)).toEqual([iso(T0 + MIN), iso(T0)]);
++    expect(next.waves[1]).toBe(s.waves[1]);
++    expect(applyWaveStarts(next, [{ id: 'w1', start_at: iso(T0 + MIN) }])).toBe(next);
++  });
++});
+diff --git a/src/features/timekeeper/tkStore.ts b/src/features/timekeeper/tkStore.ts
+new file mode 100644
+index 0000000..b5069e1
+--- /dev/null
++++ b/src/features/timekeeper/tkStore.ts
+@@ -0,0 +1,225 @@
++// Pure helpers behind the timekeeper app (spec §7): turning outbox items into mark rows, the
++// merged view of server + local marks, new marks stamped with the synced clock, leg assignment
++// and the "Em prova" list. No I/O and no clock reads here — time always comes in as arguments.
++
++import type { AthleteRow, EntryRow, MarkRow, RaceRow, TkMarkInput, TkSession, WaveRow } from '../../lib/types';
++import type { ClockState } from '../../lib/clock';
++import type { LocalMark, OutboxItem } from '../../lib/outbox';
++import { computeEntryTiming } from '../../domain/consolidation';
++import type { EntryTiming } from '../../domain/consolidation';
++import { entryDisplayName, entryWave, indexEvent, legAthleteId } from '../../domain/eventModel';
++import type { EventIndex } from '../../domain/eventModel';
++import { suggestLeg } from '../../domain/suggestLeg';
++import type { LegSuggestion } from '../../domain/suggestLeg';
++
++const iso = (ms: number) => new Date(ms).toISOString();
++
++/** The server's view of a mark that so far only exists (or was last edited) on this device. */
++export function localToMarkRow(m: LocalMark, eventId: string, timekeeperId: string): MarkRow {
++  return {
++    id: m.id, event_id: eventId, timekeeper_id: timekeeperId, ts: m.ts, device_ts: m.device_ts,
++    clock_offset_ms: m.clock_offset_ms, clock_rtt_ms: m.clock_rtt_ms,
++    entry_id: m.entry_id, leg_index: m.leg_index, athlete_id: m.athlete_id,
++    discarded: m.discarded, discarded_by: m.discarded ? 'timekeeper' : null,
++    created_at: m.ts, updated_at: iso(m.local_updated_at),
++  };
++}
++
++/**
++ * Every mark this device knows: the server's copies, where a `pending` local item (an edit not
++ * acknowledged yet) overrides the server copy — a synced or rejected one never does, so an
++ * organizer's move wins (Ruling 27) — plus local marks the server has not returned yet. A
++ * rejected mark the server never stored is left out: it does not exist for the event (it stays
++ * listed with its reason in "Minhas marcações").
++ */
++export function mergedMarks(server: MarkRow[], local: OutboxItem[], eventId: string, timekeeperId: string): MarkRow[] {
++  const localById = new Map(local.map((it): [string, OutboxItem] => [it.mark.id, it]));
++  const serverIds = new Set<string>();
++  const merged = server.map(row => {
++    serverIds.add(row.id);
++    const it = localById.get(row.id);
++    return it && it.state === 'pending' ? localToMarkRow(it.mark, eventId, timekeeperId) : row;
++  });
++  for (const it of local) {
++    if (serverIds.has(it.mark.id) || it.state === 'rejected') continue;
++    merged.push(localToMarkRow(it.mark, eventId, timekeeperId));
++  }
++  return merged;
++}
++
++/** The fields a timekeeper sends for a mark (tk_sync payload), taken from a full row. */
++export function markToInput(m: MarkRow): TkMarkInput {
++  return {
++    id: m.id, ts: m.ts, device_ts: m.device_ts, clock_offset_ms: m.clock_offset_ms, clock_rtt_ms: m.clock_rtt_ms,
++    entry_id: m.entry_id, leg_index: m.leg_index, athlete_id: m.athlete_id, discarded: m.discarded,
++  };
++}
++
++/** RFC 4122 v4 id. `crypto.randomUUID` only exists in secure contexts (https/localhost); a phone
++ * opening the dev server over the LAN must still be able to mark, so fall back to random bytes. */
++function uuid(): string {
++  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
++  const b = crypto.getRandomValues(new Uint8Array(16));
++  b[6] = (b[6] & 0x0f) | 0x40;
++  b[8] = (b[8] & 0x3f) | 0x80;
++  const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
++  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
++}
++
++/** A new, unassigned mark at the synced instant `nowMs`; the device time and the clock state
++ * travel with it for auditing (null offset/RTT = the clock had never synced). */
++export function newMark(nowMs: number, deviceNowMs: number, clock: ClockState | null): TkMarkInput {
++  return {
++    id: uuid(), ts: iso(nowMs), device_ts: iso(deviceNowMs),
++    clock_offset_ms: clock ? clock.offset_ms : null, clock_rtt_ms: clock ? clock.rtt_ms : null,
++    entry_id: null, leg_index: null, athlete_id: null, discarded: false,
++  };
++}
++
++/** `mark` filed under `entryId` on the suggested leg (and that leg's athlete). */
++export function withSuggestion(mark: TkMarkInput, entryId: string, suggestion: LegSuggestion): TkMarkInput {
++  return { ...mark, entry_id: entryId, leg_index: suggestion.leg_index, athlete_id: suggestion.athlete_id };
++}
++
++/** Files `mark` under `entry` on the leg `suggestLeg` picks from the other known marks (the mark
++ * itself is left out so it can never "confirm" its own crossing). */
++export function assignMark(
++  mark: TkMarkInput, entry: EntryRow, race: RaceRow, allMarks: MarkRow[], athleteId?: string | null,
++): { mark: TkMarkInput; suggestion: LegSuggestion } {
++  const others = allMarks.filter(m => m.id !== mark.id);
++  const suggestion = suggestLeg({ entry, race, marks: others, tsMs: Date.parse(mark.ts), athleteId });
++  return { mark: withSuggestion(mark, entry.id, suggestion), suggestion };
++}
++
++/** "perna 2/2 (Corrida)" — Ruling 8: never "fim da <rótulo>" (wrong gender for "Ciclismo"). */
++export function legText(race: RaceRow, legIndex: number): string {
++  return `perna ${legIndex + 1}/${race.legs.length} (${race.legs[legIndex]?.label ?? ''})`;
++}
++
++/** The assignment toast line: `✓ Nº 101 · Matheus · fim da perna 2/2 (Corrida)`. */
++export function assignmentMessage(entry: EntryRow, race: RaceRow, suggestion: LegSuggestion, athleteName: string): string {
++  const leg = `fim da ${legText(race, suggestion.leg_index)}`;
++  if (suggestion.warning === 'already_finished') return `Nº ${entry.bib} já concluiu — registrada como ${leg}`;
++  return `✓ Nº ${entry.bib} · ${athleteName} · ${leg}`;
++}
++
++/** Name of the member doing `athleteId`'s legs, as embedded by tk_open. */
++export function memberName(entry: EntryRow, athleteId: string | null): string | null {
++  if (athleteId === null) return null;
++  return entry.members.find(m => m.athlete_id === athleteId)?.name ?? null;
++}
++
++/**
++ * `indexEvent` over a tk_open session. The session has no athlete list — member names come
++ * embedded in the entries — so minimal athlete rows are synthesized from them; only `name` is
++ * meaningful (used by `entryDisplayName`).
++ */
++export function sessionIndex(session: TkSession): EventIndex {
++  const athletes = new Map<string, AthleteRow>();
++  for (const e of session.entries) {
++    for (const m of e.members) {
++      if (m.name && !athletes.has(m.athlete_id)) {
++        athletes.set(m.athlete_id, {
++          id: m.athlete_id, name: m.name, sex: 'M', birth_date: null, city: null, team_club: null, public_profile: false,
++        });
++      }
++    }
++  }
++  return indexEvent({ ...session, athletes: [...athletes.values()] });
++}
++
++/** The session with the wave starts tk_sync reports (it returns every wave of the event); the same
++ * object when nothing changed, so callers can skip re-rendering and re-saving. */
++export function applyWaveStarts(session: TkSession, waves: Pick<WaveRow, 'id' | 'start_at'>[]): TkSession {
++  const startById = new Map(waves.map((w): [string, string | null] => [w.id, w.start_at]));
++  let changed = false;
++  const next = session.waves.map(w => {
++    const start = startById.get(w.id);
++    if (start === undefined || start === w.start_at) return w;
++    changed = true;
++    return { ...w, start_at: start };
++  });
++  return changed ? { ...session, waves: next } : session;
++}
++
++/** A crossing other timekeepers can still confirm: shown pinned on top of "Em prova" (Ruling 22). */
++export interface ConfirmInfo {
++  leg_index: number; leg_label: string; leg_ms: number | null; crossing_ms: number;
++  /** Whole seconds left in the same-crossing window (1..window). */
++  remaining_s: number;
++}
++
++export interface OnCourseItem {
++  entry: EntryRow; race: RaceRow; timing: EntryTiming;
++  /** Team name or member names. */
++  displayName: string;
++  /** Leg being done now; null for a finished entry (listed only while `confirm` is set). */
++  legIndex: number | null;
++  /** Label and athlete of the current leg (of the last leg once finished). */
++  legLabel: string; athleteName: string;
++  /** Time on the current leg; for a finished entry, time since the finish. */
++  legElapsedMs: number;
++  confirm: ConfirmInfo | null;
++}
++
++const bibCollator = new Intl.Collator('pt-BR', { numeric: true });
++
++/**
++ * The "Em prova" list: entries on course (their wave started or a crossing is already known),
++ * sorted by time on the current leg, longest first (the next ones to arrive). An entry whose
++ * latest crossing is still inside the same-crossing window — a relay handoff or a finish — is
++ * pinned on top, most recent first, and stays listed even once finished until the window closes,
++ * so the card just tapped does not jump away and the other timekeepers can confirm it (Ruling 22).
++ */
++export function onCourse(session: TkSession, marks: MarkRow[], nowMs: number): OnCourseItem[] {
++  const idx = sessionIndex(session);
++  const marksByEntry = new Map<string, MarkRow[]>();
++  for (const m of marks) {
++    if (m.entry_id === null) continue;
++    const list = marksByEntry.get(m.entry_id);
++    if (list) list.push(m);
++    else marksByEntry.set(m.entry_id, [m]);
++  }
++
++  const items: OnCourseItem[] = [];
++  for (const entry of session.entries) {
++    const race = idx.racesById.get(entry.race_id);
++    if (!race || race.legs.length === 0) continue;
++    const timing = computeEntryTiming(entry, race, entryWave(entry, idx), marksByEntry.get(entry.id) ?? [], []);
++    const running = timing.status === 'on_course' && timing.current_leg !== null && timing.current_leg_start_ms !== null;
++    if (!running && timing.status !== 'finished') continue;
++
++    let latest: { leg: number; at: number } | null = null;
++    for (const lt of timing.legs) {
++      const at = lt.crossing.median_ms;
++      if (at !== null && (latest === null || at > latest.at)) latest = { leg: lt.leg_index, at };
++    }
++    const windowMs = race.config.same_crossing_window_s * 1000;
++    const confirm: ConfirmInfo | null = latest !== null && nowMs - latest.at < windowMs && latest.at - nowMs <= windowMs
++      ? {
++          leg_index: latest.leg, leg_label: race.legs[latest.leg].label, leg_ms: timing.legs[latest.leg].leg_ms,
++          crossing_ms: latest.at,
++          remaining_s: Math.min(race.config.same_crossing_window_s, Math.ceil((latest.at + windowMs - nowMs) / 1000)),
++        }
++      : null;
++    if (!running && confirm === null) continue;
++
++    const displayName = entryDisplayName(entry, idx);
++    const leg = running ? (timing.current_leg as number) : race.legs.length - 1;
++    items.push({
++      entry, race, timing, displayName,
++      legIndex: running ? leg : null,
++      legLabel: race.legs[leg].label,
++      athleteName: memberName(entry, legAthleteId(entry, leg)) ?? displayName,
++      legElapsedMs: running ? nowMs - (timing.current_leg_start_ms as number) : nowMs - (confirm as ConfirmInfo).crossing_ms,
++      confirm,
++    });
++  }
++
++  return items.sort((a, b) => {
++    if (a.confirm && b.confirm) return b.confirm.crossing_ms - a.confirm.crossing_ms || bibCollator.compare(a.entry.bib, b.entry.bib);
++    if (a.confirm) return -1;
++    if (b.confirm) return 1;
++    return b.legElapsedMs - a.legElapsedMs || bibCollator.compare(a.entry.bib, b.entry.bib);
++  });
++}
+diff --git a/src/features/timekeeper/useTimekeeper.ts b/src/features/timekeeper/useTimekeeper.ts
+new file mode 100644
+index 0000000..2b87840
+--- /dev/null
++++ b/src/features/timekeeper/useTimekeeper.ts
+@@ -0,0 +1,547 @@
++// State and side effects of the timekeeper app (spec §7): the cached tk_open session, the device
++// registration, the offline outbox and the single-flight sync loop. Every tap is written to the
++// outbox (localStorage) synchronously before anything else happens, so a mark survives a lost
++// connection, a slow server and a page reload.
++
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
++import { api, ApiError } from '../../lib/api';
++import type { ClockSync } from '../../lib/clock';
++import { Outbox } from '../../lib/outbox';
++import type { LocalMark, OutboxState } from '../../lib/outbox';
++import { readJSON, safeLocalStorage, writeJSON } from '../../lib/storage';
++import type { EntryRow, MarkRow, RaceRow, TkMarkInput, TkSession, TkSyncResult } from '../../lib/types';
++import { useClock } from '../../hooks/useClock';
++import { entryDisplayName, legAthleteId, mergeById } from '../../domain/eventModel';
++import type { EventIndex } from '../../domain/eventModel';
++import { planBibAssignment } from '../../domain/suggestLeg';
++import type { LegSuggestion } from '../../domain/suggestLeg';
++import {
++  applyWaveStarts, assignMark, assignmentMessage, localToMarkRow, markToInput, memberName, mergedMarks, newMark,
++  onCourse, sessionIndex, withSuggestion,
++} from './tkStore';
++import type { OnCourseItem } from './tkStore';
++
++/** Sync cadence and batching (spec §7.4); the delta overlap matches the admin live feed. */
++const SYNC_INTERVAL_MS = 2_000;
++const MAX_BACKOFF_MS = 10_000;
++const OVERLAP_MS = 10_000;
++const BATCH_SIZE = 200;
++/** Retry of tk_open while there is nothing cached to show. */
++const OPEN_RETRY_MS = 5_000;
++
++const sessionKey = (token: string) => `ebc.tk.session.${token}`;
++const regKey = (token: string) => `ebc.tk.reg.${token}`;
++const marksKey = (eventId: string) => `ebc.tk.marks.${eventId}`;
++const outboxKey = (eventId: string, timekeeperId: string) => `ebc.tk.${eventId}.${timekeeperId}`;
++/** Timekeeper ids with an outbox for this event on this device — lets a new registration pick up
++ * marks still pending under a registration that stopped working (rotated link, unknown id). */
++const outboxesKey = (eventId: string) => `ebc.tk.outboxes.${eventId}`;
++
++export type TkPhase = 'loading' | 'invalid' | 'register' | 'main' | 'disabled';
++
++/** What the device keeps after `tk_register` (`ebc.tk.reg.<token>`). */
++export interface TkDevice { timekeeper_id: string; secret: string; name: string }
++
++export type AssignResult =
++  | {
++      ok: true; markId: string; ts: string; entry: EntryRow; race: RaceRow; suggestion: LegSuggestion;
++      /** `✓ Nº 101 · Matheus · fim da perna 2/2 (Corrida)` (or the already-finished form). */
++      message: string;
++      /** Bib warning (DNS/DSQ) or already-finished notice from `planBibAssignment`. */
++      warning: string | null;
++    }
++  | { ok: false; markId: string | null; error: string };
++
++export interface MyMark { mark: MarkRow; state: OutboxState; reason: string | null }
++
++export interface Timekeeper {
++  phase: TkPhase;
++  session: TkSession | null;
++  index: EventIndex | null;
++  registration: TkDevice | null;
++  clock: ClockSync;
++  /** False after a network failure (or the browser's "offline" event) until a sync succeeds. */
++  online: boolean;
++  /** At least one sync succeeded since the page opened. */
++  synced: boolean;
++  /** Last non-network sync failure (pt-BR server message), cleared by the next success. */
++  syncError: string | null;
++  /** Why tk_open failed while loading. */
++  loadError: string | null;
++  pendingCount: number;
++  rejectedCount: number;
++  /** ± uncertainty of the synced clock in ms (half the best round trip), null if never synced. */
++  clockQuality: number | null;
++  /** Synced now, refreshed every second and after every action. */
++  nowMs: number;
++  /** Every known mark (server copies merged with this device's). */
++  marks: MarkRow[];
++  /** This timekeeper's non-discarded marks without an entry, oldest first. */
++  unassigned: MarkRow[];
++  /** This timekeeper's marks with their outbox state, newest first. */
++  myMarks: MyMark[];
++  onCourse: OnCourseItem[];
++  register(name: string): Promise<void>;
++  /** Records a mark at the synced instant of the call; with a bib, also assigns it. */
++  mark(bibText?: string): { markId: string; assignment: AssignResult | null };
++  assign(markId: string, entryId: string, athleteId?: string | null): AssignResult;
++  assignBib(markId: string, bibText: string): AssignResult;
++  changeLeg(markId: string, legIndex: number): AssignResult;
++  unassign(markId: string): void;
++  discard(markId: string): void;
++  restore(markId: string): void;
++  /** Loading: try tk_open now. Disabled: try syncing again. */
++  retry(): void;
++}
++
++interface MarksCache { server_now: string | null; marks: MarkRow[] }
++
++const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
++
++function readSession(storage: ReturnType<typeof safeLocalStorage>, token: string): TkSession | null {
++  const v = readJSON<unknown>(storage, sessionKey(token), null);
++  const ok = isRecord(v) && isRecord(v.event) && typeof v.event.id === 'string'
++    && Array.isArray(v.races) && Array.isArray(v.waves) && Array.isArray(v.entries);
++  return ok ? (v as unknown as TkSession) : null;
++}
++
++function readDevice(storage: ReturnType<typeof safeLocalStorage>, token: string): TkDevice | null {
++  const v = readJSON<unknown>(storage, regKey(token), null);
++  return isRecord(v) && typeof v.timekeeper_id === 'string' && typeof v.secret === 'string' && typeof v.name === 'string'
++    ? { timekeeper_id: v.timekeeper_id, secret: v.secret, name: v.name }
++    : null;
++}
++
++function readMarksCache(storage: ReturnType<typeof safeLocalStorage>, eventId: string): MarksCache {
++  const v = readJSON<unknown>(storage, marksKey(eventId), null);
++  if (!isRecord(v) || !Array.isArray(v.marks)) return { server_now: null, marks: [] };
++  return { server_now: typeof v.server_now === 'string' ? v.server_now : null, marks: v.marks as MarkRow[] };
++}
++
++function toInput(m: LocalMark): TkMarkInput {
++  const { local_updated_at: _sentAt, ...input } = m;
++  return input;
++}
++
++const byTs = (a: MarkRow, b: MarkRow) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
++
++type Failure = 'network' | 'unauthorized' | 'disabled' | 'invalid' | 'other';
++function classify(e: unknown): { kind: Failure; message: string } {
++  const message = e instanceof Error && e.message ? e.message : 'Erro inesperado';
++  if (e instanceof ApiError && e.code === 'network') return { kind: 'network', message };
++  if (message.includes('Cronometrista não autorizado')) return { kind: 'unauthorized', message };
++  if (message.includes('Seu acesso foi desativado')) return { kind: 'disabled', message };
++  if (message.includes('Link de cronometragem inválido')) return { kind: 'invalid', message };
++  return { kind: 'other', message };
++}
++
++function deviceLabel(): string {
++  return typeof navigator === 'undefined' ? '' : navigator.userAgent.slice(0, 200);
++}
++
++export function useTimekeeper(token: string): Timekeeper {
++  const storage = useMemo(() => safeLocalStorage(), []);
++  const clock = useClock();
++
++  const [session, setSessionState] = useState<TkSession | null>(() => readSession(storage, token));
++  const [registration, setRegistration] = useState<TkDevice | null>(() => readDevice(storage, token));
++  // With something cached the screen opens at once — a phone reloading without signal must not
++  // sit on a spinner while tk_open times out.
++  const [phase, setPhase] = useState<TkPhase>(() => (session ? (registration ? 'main' : 'register') : 'loading'));
++  const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine !== false);
++  const [synced, setSynced] = useState(false);
++  const [syncError, setSyncError] = useState<string | null>(null);
++  const [loadError, setLoadError] = useState<string | null>(null);
++  const [rev, setRev] = useState(0);
++  const [nowMs, setNowMs] = useState(() => clock.now());
++
++  // The async loops and the tap handlers read the latest values from refs, never from a stale render.
++  const sessionRef = useRef(session);
++  const deviceRef = useRef(registration);
++  const boxRef = useRef<{ key: string; box: Outbox } | null>(null);
++  const cacheRef = useRef<{ eventId: string; cache: MarksCache } | null>(null);
++  const indexRef = useRef<{ session: TkSession; index: EventIndex } | null>(null);
++  const inFlight = useRef(false);
++  const reopening = useRef(false);
++  const openNow = useRef<() => void>(() => {});
++
++  const bump = useCallback(() => {
++    setRev(r => r + 1);
++    setNowMs(clock.now());
++  }, [clock]);
++
++  /** One Outbox instance per key: two instances would each persist their own copy. */
++  const outboxFor = useCallback((eventId: string, timekeeperId: string): Outbox => {
++    const key = outboxKey(eventId, timekeeperId);
++    if (boxRef.current?.key !== key) boxRef.current = { key, box: new Outbox(storage, key) };
++    return boxRef.current.box;
++  }, [storage]);
++
++  const cacheFor = useCallback((eventId: string): MarksCache => {
++    if (cacheRef.current?.eventId !== eventId) cacheRef.current = { eventId, cache: readMarksCache(storage, eventId) };
++    return cacheRef.current.cache;
++  }, [storage]);
++
++  const indexFor = useCallback((s: TkSession): EventIndex => {
++    if (indexRef.current?.session !== s) indexRef.current = { session: s, index: sessionIndex(s) };
++    return indexRef.current.index;
++  }, []);
++
++  const applySession = useCallback((s: TkSession) => {
++    sessionRef.current = s;
++    setSessionState(s);
++    writeJSON(storage, sessionKey(token), s);
++  }, [storage, token]);
++
++  const toMainOrRegister = useCallback(() => {
++    setPhase(p => (p === 'loading' ? (deviceRef.current ? 'main' : 'register') : p));
++  }, []);
++
++  // tk_open: refresh the cached session; keep retrying while there is nothing to show.
++  useEffect(() => {
++    let cancelled = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    const attempt = async () => {
++      clearTimeout(timer);
++      try {
++        const s = await api.tk.open(token);
++        if (cancelled) return;
++        applySession(s);
++        setLoadError(null);
++        toMainOrRegister();
++      } catch (e) {
++        if (cancelled) return;
++        const f = classify(e);
++        // tk_open only raises P0001 for a wrong or disabled link.
++        if (f.kind === 'invalid' || (e instanceof ApiError && e.code === 'P0001')) {
++          setPhase('invalid');
++          return;
++        }
++        setLoadError(f.message);
++        if (f.kind === 'network') setOnline(false);
++        if (sessionRef.current) toMainOrRegister();
++        else timer = setTimeout(() => void attempt(), OPEN_RETRY_MS);
++      }
++    };
++    openNow.current = () => void attempt();
++    void attempt();
++    return () => {
++      cancelled = true;
++      clearTimeout(timer);
++    };
++  }, [token, applySession, toMainOrRegister]);
++
++  const reopen = useCallback(() => {
++    if (reopening.current) return;
++    reopening.current = true;
++    api.tk.open(token)
++      .then(
++        s => applySession(s),
++        e => {
++          if (classify(e).kind === 'invalid') setPhase('invalid');
++        },
++      )
++      .finally(() => {
++        reopening.current = false;
++      });
++  }, [token, applySession]);
++
++  const applySyncResult = useCallback((eventId: string, box: Outbox, res: TkSyncResult) => {
++    // Marks in neither list stay pending and go again next cycle (Ruling 28).
++    box.applyResult(res.accepted ?? [], res.rejected ?? []);
++    const cache = cacheFor(eventId);
++    const known = new Map(cache.marks.map((m): [string, string] => [m.id, m.updated_at]));
++    const fresh = (res.marks ?? []).filter(m => known.get(m.id) !== m.updated_at);
++    cache.server_now = res.server_now;
++    // Saved only when marks changed; a stale server_now on reload just means a larger first delta.
++    if (fresh.length > 0) {
++      cache.marks = mergeById(cache.marks, fresh);
++      writeJSON(storage, marksKey(eventId), cache);
++    }
++    const s = sessionRef.current;
++    if (s && s.event.id === eventId) {
++      const next = applyWaveStarts(s, res.waves ?? []);
++      if (next !== s) applySession(next);
++      if (res.version !== s.version) reopen();
++    }
++  }, [cacheFor, storage, applySession, reopen]);
++
++  const listedOutboxes = useCallback((evId: string): string[] => {
++    const listed = readJSON<unknown>(storage, outboxesKey(evId), []);
++    return Array.isArray(listed) ? listed.filter((x): x is string => typeof x === 'string') : [];
++  }, [storage]);
++
++  const rememberOutbox = useCallback((evId: string, timekeeperId: string) => {
++    const listed = listedOutboxes(evId);
++    if (!listed.includes(timekeeperId)) writeJSON(storage, outboxesKey(evId), [...listed, timekeeperId]);
++  }, [storage, listedOutboxes]);
++
++  const dropRegistration = useCallback(() => {
++    storage.removeItem(regKey(token));
++    deviceRef.current = null;
++    setRegistration(null);
++    setPhase('register');
++  }, [storage, token]);
++
++  // The sync loop: single-flight (never two tk_sync requests out, or acks could be misapplied),
++  // every 2 s, ×2 backoff up to 10 s on failures, paused while the page is hidden.
++  const eventId = session?.event.id ?? null;
++  useEffect(() => {
++    if (phase !== 'main' || !registration || !eventId) return;
++    const device = registration;
++    const box = outboxFor(eventId, device.timekeeper_id);
++    rememberOutbox(eventId, device.timekeeper_id);
++    let cancelled = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let delay = SYNC_INTERVAL_MS;
++
++    const schedule = () => {
++      clearTimeout(timer);
++      if (!cancelled) timer = setTimeout(() => void tick(), delay);
++    };
++
++    const tick = async () => {
++      if (cancelled || document.visibilityState === 'hidden') return;
++      if (inFlight.current) {
++        schedule();
++        return;
++      }
++      const batch = box.pending(BATCH_SIZE);
++      box.markSent(batch);
++      const cache = cacheFor(eventId);
++      const since = cache.server_now ? new Date(Date.parse(cache.server_now) - OVERLAP_MS).toISOString() : null;
++      inFlight.current = true;
++      try {
++        const res = await api.tk.sync(token, device.timekeeper_id, device.secret, batch.map(toInput), since);
++        // Applied even if this effect was torn down meanwhile: acks are for marks already stored.
++        applySyncResult(eventId, box, res);
++        delay = SYNC_INTERVAL_MS;
++        setOnline(true);
++        setSynced(true);
++        setSyncError(null);
++      } catch (e) {
++        const f = classify(e);
++        if (f.kind === 'unauthorized') return dropRegistration();
++        if (f.kind === 'disabled') return setPhase('disabled');
++        if (f.kind === 'invalid') return setPhase('invalid');
++        if (f.kind === 'network') setOnline(false);
++        else setSyncError(f.message);
++        delay = Math.min(delay * 2, MAX_BACKOFF_MS);
++      } finally {
++        inFlight.current = false;
++        bump();
++      }
++      schedule();
++    };
++
++    const resume = () => {
++      delay = SYNC_INTERVAL_MS;
++      void tick();
++    };
++    const onVisibility = () => {
++      if (document.visibilityState === 'visible') resume();
++    };
++    const onOffline = () => setOnline(false);
++
++    void tick();
++    document.addEventListener('visibilitychange', onVisibility);
++    window.addEventListener('online', resume);
++    window.addEventListener('offline', onOffline);
++    return () => {
++      cancelled = true;
++      clearTimeout(timer);
++      document.removeEventListener('visibilitychange', onVisibility);
++      window.removeEventListener('online', resume);
++      window.removeEventListener('offline', onOffline);
++    };
++  }, [phase, registration, eventId, token, outboxFor, cacheFor, applySyncResult, dropRegistration, bump, rememberOutbox]);
++
++  // Leg timers and confirmation countdowns.
++  useEffect(() => {
++    if (phase !== 'main') return;
++    const id = setInterval(() => setNowMs(clock.now()), 1_000);
++    return () => clearInterval(id);
++  }, [phase, clock]);
++
++  /** Moves marks still pending under this device's previous registrations into the new outbox. */
++  const adoptPending = useCallback((evId: string, timekeeperId: string) => {
++    const box = outboxFor(evId, timekeeperId);
++    for (const old of listedOutboxes(evId)) {
++      if (old === timekeeperId) continue;
++      for (const it of new Outbox(storage, outboxKey(evId, old)).all()) {
++        if (it.state === 'pending' && !box.get(it.mark.id)) box.upsert(toInput(it.mark));
++      }
++    }
++    // Adopted outboxes leave the list, so their marks are never picked up twice.
++    writeJSON(storage, outboxesKey(evId), [timekeeperId]);
++  }, [storage, outboxFor, listedOutboxes]);
++
++  const register = useCallback(async (name: string) => {
++    const s = sessionRef.current;
++    if (!s) throw new ApiError('Evento ainda não carregado');
++    const clean = name.trim();
++    const res = await api.tk.register(token, clean, deviceLabel());
++    const device: TkDevice = { timekeeper_id: res.timekeeper_id, secret: res.secret, name: clean };
++    writeJSON(storage, regKey(token), device);
++    adoptPending(s.event.id, device.timekeeper_id);
++    deviceRef.current = device;
++    setRegistration(device);
++    setPhase('main');
++    bump();
++  }, [token, storage, adoptPending, bump]);
++
++  // ---- actions (synchronous: they read and write the outbox directly) ----
++
++  const context = useCallback(() => {
++    const s = sessionRef.current;
++    const device = deviceRef.current;
++    if (!s || !device) throw new Error('Cronometragem não iniciada');
++    const box = outboxFor(s.event.id, device.timekeeper_id);
++    const cache = cacheFor(s.event.id);
++    return {
++      s, device, box, index: indexFor(s),
++      marks: () => mergedMarks(cache.marks, box.all(), s.event.id, device.timekeeper_id),
++    };
++  }, [outboxFor, cacheFor, indexFor]);
++  type Ctx = ReturnType<typeof context>;
++
++  /** The current version of one of this timekeeper's marks (server copy unless an edit is pending). */
++  const mine = (c: Ctx, markId: string): TkMarkInput | null => {
++    const row = c.marks().find(m => m.id === markId && m.timekeeper_id === c.device.timekeeper_id);
++    if (row) return markToInput(row);
++    const it = c.box.get(markId);
++    return it ? toInput(it.mark) : null;
++  };
++
++  const success = (c: Ctx, mark: TkMarkInput, entry: EntryRow, race: RaceRow, suggestion: LegSuggestion, warning: string | null): AssignResult => {
++    const name = memberName(entry, suggestion.athlete_id) ?? entryDisplayName(entry, c.index);
++    return { ok: true, markId: mark.id, ts: mark.ts, entry, race, suggestion, warning, message: assignmentMessage(entry, race, suggestion, name) };
++  };
++
++  const assignByBib = (c: Ctx, base: TkMarkInput, bibText: string): AssignResult => {
++    // Ruling 2: the shared "typed bib → entry → suggested leg" helper.
++    const plan = planBibAssignment({
++      entries: c.s.entries, racesById: c.index.racesById, marks: c.marks(), markId: base.id,
++      tsMs: Date.parse(base.ts), bibText,
++    });
++    if ('error' in plan) return { ok: false, markId: base.id, error: plan.error };
++    const next = withSuggestion(base, plan.entry.id, plan.suggestion);
++    c.box.upsert(next);
++    return success(c, next, plan.entry, plan.race, plan.suggestion, plan.warning);
++  };
++
++  const mark = (bibText?: string) => {
++    // The tap instant, read before anything else can delay it.
++    const tapMs = clock.now();
++    const deviceMs = Date.now();
++    const input = newMark(tapMs, deviceMs, clock.state());
++    const c = context();
++    // Stored unassigned first, so the tap survives whatever happens while assigning it.
++    c.box.upsert(input);
++    let assignment: AssignResult | null = null;
++    if (bibText !== undefined && bibText.trim() !== '') {
++      try {
++        assignment = assignByBib(c, input, bibText);
++      } catch {
++        assignment = { ok: false, markId: input.id, error: 'Não foi possível atribuir — a marcação ficou em "Sem atleta"' };
++      }
++    }
++    bump();
++    return { markId: input.id, assignment };
++  };
++
++  const withMark = (markId: string, fn: (c: Ctx, base: TkMarkInput) => AssignResult): AssignResult => {
++    const c = context();
++    const base = mine(c, markId);
++    if (!base) return { ok: false, markId, error: 'Marcação não encontrada' };
++    const r = fn(c, base);
++    bump();
++    return r;
++  };
++
++  const assign = (markId: string, entryId: string, athleteId?: string | null): AssignResult =>
++    withMark(markId, (c, base) => {
++      const entry = c.index.entriesById.get(entryId);
++      const race = entry ? c.index.racesById.get(entry.race_id) : undefined;
++      if (!entry || !race) return { ok: false, markId, error: 'Inscrição não encontrada' };
++      const { mark: next, suggestion } = assignMark(base, entry, race, c.marks(), athleteId);
++      c.box.upsert(next);
++      return success(c, next, entry, race, suggestion, null);
++    });
++
++  const assignBib = (markId: string, bibText: string): AssignResult =>
++    withMark(markId, (c, base) => assignByBib(c, base, bibText));
++
++  const changeLeg = (markId: string, legIndex: number): AssignResult =>
++    withMark(markId, (c, base) => {
++      const entry = base.entry_id ? c.index.entriesById.get(base.entry_id) : undefined;
++      const race = entry ? c.index.racesById.get(entry.race_id) : undefined;
++      if (!entry || !race) return { ok: false, markId, error: 'Marcação sem atleta' };
++      if (legIndex < 0 || legIndex >= race.legs.length) return { ok: false, markId, error: 'Perna inválida' };
++      const suggestion: LegSuggestion = { leg_index: legIndex, athlete_id: legAthleteId(entry, legIndex), reason: 'next', warning: null };
++      const next = withSuggestion(base, entry.id, suggestion);
++      c.box.upsert(next);
++      return success(c, next, entry, race, suggestion, null);
++    });
++
++  const update = (markId: string, patch: Partial<TkMarkInput>) => {
++    const c = context();
++    const base = mine(c, markId);
++    if (!base) return;
++    c.box.upsert({ ...base, ...patch });
++    bump();
++  };
++  const unassign = (markId: string) => update(markId, { entry_id: null, leg_index: null, athlete_id: null });
++  const discard = (markId: string) => update(markId, { discarded: true });
++  const restore = (markId: string) => update(markId, { discarded: false });
++
++  const retry = () => {
++    if (phase === 'disabled') setPhase('main');
++    else if (phase === 'loading') openNow.current();
++  };
++
++  // ---- derived state ----
++
++  const derived = useMemo(() => {
++    if (!session || !registration) {
++      return { marks: [] as MarkRow[], unassigned: [] as MarkRow[], myMarks: [] as MyMark[], pendingCount: 0, rejectedCount: 0 };
++    }
++    const evId = session.event.id;
++    const me = registration.timekeeper_id;
++    const box = outboxFor(evId, me);
++    const items = box.all();
++    const marks = mergedMarks(cacheFor(evId).marks, items, evId, me);
++    const own = marks.filter(m => m.timekeeper_id === me);
++    const byId = new Map(marks.map((m): [string, MarkRow] => [m.id, m]));
++    const inBox = new Set<string>();
++    const myMarks: MyMark[] = items.map(it => {
++      inBox.add(it.mark.id);
++      return { mark: byId.get(it.mark.id) ?? localToMarkRow(it.mark, evId, me), state: it.state, reason: it.reason ?? null };
++    });
++    for (const m of own) if (!inBox.has(m.id)) myMarks.push({ mark: m, state: 'synced', reason: null });
++    myMarks.sort((a, b) => byTs(b.mark, a.mark));
++    return {
++      marks,
++      unassigned: own.filter(m => !m.discarded && m.entry_id === null).sort(byTs),
++      myMarks,
++      pendingCount: box.pendingCount(),
++      rejectedCount: items.filter(it => it.state === 'rejected').length,
++    };
++    // `rev` stands for the outbox and marks cache, which are mutated in place.
++  }, [session, registration, rev, outboxFor, cacheFor]);
++
++  const onCourseList = useMemo(
++    () => (session ? onCourse(session, derived.marks, nowMs) : []),
++    [session, derived.marks, nowMs],
++  );
++
++  const rtt = clock.rttMs;
++  return {
++    phase, session, index: session ? indexFor(session) : null, registration, clock,
++    online, synced, syncError, loadError,
++    pendingCount: derived.pendingCount, rejectedCount: derived.rejectedCount,
++    clockQuality: clock.synced && rtt !== null ? Math.round(rtt / 2) : null,
++    nowMs, marks: derived.marks, unassigned: derived.unassigned, myMarks: derived.myMarks, onCourse: onCourseList,
++    register, mark, assign, assignBib, changeLeg, unassign, discard, restore, retry,
++  };
++}

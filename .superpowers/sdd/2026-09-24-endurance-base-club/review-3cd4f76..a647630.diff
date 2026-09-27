@@ -1,0 +1,1339 @@
+# Review package: 3cd4f76..a647630 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+a647630 fix(app): resilient session restore, request timeouts, fresh timekeepers
+
+## Files changed
+ .env.test                               |   2 +
+ src/features/auth/auth.test.tsx         | 163 +++++++++++++++++++++++++++++---
+ src/features/auth/session.tsx           | 125 +++++++++++++++++-------
+ src/features/events/eventShell.test.tsx |  73 ++++++++++----
+ src/hooks/useEventData.test.tsx         |  61 ++++++++++++
+ src/hooks/useEventData.ts               |  32 ++++++-
+ src/lib/api.test.ts                     |  98 ++++++++++++++++---
+ src/lib/api.ts                          |  36 +++++--
+ src/lib/supabase.test.ts                |  23 +++++
+ 9 files changed, 516 insertions(+), 97 deletions(-)
+
+## Diff
+diff --git a/.env.test b/.env.test
+new file mode 100644
+index 0000000..6c5e301
+--- /dev/null
++++ b/.env.test
+@@ -0,0 +1,2 @@
++VITE_SUPABASE_URL=http://127.0.0.1:54321
++VITE_SUPABASE_KEY=sb_publishable_local_dev
+diff --git a/src/features/auth/auth.test.tsx b/src/features/auth/auth.test.tsx
+index 28e9b11..4a4c879 100644
+--- a/src/features/auth/auth.test.tsx
++++ b/src/features/auth/auth.test.tsx
+@@ -1,37 +1,43 @@
+ import { useState } from 'react';
+ import type { ReactNode } from 'react';
+-import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { act, render, screen, waitFor } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+ import { Route, Routes } from 'react-router';
+ 
+ import { renderWithProviders } from '../../test/renderWithProviders';
+ import { ApiError } from '../../lib/api';
+ import type { AdminMe } from '../../lib/types';
+ import { SessionContext, SessionProvider, useSession } from './session';
+ import type { SessionStatus, SessionValue } from './session';
+ import LoginPage from './LoginPage';
+ import ChangePasswordPage from './ChangePasswordPage';
+ import RequireOrganizer from './RequireOrganizer';
+ 
+-const sb = vi.hoisted(() => ({
+-  rpc: vi.fn(),
+-  auth: {
+-    getSession: vi.fn(),
+-    onAuthStateChange: vi.fn(),
+-    signInWithPassword: vi.fn(),
+-    signOut: vi.fn(),
+-    updateUser: vi.fn(),
+-  },
+-}));
++// supabase.rpc() returns a query builder that api.ts awaits after attaching its timeout signal;
++// `rpcAnswer` decides what the awaited builder yields.
++const sb = vi.hoisted(() => {
++  const rpcAnswer = vi.fn();
++  return {
++    rpcAnswer,
++    rpc: vi.fn((...args: unknown[]) => ({ abortSignal: () => rpcAnswer(...args) })),
++    auth: {
++      getSession: vi.fn(),
++      onAuthStateChange: vi.fn(),
++      signInWithPassword: vi.fn(),
++      signOut: vi.fn(),
++      updateUser: vi.fn(),
++    },
++  };
++});
+ vi.mock('../../lib/supabase', () => ({ supabase: sb }));
+ 
+ const ME: AdminMe = { user_id: 'u1', email: 'ana@ebc.test', name: 'Ana', role: 'owner', must_change_password: false };
+ 
+ function fakeSession(overrides: Partial<SessionValue> = {}): SessionValue {
+   return {
+     status: 'anon',
+     me: null,
+     signIn: vi.fn().mockResolvedValue(undefined),
+     signOut: vi.fn().mockResolvedValue(undefined),
+@@ -225,21 +231,21 @@ describe('SessionProvider', () => {
+   const status = () => screen.getByTestId('status');
+   const rpcOk = (data: unknown) => ({ data, error: null, status: 200 });
+ 
+   beforeEach(() => {
+     vi.clearAllMocks();
+     sb.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+     sb.auth.onAuthStateChange.mockReturnValue({ data: { subscription: { unsubscribe: vi.fn() } } });
+     sb.auth.signInWithPassword.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
+     sb.auth.signOut.mockResolvedValue({ error: null });
+     sb.auth.updateUser.mockResolvedValue({ data: { user: { id: 'u1' } }, error: null });
+-    sb.rpc.mockResolvedValue(rpcOk(ME));
++    sb.rpcAnswer.mockResolvedValue(rpcOk(ME));
+   });
+ 
+   it('is anonymous when no session is stored', async () => {
+     renderProvider();
+     await waitFor(() => expect(status()).toHaveTextContent('anon'));
+     expect(sb.rpc).not.toHaveBeenCalled();
+   });
+ 
+   it('restores a stored session by asking admin_me', async () => {
+     sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
+@@ -296,35 +302,37 @@ describe('SessionProvider', () => {
+     sb.auth.signInWithPassword.mockResolvedValue({ data: { user: null, session: null }, error });
+     renderProvider();
+     await waitFor(() => expect(status()).toHaveTextContent('anon'));
+ 
+     const err = await current.signIn('ana@ebc.test', 'senha-segura').catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(ApiError);
+     expect(err).toMatchObject({ message });
+   });
+ 
+   it('marks accounts that are not organizers as forbidden and signs them out', async () => {
+-    sb.rpc.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
++    sb.rpcAnswer.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
+     renderProvider();
+     await waitFor(() => expect(status()).toHaveTextContent('anon'));
+ 
+     await act(() => current.signIn('atleta@ebc.test', 'senha-segura'));
+ 
+     expect(status()).toHaveTextContent('forbidden');
+     expect(current.me).toBeNull();
++    // Only this device: a global sign-out would also log the organizer out everywhere else.
+     expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
++    expect(sb.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
+   });
+ 
+   it('changes the password, clears the provisional flag and reloads the profile', async () => {
+     let mustChange = true;
+     sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
+-    sb.rpc.mockImplementation(async (fn: string) => {
++    sb.rpcAnswer.mockImplementation(async (fn: string) => {
+       if (fn === 'admin_me') return rpcOk({ ...ME, must_change_password: mustChange });
+       if (fn === 'admin_password_changed') {
+         mustChange = false;
+         return rpcOk(null);
+       }
+       throw new Error(`unexpected rpc ${fn}`);
+     });
+     renderProvider();
+     await waitFor(() => expect(current.me?.must_change_password).toBe(true));
+ 
+@@ -346,34 +354,158 @@ describe('SessionProvider', () => {
+     const err = await current.changePassword('senha-nova-123').catch((e: unknown) => e);
+ 
+     expect(err).toMatchObject({ message: 'Sua sessão expirou. Entre novamente.' });
+     expect(sb.rpc.mock.calls.map((c) => c[0])).toEqual(['admin_me']);
+   });
+ 
+   it('keeps loading while the server is unreachable and retries the restore', async () => {
+     vi.useFakeTimers();
+     try {
+       sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
+-      sb.rpc.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(rpcOk(ME));
++      sb.rpcAnswer.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(rpcOk(ME));
+       renderProvider();
+       await act(() => vi.advanceTimersByTimeAsync(100));
+       expect(status()).toHaveTextContent('loading');
+       expect(sb.auth.signOut).not.toHaveBeenCalled();
+ 
+       await act(() => vi.advanceTimersByTimeAsync(3_000));
+       expect(status()).toHaveTextContent('organizer');
+       expect(sb.rpc).toHaveBeenCalledTimes(2);
+     } finally {
+       vi.useRealTimers();
+     }
+   });
+ 
++  describe('restoring a stored session', () => {
++    const SESSION = { data: { session: { access_token: 't' } }, error: null };
++    let onAuthEvent: (event: string) => void;
++    const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
++
++    beforeEach(() => {
++      vi.useFakeTimers();
++      onAuthEvent = () => {};
++      sb.auth.onAuthStateChange.mockImplementation((cb: (event: string) => void) => {
++        onAuthEvent = cb;
++        return { data: { subscription: { unsubscribe: vi.fn() } } };
++      });
++      sb.auth.getSession.mockResolvedValue(SESSION);
++    });
++    afterEach(() => {
++      vi.useRealTimers();
++    });
++
++    it('stays loading when an expired token cannot be refreshed offline, then recovers', async () => {
++      // supabase-js keeps the stored session and reports the failed refresh as retryable.
++      sb.auth.getSession.mockResolvedValueOnce({
++        data: { session: null }, error: { name: 'AuthRetryableFetchError', message: 'Failed to fetch', status: 0 },
++      });
++      renderProvider();
++      await advance(100);
++      expect(status()).toHaveTextContent('loading');
++      expect(sb.auth.signOut).not.toHaveBeenCalled();
++      expect(sb.rpc).not.toHaveBeenCalled();
++
++      await advance(3_000);
++      expect(status()).toHaveTextContent('organizer');
++    });
++
++    it('recovers as soon as supabase-js refreshes the token', async () => {
++      sb.auth.getSession.mockResolvedValueOnce({
++        data: { session: null }, error: { name: 'AuthRetryableFetchError', message: 'Failed to fetch', status: 0 },
++      });
++      renderProvider();
++      await advance(100);
++      expect(status()).toHaveTextContent('loading');
++
++      act(() => onAuthEvent('TOKEN_REFRESHED'));
++      await advance(10);
++
++      expect(status()).toHaveTextContent('organizer');
++      expect(sb.rpc).toHaveBeenCalledTimes(1);
++    });
++
++    it('keeps the session through server errors, retrying with backoff', async () => {
++      const unavailable = { data: null, error: { message: 'Could not query the database for the schema cache', code: 'PGRST002' }, status: 503 };
++      sb.rpcAnswer.mockResolvedValueOnce(unavailable).mockResolvedValueOnce(unavailable).mockResolvedValue(rpcOk(ME));
++      renderProvider();
++      await advance(100);
++      expect(status()).toHaveTextContent('loading');
++      expect(sb.rpc).toHaveBeenCalledTimes(1);
++
++      await advance(3_000);
++      expect(sb.rpc).toHaveBeenCalledTimes(2);
++      expect(status()).toHaveTextContent('loading');
++      await advance(5_000);
++      expect(sb.rpc).toHaveBeenCalledTimes(2);
++      await advance(1_000);
++      expect(sb.rpc).toHaveBeenCalledTimes(3);
++      expect(status()).toHaveTextContent('organizer');
++      expect(sb.auth.signOut).not.toHaveBeenCalled();
++    });
++
++    it.each([
++      ['an expired JWT (PGRST301)', { message: 'JWT expired', code: 'PGRST301' }],
++      ['invalid JWT claims (PGRST303)', { message: 'JWT claims validation failed', code: 'PGRST303' }],
++      ['an HTTP 401', { message: 'Invalid JWT', code: '' }],
++    ])('drops the session on this device only when the server rejects it: %s', async (_name, error) => {
++      sb.rpcAnswer.mockResolvedValue({ data: null, error, status: 401 });
++      renderProvider();
++      await advance(100);
++
++      expect(status()).toHaveTextContent('anon');
++      expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
++      expect(sb.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
++    });
++
++    it('is anonymous when the server refused to refresh the stored session', async () => {
++      sb.auth.getSession.mockResolvedValue({
++        data: { session: null },
++        error: { name: 'AuthApiError', message: 'Invalid Refresh Token: Refresh Token Not Found', status: 400, code: 'refresh_token_not_found' },
++      });
++      renderProvider();
++      await advance(100);
++
++      expect(status()).toHaveTextContent('anon');
++      expect(sb.rpc).not.toHaveBeenCalled();
++      await advance(60_000);
++      expect(sb.auth.getSession).toHaveBeenCalledTimes(1);
++    });
++
++    it('loads the organizer when another tab signs in', async () => {
++      sb.auth.getSession.mockResolvedValueOnce({ data: { session: null }, error: null });
++      renderProvider();
++      await advance(100);
++      expect(status()).toHaveTextContent('anon');
++
++      act(() => onAuthEvent('SIGNED_IN'));
++      await advance(10);
++
++      expect(status()).toHaveTextContent('organizer');
++    });
++
++    it('does not load the profile twice for its own sign-in', async () => {
++      sb.auth.getSession.mockResolvedValueOnce({ data: { session: null }, error: null });
++      sb.auth.signInWithPassword.mockImplementation(async () => {
++        onAuthEvent('SIGNED_IN');
++        return { data: { session: { access_token: 't' } }, error: null };
++      });
++      renderProvider();
++      await advance(100);
++
++      await act(() => current.signIn('ana@ebc.test', 'senha-segura'));
++      await advance(10);
++
++      expect(status()).toHaveTextContent('organizer');
++      expect(sb.rpc).toHaveBeenCalledTimes(1);
++    });
++  });
++
+   it('returns to anonymous when the session ends elsewhere', async () => {
+     let onAuthEvent: (event: string) => void = () => {};
+     sb.auth.onAuthStateChange.mockImplementation((cb: (event: string) => void) => {
+       onAuthEvent = cb;
+       return { data: { subscription: { unsubscribe: vi.fn() } } };
+     });
+     sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
+     renderProvider();
+     await waitFor(() => expect(status()).toHaveTextContent('organizer'));
+ 
+@@ -383,14 +515,15 @@ describe('SessionProvider', () => {
+   });
+ 
+   it('signs out back to anonymous', async () => {
+     sb.auth.getSession.mockResolvedValue({ data: { session: { access_token: 't' } }, error: null });
+     renderProvider();
+     await waitFor(() => expect(status()).toHaveTextContent('organizer'));
+ 
+     await act(() => current.signOut());
+ 
+     expect(sb.auth.signOut).toHaveBeenCalledTimes(1);
++    expect(sb.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
+     expect(status()).toHaveTextContent('anon');
+     expect(current.me).toBeNull();
+   });
+ });
+diff --git a/src/features/auth/session.tsx b/src/features/auth/session.tsx
+index 8636ef2..cdb534a 100644
+--- a/src/features/auth/session.tsx
++++ b/src/features/auth/session.tsx
+@@ -1,11 +1,11 @@
+-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
++import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+ import type { ReactNode } from 'react';
+ import { useQueryClient } from '@tanstack/react-query';
+ import { supabase } from '../../lib/supabase';
+ import { api, ApiError } from '../../lib/api';
+ import type { AdminMe } from '../../lib/types';
+ 
+ export type SessionStatus = 'loading' | 'anon' | 'organizer' | 'forbidden';
+ 
+ export interface SessionValue {
+   status: SessionStatus;
+@@ -20,132 +20,191 @@ export interface SessionValue {
+ export const SessionContext = createContext<SessionValue | null>(null);
+ 
+ interface SessionState {
+   status: SessionStatus;
+   me: AdminMe | null;
+ }
+ 
+ const ANON: SessionState = { status: 'anon', me: null };
+ const FORBIDDEN: SessionState = { status: 'forbidden', me: null };
+ 
+-/** Delay before re-checking a restored session while the server is unreachable. */
++/** First delay before re-checking a stored session the server could not confirm; it doubles up to the max. */
+ const RESTORE_RETRY_MS = 3_000;
++const RESTORE_RETRY_MAX_MS = 30_000;
++
++/** PostgREST codes for a JWT it refused: expired or invalid (PGRST301), bad claims (PGRST303). */
++const REJECTED_JWT_CODES = new Set(['PGRST301', 'PGRST303']);
++
++/** The server refused the session itself (not a transient failure): it will never work again. */
++function isRejectedSession(e: unknown): boolean {
++  return e instanceof ApiError && (e.status === 401 || (e.code !== null && REJECTED_JWT_CODES.has(e.code)));
++}
++
++/** A Supabase Auth failure that says nothing about the session: offline, or the auth server is down. */
++function isTransientAuthError(e: unknown): boolean {
++  const err = (typeof e === 'object' && e !== null ? e : {}) as { name?: string; status?: number };
++  return e instanceof TypeError || err.name === 'AuthRetryableFetchError' || err.status === 0 || (err.status ?? 0) >= 500;
++}
+ 
+ /** Supabase Auth errors (returned or thrown) as pt-BR ApiErrors. */
+ function authError(e: unknown): ApiError {
+   if (e instanceof ApiError) return e;
+   const err = (typeof e === 'object' && e !== null ? e : {}) as { name?: string; message?: string; code?: string; status?: number };
+   if (e instanceof TypeError || err.name === 'AuthRetryableFetchError') return new ApiError('Sem conexão com o servidor', 'network');
+   if (err.code === 'invalid_credentials' || err.message === 'Invalid login credentials') return new ApiError('E-mail ou senha incorretos');
+   if (err.code === 'same_password') return new ApiError('A nova senha precisa ser diferente da atual', err.code);
+   if (err.code === 'weak_password') return new ApiError('Senha muito fraca. Escolha outra senha.', err.code);
+   if (err.code === 'email_not_confirmed') return new ApiError('Este e-mail ainda não foi confirmado', err.code);
+   if (err.code === 'user_banned') return new ApiError('Esta conta está bloqueada', err.code);
+   if (err.status === 429 || err.code?.startsWith('over_')) {
+     return new ApiError('Muitas tentativas seguidas. Aguarde um pouco e tente de novo.', err.code ?? null);
+   }
+   if (err.name === 'AuthSessionMissingError' || err.code === 'session_not_found' || err.code === 'session_expired') {
+     return new ApiError('Sua sessão expirou. Entre novamente.', err.code ?? null);
+   }
+   return new ApiError(err.message || 'Erro inesperado', err.code ?? null);
+ }
+ 
+-/** Ends the Supabase session; supabase-js removes the local copy even when the server is unreachable. */
++/**
++ * Ends the session on this device only. `scope: 'global'` (the supabase-js default) would revoke the
++ * organizer's refresh tokens everywhere: the master laptop must not log out because a phone did.
++ * supabase-js removes the local copy even when the logout request itself fails.
++ */
+ async function dropSession(): Promise<void> {
+   try {
+-    await supabase.auth.signOut();
++    await supabase.auth.signOut({ scope: 'local' });
+   } catch {
+     // Nothing left to do: the session is gone locally either way.
+   }
+ }
+ 
+ export function SessionProvider({ children }: { children: ReactNode }) {
+   const queryClient = useQueryClient();
+   const [state, setState] = useState<SessionState>({ status: 'loading', me: null });
++  // Read by the auth event listener, which outlives any single render.
++  const statusRef = useRef<SessionStatus>('loading');
++  const apply = useCallback((next: SessionState) => {
++    statusRef.current = next.status;
++    setState(next);
++  }, []);
++  // Set while signIn runs, so its own SIGNED_IN event does not load the profile a second time.
++  const signingIn = useRef(false);
+ 
+   // Being signed in is not enough: only accounts with an `organizers` row get in. For any other
+   // account admin_me answers 42501 — sign it out and let the UI explain why.
+   const loadMe = useCallback(async () => {
+     try {
+       const me = await api.admin.me();
+-      setState({ status: 'organizer', me });
++      apply({ status: 'organizer', me });
+     } catch (e) {
+       if (e instanceof ApiError && e.code === '42501') {
+-        setState(FORBIDDEN);
++        apply(FORBIDDEN);
+         await dropSession();
+         return;
+       }
+       throw e;
+     }
+-  }, []);
++  }, [apply]);
+ 
+   useEffect(() => {
+     let cancelled = false;
++    let running = false;
++    let failures = 0;
+     let retry: ReturnType<typeof setTimeout> | undefined;
+ 
++    // Settles the status from the stored session. Only a definite answer leaves "loading": no
++    // session → anon; the server refusing the JWT → drop it on this device → anon; 42501 →
++    // forbidden (in loadMe). Anything else — offline, an expired token that cannot be refreshed
++    // yet, a 5xx, a captive portal — keeps the session and tries again with backoff: a network
++    // hiccup on race day must never log the organizer out.
+     const restore = async () => {
++      if (cancelled || running) return;
++      running = true;
++      clearTimeout(retry);
++      let again = false;
+       try {
+-        const { data } = await supabase.auth.getSession();
++        const { data, error } = await supabase.auth.getSession();
+         if (cancelled) return;
+-        if (!data.session) {
+-          setState(ANON);
+-          return;
+-        }
+-        await loadMe();
++        if (data.session) await loadMe();
++        // After a transient refresh failure supabase-js keeps the session in storage; after any
++        // other one (refresh token revoked) it has already removed it.
++        else if (error && isTransientAuthError(error)) again = true;
++        else apply(ANON);
+       } catch (e) {
+         if (cancelled) return;
+-        if (e instanceof ApiError && e.code === 'network') {
+-          // Offline right now: keep "loading" rather than pretend the organizer is logged out.
+-          retry = setTimeout(() => void restore(), RESTORE_RETRY_MS);
+-          return;
++        if (isRejectedSession(e)) {
++          await dropSession();
++          if (!cancelled) apply(ANON);
++        } else {
++          again = true;
+         }
+-        // The stored session is unusable (revoked, invalid JWT…): start over from the login page.
+-        await dropSession();
+-        setState(ANON);
++      } finally {
++        running = false;
++      }
++      if (again && !cancelled) {
++        retry = setTimeout(() => void restore(), Math.min(RESTORE_RETRY_MS * 2 ** failures, RESTORE_RETRY_MAX_MS));
++        failures += 1;
++      } else {
++        failures = 0;
+       }
+     };
+     void restore();
+ 
+-    // Sessions can also end outside this provider (refresh token revoked, sign-out in another tab).
+     const { data } = supabase.auth.onAuthStateChange((event) => {
+-      if (event !== 'SIGNED_OUT') return;
+-      setState((s) => (s.status === 'forbidden' ? s : ANON));
+-      queryClient.clear();
++      if (event === 'SIGNED_OUT') {
++        // Sessions also end outside this provider (refresh token revoked, sign-out in another tab).
++        clearTimeout(retry);
++        if (statusRef.current !== 'forbidden') apply(ANON);
++        queryClient.clear();
++      } else if (
++        (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') &&
++        !signingIn.current &&
++        (statusRef.current === 'loading' || statusRef.current === 'anon')
++      ) {
++        // The token was refreshed once the network came back, or another tab signed in.
++        // Deferred: supabase-js runs these callbacks while holding its auth lock.
++        setTimeout(() => void restore(), 0);
++      }
+     });
+ 
+     return () => {
+       cancelled = true;
+       clearTimeout(retry);
+       data.subscription.unsubscribe();
+     };
+-  }, [loadMe, queryClient]);
++  }, [apply, loadMe, queryClient]);
+ 
+   const signIn = useCallback(
+     async (email: string, password: string) => {
+-      let error: unknown;
++      signingIn.current = true;
+       try {
+-        ({ error } = await supabase.auth.signInWithPassword({ email: email.trim(), password }));
+-      } catch (e) {
+-        error = e;
++        let error: unknown;
++        try {
++          ({ error } = await supabase.auth.signInWithPassword({ email: email.trim(), password }));
++        } catch (e) {
++          error = e;
++        }
++        if (error) throw authError(error);
++        await loadMe();
++      } finally {
++        signingIn.current = false;
+       }
+-      if (error) throw authError(error);
+-      await loadMe();
+     },
+     [loadMe],
+   );
+ 
+   // Cached admin data (athletes' contacts included) must not outlive the session on this device.
+   const signOut = useCallback(async () => {
+     await dropSession();
+-    setState(ANON);
++    apply(ANON);
+     queryClient.clear();
+-  }, [queryClient]);
++  }, [apply, queryClient]);
+ 
+   const changePassword = useCallback(
+     async (pw: string) => {
+       let error: unknown;
+       try {
+         ({ error } = await supabase.auth.updateUser({ password: pw }));
+       } catch (e) {
+         error = e;
+       }
+       if (error) throw authError(error);
+diff --git a/src/features/events/eventShell.test.tsx b/src/features/events/eventShell.test.tsx
+index 4d60e90..bade830 100644
+--- a/src/features/events/eventShell.test.tsx
++++ b/src/features/events/eventShell.test.tsx
+@@ -22,20 +22,51 @@ const mocks = vi.hoisted(() => ({
+   getEvent: vi.fn<(id: string) => Promise<EventAggregate>>(),
+   live: vi.fn<(id: string, since: string | null) => Promise<LiveDelta>>(),
+ }));
+ vi.mock('../../lib/supabase', () => ({ supabase: {} }));
+ vi.mock('../../lib/api', async (importOriginal) => ({
+   ...(await importOriginal<typeof import('../../lib/api')>()),
+   api: { serverTime: mocks.serverTime, admin: { getEvent: mocks.getEvent, live: mocks.live } },
+ }));
+ const { getEvent, live } = mocks;
+ 
++// Ruling 36: these tests check routing and outlet wiring, not the pages themselves, so each page
++// the routes lead to is replaced by a marker that later screen tasks cannot change.
++const marker = vi.hoisted(() => async (id: string) => {
++  const { createElement } = await import('react');
++  return { default: () => createElement('div', { 'data-testid': `page-${id}` }) };
++});
++vi.mock('../public/PublicHome', () => marker('public-home'));
++vi.mock('./EventsPage', () => marker('events'));
++vi.mock('../races/RacesTab', () => marker('races'));
++vi.mock('../entries/EntriesTab', () => marker('entries'));
++vi.mock('../timing/TimingTab', () => marker('timing'));
++vi.mock('../review/ReviewTab', () => marker('review'));
++vi.mock('../results/ResultsTab', () => marker('results'));
++vi.mock('../athletes/AthletesPage', () => marker('athletes'));
++vi.mock('../athletes/AthleteProfilePage', () => marker('athlete-profile'));
++vi.mock('../help/HelpPage', () => marker('help'));
++vi.mock('../settings/SettingsPage', () => marker('settings'));
++vi.mock('../timekeeper/TimekeeperPage', () => marker('timekeeper'));
++vi.mock('../public/PublicEventPage', () => marker('public-event'));
++vi.mock('../public/PublicAthletePage', () => marker('public-athlete'));
++// The Geral marker also proves the tabs render inside the event's context.
++vi.mock('./EventGeneralTab', async () => {
++  const { createElement } = await import('react');
++  const { useEventContext } = await import('./EventContext');
++  return {
++    default: function EventGeneralMarker() {
++      return createElement('div', { 'data-testid': 'page-event-general' }, useEventContext().agg.event.name);
++    },
++  };
++});
++
+ function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
+   return {
+     event: makeEvent({ id: 'ev1', name: 'Copa EBC' }), races: [makeRace()], waves: [makeWave()], entries: [makeEntry()],
+     athletes: [makeAthlete()], timekeepers: [makeTimekeeper()], marks: [], resolutions: [], results: [],
+     version: 1, server_now: iso(T0 + 60 * SEC), ...p,
+   };
+ }
+ function delta(): LiveDelta {
+   return { server_now: iso(T0 + 62 * SEC), version: 1, marks: [], resolutions: [], waves: [makeWave()] };
+ }
+@@ -79,34 +110,34 @@ beforeEach(() => {
+   mocks.serverTime.mockImplementation(async () => Date.now());
+   live.mockResolvedValue(delta());
+ });
+ afterEach(() => {
+   vi.useRealTimers();
+ });
+ 
+ describe('routes', () => {
+   it('/ shows the public home to visitors', () => {
+     renderApp('/', fakeSession());
+-    expect(screen.getByText('PublicHome')).toBeInTheDocument();
++    expect(screen.getByTestId('page-public-home')).toBeInTheDocument();
+   });
+ 
+   it('/ waits for the session before choosing', () => {
+     renderApp('/', fakeSession({ status: 'loading' }));
+     expect(screen.getByRole('status', { name: 'Carregando' })).toBeInTheDocument();
+-    expect(screen.queryByText('PublicHome')).not.toBeInTheDocument();
++    expect(screen.queryByTestId('page-public-home')).not.toBeInTheDocument();
+   });
+ 
+   it('/ sends organizers to /eventos inside the organizer layout', async () => {
+     const session = organizer();
+     const router = renderApp('/', session);
+ 
+-    expect(await screen.findByText('EventsPage')).toBeInTheDocument();
++    expect(await screen.findByTestId('page-events')).toBeInTheDocument();
+     expect(router.state.location.pathname).toBe('/eventos');
+     await userEvent.click(screen.getByTestId('logout'));
+     expect(session.signOut).toHaveBeenCalledTimes(1);
+   });
+ 
+   it('/entrar renders the login page', () => {
+     renderApp('/entrar', fakeSession());
+     expect(screen.getByTestId('login-email')).toBeInTheDocument();
+   });
+ 
+@@ -118,37 +149,38 @@ describe('routes', () => {
+   it('admin routes send visitors to /entrar, remembering where they were going', async () => {
+     const router = renderApp('/atletas/a1', fakeSession());
+     expect(await screen.findByTestId('login-email')).toBeInTheDocument();
+     expect(router.state.location.pathname).toBe('/entrar');
+     expect(router.state.location.state).toEqual({ from: '/atletas/a1' });
+   });
+ 
+   it('admin routes explain when the account is not an organizer', () => {
+     renderApp('/eventos', fakeSession({ status: 'forbidden' }));
+     expect(screen.getByText('Esta conta não tem acesso de organização')).toBeInTheDocument();
+-    expect(screen.queryByText('EventsPage')).not.toBeInTheDocument();
++    expect(screen.queryByTestId('page-events')).not.toBeInTheDocument();
+   });
+ 
+   it.each([
+-    ['/eventos', 'EventsPage'], ['/atletas', 'AthletesPage'], ['/atletas/a1', 'AthleteProfilePage'],
+-    ['/ajuda', 'HelpPage'], ['/config', 'SettingsPage'],
+-  ])('%s renders %s for organizers, inside the layout', (path, text) => {
++    ['/eventos', 'events'], ['/atletas', 'athletes'], ['/atletas/a1', 'athlete-profile'],
++    ['/ajuda', 'help'], ['/config', 'settings'],
++  ])('%s renders the %s page for organizers, inside the layout', (path, page) => {
+     renderApp(path, organizer());
+-    expect(screen.getByText(text)).toBeInTheDocument();
++    expect(screen.getByTestId(`page-${page}`)).toBeInTheDocument();
+     expect(screen.getByRole('navigation', { name: 'Principal' })).toBeInTheDocument();
+   });
+ 
+   it.each([
+-    ['/c/tok123', 'TimekeeperPage'], ['/p/copa-ebc', 'PublicEventPage'], ['/atleta/a1', 'PublicAthletePage'],
+-  ])('%s renders %s without a session', (path, text) => {
++    ['/c/tok123', 'timekeeper'], ['/p/copa-ebc', 'public-event'], ['/atleta/a1', 'public-athlete'],
++  ])('%s renders the %s page without a session', (path, page) => {
+     renderApp(path, fakeSession());
+-    expect(screen.getByText(text)).toBeInTheDocument();
++    expect(screen.getByTestId(`page-${page}`)).toBeInTheDocument();
++    expect(screen.queryByRole('navigation', { name: 'Principal' })).not.toBeInTheDocument();
+   });
+ 
+   it('unknown paths render NotFound', () => {
+     renderApp('/nada/aqui', fakeSession());
+     expect(screen.getByText('Página não encontrada')).toBeInTheDocument();
+   });
+ });
+ 
+ describe('EventLayout', () => {
+   it('opens the Geral tab and shows the event header, the tabs and the review badge', async () => {
+@@ -157,66 +189,67 @@ describe('EventLayout', () => {
+       marks: [
+         // Two timekeepers 10 s apart on leg 0: divergence (warning); the entry is still
+         // on course: not_finished (info, not counted); a mark left without athlete: unassigned (warning).
+         makeMark({ id: 'x1', at, timekeeper_id: 'tk1' }),
+         makeMark({ id: 'x2', at: at + 10 * SEC, timekeeper_id: 'tk2' }),
+         makeMark({ id: 'x3', at: Date.now() - 5 * MIN, entry_id: null, leg_index: null }),
+       ],
+     }));
+     const router = renderApp('/eventos/ev1', organizer());
+ 
+-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++    expect(await screen.findByTestId('page-event-general')).toHaveTextContent('Copa EBC');
+     expect(router.state.location.pathname).toBe('/eventos/ev1/geral');
+     expect(getEvent).toHaveBeenCalledWith('ev1');
+     expect(screen.getByRole('heading', { name: 'Copa EBC' })).toBeInTheDocument();
+     expect(screen.getByText('11/10/2026 · Vila Velha')).toBeInTheDocument();
+     expect(screen.getByText('Ao vivo')).toBeInTheDocument();
+     for (const [id, label] of TABS) {
+       expect(screen.getByTestId(`tab-${id}`)).toHaveAttribute('href', `/eventos/ev1/${id}`);
+       expect(screen.getByTestId(`tab-${id}`)).toHaveTextContent(id === 'revisao' ? 'Revisão2' : label);
+     }
+     expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-warning');
+   });
+ 
+   it('colors the review badge as an error when a crossing is missing', async () => {
+     // Leg 1 marked but leg 0 never was: missing_crossing (error).
+     getEvent.mockResolvedValue(makeAgg({ marks: [makeMark({ id: 'y1', at: T0 + 20 * MIN, leg_index: 1 })] }));
+     renderApp('/eventos/ev1/geral', organizer());
+ 
+-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++    expect(await screen.findByTestId('page-event-general')).toBeInTheDocument();
+     expect(screen.getByTestId('tab-revisao')).toHaveTextContent('Revisão1');
+     expect(screen.getByTestId('tab-revisao').querySelector('span')).toHaveClass('text-danger');
+   });
+ 
+   it('shows no review badge when nothing is pending', async () => {
+     getEvent.mockResolvedValue(makeAgg());
+     renderApp('/eventos/ev1/geral', organizer());
+ 
+-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++    expect(await screen.findByTestId('page-event-general')).toBeInTheDocument();
+     expect(screen.getByTestId('tab-revisao')).toHaveTextContent(/^Revisão$/);
+   });
+ 
+   it.each([
+-    ['provas', 'RacesTab'], ['inscricoes', 'EntriesTab'], ['cronometragem', 'TimingTab'],
+-    ['revisao', 'ReviewTab'], ['resultados', 'ResultsTab'],
+-  ])('renders the %s tab', async (tab, text) => {
++    ['provas', 'races'], ['inscricoes', 'entries'], ['cronometragem', 'timing'],
++    ['revisao', 'review'], ['resultados', 'results'],
++  ])('renders the %s tab (%s page) under the event header', async (tab, page) => {
+     getEvent.mockResolvedValue(makeAgg());
+     renderApp(`/eventos/ev1/${tab}`, organizer());
+-    expect(await screen.findByText(text)).toBeInTheDocument();
++    expect(await screen.findByTestId(`page-${page}`)).toBeInTheDocument();
++    expect(screen.getByRole('heading', { name: 'Copa EBC' })).toBeInTheDocument();
+   });
+ 
+   it('polls every 2 s only on the timing, review and results tabs', async () => {
+     vi.useFakeTimers();
+     getEvent.mockResolvedValue(makeAgg());
+     const router = renderApp('/eventos/ev1/geral', organizer());
+     await act(() => vi.advanceTimersByTimeAsync(5));
+-    expect(screen.getByText('EventGeneralTab')).toBeInTheDocument();
++    expect(screen.getByTestId('page-event-general')).toBeInTheDocument();
+ 
+     await act(() => vi.advanceTimersByTimeAsync(14_000));
+     expect(live).not.toHaveBeenCalled();
+     await act(() => vi.advanceTimersByTimeAsync(1_000));
+     expect(live).toHaveBeenCalledTimes(1);
+ 
+     let calls = 1;
+     for (const tab of ['cronometragem', 'revisao', 'resultados']) {
+       await act(() => router.navigate(`/eventos/ev1/${tab}`));
+       await act(() => vi.advanceTimersByTimeAsync(2_000));
+@@ -229,21 +262,21 @@ describe('EventLayout', () => {
+     expect(getEvent).toHaveBeenCalledTimes(1);
+   });
+ 
+   it('shows the load error and retries', async () => {
+     getEvent.mockRejectedValueOnce(new Error('Evento não encontrado')).mockResolvedValue(makeAgg());
+     renderApp('/eventos/ev1/geral', organizer());
+ 
+     expect(await screen.findByText('Evento não encontrado')).toBeInTheDocument();
+     expect(screen.getByRole('link', { name: 'Voltar para eventos' })).toHaveAttribute('href', '/eventos');
+     await userEvent.click(screen.getByRole('button', { name: 'Tentar novamente' }));
+-    expect(await screen.findByText('EventGeneralTab')).toBeInTheDocument();
++    expect(await screen.findByTestId('page-event-general')).toBeInTheDocument();
+   });
+ });
+ 
+ describe('EventProvider', () => {
+   let ctx: EventContextValue;
+   function Probe() {
+     ctx = useEventContext();
+     return <p>{ctx.timing.issues.map((i) => i.type).join(',') || 'sem pendências'}</p>;
+   }
+   const refresh = vi.fn(async () => {});
+diff --git a/src/hooks/useEventData.test.tsx b/src/hooks/useEventData.test.tsx
+index 0415cba..0affbda 100644
+--- a/src/hooks/useEventData.test.tsx
++++ b/src/hooks/useEventData.test.tsx
+@@ -41,20 +41,21 @@ const cached = () => client.getQueryData<EventAggregate>(['event', 'ev1']);
+ const settle = () => act(() => vi.advanceTimersByTimeAsync(5));
+ const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+ 
+ let hidden = false;
+ beforeEach(() => {
+   vi.useFakeTimers();
+   getEvent.mockReset();
+   live.mockReset();
+   hidden = false;
+   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
++  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') });
+   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+ });
+ afterEach(() => {
+   client.clear();
+   vi.clearAllTimers();
+   vi.useRealTimers();
+ });
+ 
+ describe('useEventData', () => {
+   it('loads the aggregate under the query key [event, id]', async () => {
+@@ -223,20 +224,80 @@ describe('useEventData', () => {
+     await act(async () => slow.resolve(delta({ resolutions: [], marks: [makeMark({ id: 'mz', at: T0 })] })));
+ 
+     expect(cached()?.resolutions).toEqual([res]);
+     expect(cached()?.marks.map((m) => m.id)).toEqual(['mz']);
+     // The next poll brings the server's view of the lists again.
+     live.mockResolvedValue(delta({ resolutions: [] }));
+     await advance(2_000);
+     expect(cached()?.resolutions).toEqual([]);
+   });
+ 
++  it('refetches the aggregate when a mark comes from a timekeeper it does not know yet', async () => {
++    const tk9 = makeTimekeeper({ id: 'tk9', name: 'Bruno' });
++    getEvent
++      .mockResolvedValueOnce(makeAgg())
++      .mockResolvedValueOnce(makeAgg({ timekeepers: [makeTimekeeper(), tk9], server_now: iso(T0 + 63 * SEC) }));
++    live
++      // Known timekeeper and an organizer mark (no timekeeper): nothing to refetch.
++      .mockResolvedValueOnce(delta({ marks: [makeMark({ id: 'k1', at: T0 }), makeMark({ id: 'o1', at: T0, timekeeper_id: null })] }))
++      .mockResolvedValueOnce(delta({ marks: [makeMark({ id: 'n1', at: T0 + 61 * SEC, timekeeper_id: 'tk9' })] }))
++      .mockResolvedValue(delta());
++    renderEventData(true);
++    await settle();
++
++    await advance(2_000);
++    expect(getEvent).toHaveBeenCalledTimes(1);
++    await advance(2_000);
++    expect(getEvent).toHaveBeenCalledTimes(2);
++    await settle();
++    expect(cached()?.timekeepers.map((t) => t.id)).toEqual(['tk1', 'tk9']);
++    await advance(2_000);
++    expect(getEvent).toHaveBeenCalledTimes(2);
++  });
++
++  it('refetches the whole aggregate every 30 s on live tabs, while visible', async () => {
++    // Server answers carry the (fake) current time, as the real server_now does.
++    vi.setSystemTime(T0 + 60 * SEC);
++    const tk9 = makeTimekeeper({ id: 'tk9', name: 'Bruno' });
++    getEvent
++      .mockResolvedValueOnce(makeAgg())
++      .mockImplementation(async () => makeAgg({ timekeepers: [makeTimekeeper(), tk9], server_now: iso(Date.now()) }));
++    live.mockImplementation(async () => delta({ server_now: iso(Date.now()) }));
++    renderEventData(true);
++    await settle();
++
++    await advance(29_990);
++    expect(getEvent).toHaveBeenCalledTimes(1);
++    await advance(10);
++    expect(getEvent).toHaveBeenCalledTimes(2);
++    // The delta polls continue from the refetch without undoing its lists.
++    await advance(2_000);
++    expect(live).toHaveBeenLastCalledWith('ev1', iso(T0 + 80 * SEC));
++    await advance(2_000);
++    expect(cached()?.timekeepers.map((t) => t.id)).toEqual(['tk1', 'tk9']);
++
++    hidden = true;
++    await advance(30_000);
++    expect(getEvent).toHaveBeenCalledTimes(2);
++  });
++
++  it('does not refetch the whole aggregate on idle tabs', async () => {
++    getEvent.mockResolvedValue(makeAgg());
++    live.mockResolvedValue(delta());
++    renderEventData(false);
++    await settle();
++
++    await advance(60_000);
++
++    expect(getEvent).toHaveBeenCalledTimes(1);
++  });
++
+   it('refresh() refetches the aggregate', async () => {
+     getEvent.mockResolvedValueOnce(makeAgg()).mockResolvedValueOnce(makeAgg({ version: 3 }));
+     const { result } = renderEventData(false);
+     await settle();
+ 
+     await act(() => result.current.refresh());
+ 
+     expect(getEvent).toHaveBeenCalledTimes(2);
+     expect(cached()?.version).toBe(3);
+     await settle();
+diff --git a/src/hooks/useEventData.ts b/src/hooks/useEventData.ts
+index 392415e..917f44a 100644
+--- a/src/hooks/useEventData.ts
++++ b/src/hooks/useEventData.ts
+@@ -2,49 +2,60 @@ import { useCallback, useEffect, useRef } from 'react';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { api } from '../lib/api';
+ import { mergeById } from '../domain/eventModel';
+ import type { EventAggregate, LiveDelta } from '../lib/types';
+ 
+ /** Poll cadence on the live tabs (timing, review, results) and elsewhere (spec §3). */
+ const LIVE_POLL_MS = 2_000;
+ const IDLE_POLL_MS = 15_000;
+ /** Mark deltas are requested from the last server time minus this overlap (ids deduplicate). */
+ const OVERLAP_MS = 10_000;
++/** Live tabs also refetch the whole aggregate this often: admin_live carries no timekeepers, and
++ * their registrations / last_seen_at do not bump the event version (Ruling 33). */
++const LIVE_FULL_REFRESH_MS = 30_000;
+ 
+ export interface EventData {
+   agg: EventAggregate | undefined;
+   isLoading: boolean;
+   error: Error | null;
+   refresh(): Promise<void>;
+   patchAgg(fn: (a: EventAggregate) => EventAggregate): void;
+ }
+ 
+ /** Where the mark delta stream stands: `serverNow` of the last applied delta, valid only while
+  * the cached aggregate is still the one fetched with `aggServerNow`. */
+ interface DeltaCursor {
+   eventId: string;
+   aggServerNow: string;
+   serverNow: string;
+ }
+ 
++/** A mark from a timekeeper the aggregate does not list yet (registered after it was fetched). */
++function hasUnknownTimekeeper(agg: EventAggregate, delta: LiveDelta): boolean {
++  if (!delta.marks.some((m) => m.timekeeper_id !== null)) return false;
++  const known = new Set(agg.timekeepers.map((t) => t.id));
++  return delta.marks.some((m) => m.timekeeper_id !== null && !known.has(m.timekeeper_id));
++}
++
+ function applyDelta(agg: EventAggregate, delta: LiveDelta, replaceLists: boolean): EventAggregate {
+   const marks = mergeById(agg.marks, delta.marks);
+   // Live endpoints return every resolution and wave of the event, so these are replaced
+   // wholesale (which also drops deleted resolutions).
+   return replaceLists ? { ...agg, marks, resolutions: delta.resolutions, waves: delta.waves } : { ...agg, marks };
+ }
+ 
+ /**
+  * The full event aggregate (TanStack query `['event', eventId]`) kept fresh by polling
+  * `admin_live`: marks are merged by id, resolutions and waves replaced, and the aggregate is
+- * refetched when the server's event version moves (structural changes). Polling pauses while
+- * the page is hidden and catches up as soon as it is visible again.
++ * refetched when the server's event version moves (structural changes) or a mark names a
++ * timekeeper it does not know; live tabs also refetch it every 30 s. Polling pauses while the page
++ * is hidden and catches up as soon as it is visible again.
+  */
+ export function useEventData(eventId: string, opts: { live: boolean }): EventData {
+   const queryClient = useQueryClient();
+   const query = useQuery({
+     queryKey: ['event', eventId],
+     queryFn: () => api.admin.getEvent(eventId),
+   });
+ 
+   const refresh = useCallback(
+     () => queryClient.refetchQueries({ queryKey: ['event', eventId], exact: true }),
+@@ -98,23 +109,22 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
+         try {
+           const delta = await api.admin.live(eventId, since);
+           const current = queryClient.getQueryData<EventAggregate>(key);
+           if (!cancelled && current) {
+             // A full refetch that landed meanwhile may predate this delta: keep the lists it
+             // brought and re-read marks from its server time on the next poll.
+             const refetched = current.server_now !== before.server_now;
+             const replaceLists = !refetched && patches.current === patchesBefore;
+             queryClient.setQueryData<EventAggregate>(key, applyDelta(current, delta, replaceLists));
+             if (!refetched) cursor.current = { eventId, aggServerNow: current.server_now, serverNow: delta.server_now };
+-            if (delta.version !== current.version && queryClient.isFetching({ queryKey: key, exact: true }) === 0) {
+-              void refresh();
+-            }
++            const stale = delta.version !== current.version || hasUnknownTimekeeper(current, delta);
++            if (stale && queryClient.isFetching({ queryKey: key, exact: true }) === 0) void refresh();
+           }
+         } catch {
+           // Offline or a transient failure: keep what we have and try again on the next tick.
+         } finally {
+           inFlight.current = false;
+         }
+       }
+       schedule();
+     };
+ 
+@@ -124,12 +134,24 @@ export function useEventData(eventId: string, opts: { live: boolean }): EventDat
+ 
+     schedule();
+     document.addEventListener('visibilitychange', onVisibilityChange);
+     return () => {
+       cancelled = true;
+       clearTimeout(timer);
+       document.removeEventListener('visibilitychange', onVisibilityChange);
+     };
+   }, [loaded, eventId, intervalMs, queryClient, refresh]);
+ 
++  // Periodic full refetch on live tabs. Not TanStack's `refetchInterval`: its timer restarts on
++  // every cache update, so the 2 s delta poll would keep postponing it forever. A delta poll that
++  // overlaps this refetch is reconciled by the `refetched` check above.
++  const live = opts.live;
++  useEffect(() => {
++    if (!loaded || !live) return;
++    const timer = setInterval(() => {
++      if (!document.hidden && queryClient.isFetching({ queryKey: ['event', eventId], exact: true }) === 0) void refresh();
++    }, LIVE_FULL_REFRESH_MS);
++    return () => clearInterval(timer);
++  }, [loaded, live, eventId, queryClient, refresh]);
++
+   return { agg: query.data, isLoading: query.isLoading, error: query.error, refresh, patchAgg };
+ }
+diff --git a/src/lib/api.test.ts b/src/lib/api.test.ts
+index 155da96..7d6aa3f 100644
+--- a/src/lib/api.test.ts
++++ b/src/lib/api.test.ts
+@@ -1,33 +1,47 @@
+-import { beforeEach, describe, expect, it, vi } from 'vitest';
+-import type { Mock } from 'vitest';
+-import { supabase } from './supabase';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { api, ApiError } from './api';
+ import type { EventRow, FinalizeRowInput, ImportRowInput, Leg, TkMarkInput } from './types';
+ 
+-vi.mock('./supabase', () => ({ supabase: { rpc: vi.fn() } }));
+-
+-type RpcMock = Mock<(fn: string, args?: Record<string, unknown>) => Promise<unknown>>;
+-const rpc = supabase.rpc as unknown as RpcMock;
++// supabase.rpc() returns a query builder: api.ts attaches its timeout signal with
++// .abortSignal() and awaits the builder. `answer` decides what the awaited builder yields.
++const sb = vi.hoisted(() => {
++  const answer = vi.fn<(fn: string, args: Record<string, unknown> | undefined, signal: AbortSignal) => Promise<unknown>>();
++  const rpc = vi.fn((fn: string, args?: Record<string, unknown>) => ({
++    abortSignal: (signal: AbortSignal) => answer(fn, args, signal),
++  }));
++  return { rpc, answer };
++});
++vi.mock('./supabase', () => ({ supabase: { rpc: sb.rpc } }));
++const { rpc, answer } = sb;
+ 
+ const ok = (data: unknown) => ({ data, error: null, status: 200 });
++/** What postgrest-js resolves with when fetch() is aborted. */
++const aborted = { data: null, error: { message: 'AbortError: signal is aborted without reason', code: '' }, status: 0 };
++/** A request the server never answers; like fetch(), it gives up when the signal aborts. */
++const hangUntilAborted = (_fn: string, _args: unknown, signal: AbortSignal) =>
++  new Promise<unknown>((resolve) => signal.addEventListener('abort', () => resolve(aborted)));
+ 
+ beforeEach(() => {
+-  rpc.mockReset();
+-  rpc.mockResolvedValue(ok(null));
++  rpc.mockClear();
++  answer.mockReset();
++  answer.mockResolvedValue(ok(null));
++});
++afterEach(() => {
++  vi.useRealTimers();
+ });
+ 
+ describe('api', () => {
+   it('saves an event through admin_save_event with the payload as p_event', async () => {
+     const e = { name: 'Copa EBC', date: '2026-10-11', location: 'Lago Paranoá', levels: ['Elite', 'Base'] };
+     const saved = { ...e, id: 'ev1' } as EventRow;
+-    rpc.mockResolvedValue(ok(saved));
++    answer.mockResolvedValue(ok(saved));
+ 
+     await expect(api.admin.saveEvent(e)).resolves.toEqual(saved);
+     expect(rpc.mock.calls).toEqual([['admin_save_event', { p_event: e }]]);
+   });
+ 
+   it('syncs timekeeper marks through tk_sync with every p_ parameter', async () => {
+     const m: TkMarkInput = {
+       id: 'm1', ts: '2026-10-11T11:00:05.300Z', device_ts: '2026-10-11T11:00:05.100Z', clock_offset_ms: 200,
+       clock_rtt_ms: 80, entry_id: null, leg_index: null, athlete_id: null, discarded: false,
+     };
+@@ -46,48 +60,102 @@ describe('api', () => {
+     await api.admin.setResolution('e', 1, 'manual', null, '2026-10-11T11:30:00.000Z', 'x');
+     expect(rpc.mock.calls).toEqual([
+       ['admin_set_resolution', {
+         p_entry_id: 'e', p_leg_index: 1, p_mode: 'manual', p_mark_id: null,
+         p_manual_ts: '2026-10-11T11:30:00.000Z', p_note: 'x',
+       }],
+     ]);
+   });
+ 
+   it('throws an ApiError carrying the server message and code', async () => {
+-    rpc.mockResolvedValue({ data: null, error: { message: 'Falhou', code: 'P0001' }, status: 400 });
++    answer.mockResolvedValue({ data: null, error: { message: 'Falhou', code: 'P0001' }, status: 400 });
+     const err = await api.admin.deleteEvent('ev1').catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(ApiError);
+     expect(err).toMatchObject({ message: 'Falhou', code: 'P0001' });
+   });
+ 
+   it('turns a failed fetch into a "no connection" ApiError', async () => {
+-    rpc.mockRejectedValue(new TypeError('Failed to fetch'));
++    answer.mockRejectedValue(new TypeError('Failed to fetch'));
+     const err = await api.admin.listEvents().catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(ApiError);
+     expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
+   });
+ 
+   it('treats the status-0 result supabase-js resolves with on a network failure as "no connection"', async () => {
+-    rpc.mockResolvedValue({ data: null, error: { message: 'TypeError: Failed to fetch', code: '' }, status: 0 });
++    answer.mockResolvedValue({ data: null, error: { message: 'TypeError: Failed to fetch', code: '' }, status: 0 });
+     const err = await api.tk.open('tok').catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(ApiError);
+     expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
+   });
+ 
++  it('keeps the HTTP status of a server error', async () => {
++    answer.mockResolvedValue({ data: null, error: { message: 'JWT expired', code: 'PGRST301' }, status: 401 });
++    const err = await api.admin.me().catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ApiError);
++    expect(err).toMatchObject({ message: 'JWT expired', code: 'PGRST301', status: 401 });
++  });
++
++  it('gives every RPC a 15 s timeout, after which it fails as "no connection"', async () => {
++    vi.useFakeTimers();
++    answer.mockImplementation(hangUntilAborted);
++    let settled: unknown = 'pending';
++    const call = api.admin.live('ev1', null).then(
++      () => 'resolved',
++      (e: unknown) => e,
++    ).then((r) => { settled = r; });
++
++    await vi.advanceTimersByTimeAsync(14_999);
++    expect(settled).toBe('pending');
++    await vi.advanceTimersByTimeAsync(1);
++    await call;
++    expect(settled).toBeInstanceOf(ApiError);
++    expect(settled).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
++  });
++
++  it('gives server_time only 5 s, so a stuck sample does not hold the clock sync', async () => {
++    vi.useFakeTimers();
++    answer.mockImplementation(hangUntilAborted);
++    const err = api.serverTime().catch((e: unknown) => e);
++
++    await vi.advanceTimersByTimeAsync(5_000);
++
++    await expect(err).resolves.toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
++  });
++
++  it('also maps an abort that rejects (instead of resolving) to "no connection"', async () => {
++    vi.useFakeTimers();
++    answer.mockImplementation((_fn, _args, signal) => new Promise((_resolve, reject) => {
++      signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
++    }));
++    const err = api.tk.sync('t', 'k', 's', [], null).catch((e: unknown) => e);
++
++    await vi.advanceTimersByTimeAsync(15_000);
++
++    await expect(err).resolves.toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
++  });
++
++  it('clears the timeout once the server answers', async () => {
++    vi.useFakeTimers();
++    await api.admin.listEvents();
++    expect(vi.getTimerCount()).toBe(0);
++    expect(answer.mock.calls[0][2]).toBeInstanceOf(AbortSignal);
++    expect(answer.mock.calls[0][2].aborted).toBe(false);
++  });
++
+   it('returns the server clock as epoch milliseconds', async () => {
+-    rpc.mockResolvedValue(ok(1790000000000));
++    answer.mockResolvedValue(ok(1790000000000));
+     await expect(api.serverTime()).resolves.toBe(1790000000000);
+     expect(rpc.mock.calls).toEqual([['server_time']]);
+   });
+ 
+   it('rejects a server clock that is not a number instead of skewing the synced clock', async () => {
+-    rpc.mockResolvedValue(ok(null));
++    answer.mockResolvedValue(ok(null));
+     await expect(api.serverTime()).rejects.toBeInstanceOf(ApiError);
+   });
+ 
+   const legs: Leg[] = [{ modality: 'run', label: 'Corrida', distance_m: 5000 }];
+   const race = { event_id: 'ev1', name: '5 km', legs, waves: [{ name: 'Largada geral' }] };
+   const athlete = { name: 'Ana Souza', sex: 'F' as const, birth_date: '1990-06-15' };
+   const entry = { race_id: 'r1', bib: null, members: [{ athlete_id: 'a1', legs: [0] }] };
+   const rows: ImportRowInput[] = [{
+     name: 'Ana Souza', sex: 'F', birth_date: null, email: null, phone: null, city: null, team_club: null, race_name: null,
+   }];
+diff --git a/src/lib/api.ts b/src/lib/api.ts
+index 93e1793..38cf1f9 100644
+--- a/src/lib/api.ts
++++ b/src/lib/api.ts
+@@ -1,56 +1,74 @@
+ import { supabase } from './supabase';
+ import type {
+   AdminMe, AthleteProfile, AthleteRow, EntryRow, EntryStatus, EventAggregate, EventRow, EventSummary,
+   FinalizeRowInput, ImportResult, ImportRowInput, Leg, LiveDelta, MarkRow, OrganizerRow, PubEventListItem,
+   PubEventPayload, RaceRow, ResolutionMode, ResolutionRow, Sex, TimekeeperRow, TkMarkInput, TkRegistration,
+   TkSession, TkSyncResult, WaveRow,
+ } from './types';
+ 
+ /** Every `api` failure: the pt-BR message to show plus the Postgres/PostgREST error code
+- * (`P0001` validation, `42501` permission, …) or `'network'` when the server was unreachable. */
++ * (`P0001` validation, `42501` permission, `PGRST301` rejected JWT, …) or `'network'` when the
++ * server was unreachable or did not answer in time. `status` is the HTTP status, when there was one. */
+ export class ApiError extends Error {
+   code: string | null;
++  status: number | null;
+ 
+-  constructor(message: string, code: string | null = null) {
++  constructor(message: string, code: string | null = null, status: number | null = null) {
+     super(message);
+     this.name = 'ApiError';
+     this.code = code;
++    this.status = status;
+   }
+ }
+ 
+ const NETWORK_MESSAGE = 'Sem conexão com o servidor';
++/** A request hung on a bad mobile connection must not hold single-flight loops (sync, polls) forever. */
++const RPC_TIMEOUT_MS = 15_000;
++/** Clock samples are only useful with a short round trip; the next one comes soon anyway. */
++const SERVER_TIME_TIMEOUT_MS = 5_000;
+ 
+ interface RpcResult {
+   data: unknown;
+   error: { message?: string; code?: string | null } | null;
+   status?: number;
+ }
+ 
+ function thrownToApiError(e: unknown): ApiError {
+   if (e instanceof ApiError) return e;
+-  // fetch() rejects with a TypeError when the network is down, DNS fails or CORS blocks the call.
+-  if (e instanceof TypeError || (e instanceof Error && e.name === 'FetchError')) return new ApiError(NETWORK_MESSAGE, 'network');
++  const name = typeof e === 'object' && e !== null ? (e as { name?: unknown }).name : undefined;
++  // fetch() rejects with a TypeError when the network is down, DNS fails or CORS blocks the call,
++  // and with an AbortError when our timeout aborts it.
++  if (e instanceof TypeError || name === 'FetchError' || name === 'AbortError' || name === 'TimeoutError') {
++    return new ApiError(NETWORK_MESSAGE, 'network');
++  }
+   return new ApiError(e instanceof Error && e.message ? e.message : 'Erro inesperado');
+ }
+ 
+-async function call<T>(fn: string, args?: Record<string, unknown>): Promise<T> {
++async function call<T>(fn: string, args?: Record<string, unknown>, timeoutMs = RPC_TIMEOUT_MS): Promise<T> {
++  // AbortController + setTimeout rather than AbortSignal.timeout(): the latter is missing on
++  // Safari < 16 (older timekeeper phones) and its timer cannot be cleared once the answer arrives.
++  const timeout = new AbortController();
++  const timer = setTimeout(() => timeout.abort(), timeoutMs);
+   let res: RpcResult;
+   try {
+-    res = await (args === undefined ? supabase.rpc(fn) : supabase.rpc(fn, args));
++    const query = args === undefined ? supabase.rpc(fn) : supabase.rpc(fn, args);
++    res = await query.abortSignal(timeout.signal);
+   } catch (e) {
+     throw thrownToApiError(e);
++  } finally {
++    clearTimeout(timer);
+   }
+   if (res.error) {
+-    // postgrest-js does not reject on a failed fetch: it resolves with HTTP status 0 instead.
++    // postgrest-js does not reject on a failed or aborted fetch: it resolves with HTTP status 0.
+     if (res.status === 0) throw new ApiError(NETWORK_MESSAGE, 'network');
+-    throw new ApiError(res.error.message || 'Erro inesperado', res.error.code || null);
++    throw new ApiError(res.error.message || 'Erro inesperado', res.error.code || null, res.status ?? null);
+   }
+   return res.data as T;
+ }
+ 
+ async function callVoid(fn: string, args?: Record<string, unknown>): Promise<void> {
+   await call<unknown>(fn, args);
+ }
+ 
+ interface Api {
+   serverTime(): Promise<number>;
+@@ -99,21 +117,21 @@ interface Api {
+     event(slug: string): Promise<PubEventPayload>;
+     live(slug: string, since: string | null): Promise<LiveDelta>;
+     athlete(id: string): Promise<AthleteProfile>;
+   };
+ }
+ 
+ /** Typed wrapper over the Postgres RPC functions — the app's only way to reach the database. */
+ export const api: Api = {
+   serverTime: async () => {
+     // bigint arrives as a JSON number from PostgREST; Number() also accepts a numeric string.
+-    const ms = Number(await call<number | string | null>('server_time'));
++    const ms = Number(await call<number | string | null>('server_time', undefined, SERVER_TIME_TIMEOUT_MS));
+     // Never hand a bogus value (null → 0) to the clock sync: every mark's time depends on it.
+     if (!Number.isFinite(ms) || ms <= 0) throw new ApiError('Resposta inválida do servidor');
+     return ms;
+   },
+   admin: {
+     me: () => call('admin_me'),
+     passwordChanged: () => callVoid('admin_password_changed'),
+     listOrganizers: () => call('admin_list_organizers'),
+     createOrganizer: (email, password, name) => call('admin_create_organizer', { p_email: email, p_password: password, p_name: name }),
+     deleteOrganizer: (userId) => callVoid('admin_delete_organizer', { p_user_id: userId }),
+diff --git a/src/lib/supabase.test.ts b/src/lib/supabase.test.ts
+new file mode 100644
+index 0000000..ca20970
+--- /dev/null
++++ b/src/lib/supabase.test.ts
+@@ -0,0 +1,23 @@
++import { describe, expect, it } from 'vitest';
++
++// Ruling 32: `.env.test` points Vitest at the local Supabase project, so any module that
++// (transitively) imports the real client loads without mocking it.
++describe('supabase client', () => {
++  it('can be imported in tests', async () => {
++    const { supabase } = await import('./supabase');
++    expect(typeof supabase.rpc).toBe('function');
++  });
++
++  it('keeps the session under ebc.auth, refreshes it and never reads it from the URL', async () => {
++    const { supabase } = await import('./supabase');
++    const auth = supabase.auth as unknown as {
++      storageKey: string; persistSession: boolean; autoRefreshToken: boolean; detectSessionInUrl: boolean;
++    };
++    expect({
++      storageKey: auth.storageKey,
++      persistSession: auth.persistSession,
++      autoRefreshToken: auth.autoRefreshToken,
++      detectSessionInUrl: auth.detectSessionInUrl,
++    }).toEqual({ storageKey: 'ebc.auth', persistSession: true, autoRefreshToken: true, detectSessionInUrl: false });
++  });
++});

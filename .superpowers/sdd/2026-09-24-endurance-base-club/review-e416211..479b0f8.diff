@@ -1,0 +1,744 @@
+# Review package: e416211..479b0f8 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+479b0f8 fix(entries): accessible member picker, shared duration format, import shortcut
+
+## Files changed
+ src/features/athletes/AthletesPage.tsx             |  21 +++-
+ src/features/athletes/athletes.test.tsx            |   9 ++
+ src/features/entries/BulkEntryDialog.tsx           |   2 +-
+ src/features/entries/EntriesTab.tsx                |  26 +++--
+ src/features/entries/EntryForm.tsx                 | 129 +++++++++++++++++----
+ src/features/entries/entries.test.tsx              |  80 ++++++++++++-
+ .../{entryForm.test.ts => entryFormState.test.ts}  |  14 +--
+ .../entries/{entryForm.ts => entryFormState.ts}    |   9 --
+ 8 files changed, 237 insertions(+), 53 deletions(-)
+
+## Diff
+diff --git a/src/features/athletes/AthletesPage.tsx b/src/features/athletes/AthletesPage.tsx
+index 231e5da..a390c37 100644
+--- a/src/features/athletes/AthletesPage.tsx
++++ b/src/features/athletes/AthletesPage.tsx
+@@ -1,12 +1,12 @@
+-import { useMemo, useState } from 'react';
+-import { Link } from 'react-router';
++import { useEffect, useMemo, useState } from 'react';
++import { Link, useSearchParams } from 'react-router';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { api, ApiError } from '../../lib/api';
+ import { Button, Card, EmptyState, Input, Modal, Select, Spinner, Table, useConfirm, useToast } from '../../components/ui';
+ import type { AthleteRow } from '../../lib/types';
+ import { AthleteForm } from './AthleteForm';
+ import { ImportDialog } from './ImportDialog';
+ import { ageToday } from './athleteHelpers';
+ 
+ function foldAccents(s: string): string {
+   return s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+@@ -22,21 +22,36 @@ type ModalState = 'new' | AthleteRow | null;
+ 
+ export default function AthletesPage() {
+   const queryClient = useQueryClient();
+   const toast = useToast();
+   const confirm = useConfirm();
+   const query = useQuery({ queryKey: ['athletes'], queryFn: () => api.admin.listAthletes() });
+ 
+   const [search, setSearch] = useState('');
+   const [sexFilter, setSexFilter] = useState('');
+   const [modal, setModal] = useState<ModalState>(null);
+-  const [importOpen, setImportOpen] = useState(false);
++  const [searchParams, setSearchParams] = useSearchParams();
++  // Ruling 51: the Entries tab's import shortcut links here with `?import=1` so the dialog opens
++  // right on arrival — a plain link used to land on this page needing a second click. Read once,
++  // lazily, from the URL the page was reached with (never re-triggers itself while the page stays
++  // mounted, e.g. after the organizer manually closes the dialog).
++  const [importOpen, setImportOpen] = useState(() => searchParams.get('import') === '1');
++
++  // Strips the one-shot `?import=1` from the URL right after consuming it (via `replace`, so it
++  // doesn't add a back-button entry), so reloading or navigating back never force-reopens it.
++  useEffect(() => {
++    if (!searchParams.has('import')) return;
++    const next = new URLSearchParams(searchParams);
++    next.delete('import');
++    setSearchParams(next, { replace: true });
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once, right after mount
++  }, []);
+ 
+   const athletes = query.data ?? [];
+   const filtered = useMemo(() => {
+     const term = foldAccents(search.trim());
+     return athletes.filter((a) => {
+       if (sexFilter && a.sex !== sexFilter) return false;
+       if (!term) return true;
+       const haystack = foldAccents(`${a.name} ${a.city ?? ''} ${a.team_club ?? ''}`);
+       return haystack.includes(term);
+     });
+diff --git a/src/features/athletes/athletes.test.tsx b/src/features/athletes/athletes.test.tsx
+index fc55a24..efae70b 100644
+--- a/src/features/athletes/athletes.test.tsx
++++ b/src/features/athletes/athletes.test.tsx
+@@ -378,20 +378,29 @@ describe('AthletesPage', () => {
+   });
+ 
+   it('opens the import dialog from the toolbar button', async () => {
+     const user = userEvent.setup();
+     renderWithProviders(<AthletesPage />);
+     await screen.findByText('Ana Souza');
+ 
+     await user.click(screen.getByTestId('import-athletes'));
+     expect(screen.getByTestId('import-file')).toBeInTheDocument();
+   });
++
++  // Ruling 51: the Entries tab's import shortcut navigates to /atletas?import=1 so it lands with
++  // the dialog already open, instead of a plain link that only reached the page.
++  it('opens the import dialog on arrival when asked via ?import=1 (Ruling 51)', async () => {
++    renderWithProviders(<AthletesPage />, { route: '/atletas?import=1' });
++    await screen.findByText('Ana Souza');
++
++    expect(screen.getByTestId('import-file')).toBeInTheDocument();
++  });
+ });
+ 
+ describe('AthleteProfilePage', () => {
+   it('renders the athlete header, the public profile link and the stats view', async () => {
+     athleteProfile.mockResolvedValue({
+       athlete: makeAthlete({ id: 'a1', name: 'Ana Souza', city: 'Vitória', team_club: 'EBC' }),
+       results: [],
+     });
+     renderWithProviders(<AthleteProfilePage />, { route: '/atletas/a1', path: '/atletas/:athleteId' });
+ 
+diff --git a/src/features/entries/BulkEntryDialog.tsx b/src/features/entries/BulkEntryDialog.tsx
+index 6c47b7e..255f728 100644
+--- a/src/features/entries/BulkEntryDialog.tsx
++++ b/src/features/entries/BulkEntryDialog.tsx
+@@ -1,17 +1,17 @@
+ import { useEffect, useState } from 'react';
+ import { useQuery } from '@tanstack/react-query';
+ import { Button, EmptyState, Input, Modal, Select, useToast } from '../../components/ui';
+ import { api, ApiError } from '../../lib/api';
+ import type { EntryRow } from '../../lib/types';
+ import { useEventContext } from '../events/EventContext';
+-import { foldAccents } from './entryForm';
++import { foldAccents } from './entryFormState';
+ 
+ export interface BulkEntryDialogProps {
+   open: boolean;
+   onClose(): void;
+   onCreated(entries: EntryRow[]): void;
+ }
+ 
+ /** "Inscrever vários": pick one individual race and check off any number of athletes, creating
+  * one entry per athlete in a single call. Team races have no meaningful "bulk entry" (each entry
+  * still needs a per-leg assignment), so only `team_size === 1` races are offered. */
+diff --git a/src/features/entries/EntriesTab.tsx b/src/features/entries/EntriesTab.tsx
+index 6926032..792699e 100644
+--- a/src/features/entries/EntriesTab.tsx
++++ b/src/features/entries/EntriesTab.tsx
+@@ -1,23 +1,24 @@
+ import { useMemo, useState } from 'react';
+-import { Link } from 'react-router';
++import { useNavigate } from 'react-router';
+ import { Badge, Button, Card, EmptyState, Input, Modal, Select, Table, Textarea, useConfirm, useToast } from '../../components/ui';
+ import { entryCategory, groupLabel } from '../../domain/categories';
+ import { entryDisplayName, entryWave, legAthleteId } from '../../domain/eventModel';
+ import type { EventIndex } from '../../domain/eventModel';
+ import { ENTRY_STATUS_LABEL } from '../../domain/labels';
+ import { api, ApiError } from '../../lib/api';
++import { formatDuration } from '../../lib/format';
+ import type { AthleteRow, EntryRow, EntryStatus, RaceRow } from '../../lib/types';
+ import { useEventContext } from '../events/EventContext';
+ import { BulkEntryDialog } from './BulkEntryDialog';
+ import { EntryForm } from './EntryForm';
+-import { ENTRY_STATUS_OPTIONS, foldAccents, formatPenaltyMs, parsePenaltyMs } from './entryForm';
++import { ENTRY_STATUS_OPTIONS, foldAccents, parsePenaltyMs } from './entryFormState';
+ 
+ type EditModalState = 'new' | EntryRow | null;
+ 
+ const STATUS_BADGE_TONE: Record<EntryStatus, 'neutral' | 'warning' | 'danger'> = {
+   ok: 'neutral',
+   dns: 'warning',
+   dnf: 'warning',
+   dsq: 'danger',
+ };
+ 
+@@ -37,21 +38,21 @@ interface EntryStatusModalProps {
+   onClose(): void;
+   onSaved(): void;
+ }
+ 
+ /** Status/penalidade modal — seeded once from the `entry` EntriesTab captured when the row action
+  * was clicked (Ruling 40): a background refresh of `agg` while this is open never overwrites what
+  * the organizer is choosing/typing here. */
+ function EntryStatusModal({ entry, onClose, onSaved }: EntryStatusModalProps) {
+   const { refresh } = useEventContext();
+   const [status, setStatus] = useState<EntryStatus>(entry.status);
+-  const [penaltyText, setPenaltyText] = useState(formatPenaltyMs(entry.penalty_ms));
++  const [penaltyText, setPenaltyText] = useState(formatDuration(entry.penalty_ms));
+   const [notes, setNotes] = useState(entry.notes);
+   const [penaltyError, setPenaltyError] = useState<string | undefined>();
+   const [formError, setFormError] = useState<string | null>(null);
+   const [saving, setSaving] = useState(false);
+ 
+   async function handleSave() {
+     const penaltyMs = parsePenaltyMs(penaltyText);
+     if (penaltyMs === null) {
+       setPenaltyError('Penalidade inválida — use m:ss (ex.: 1:30)');
+       return;
+@@ -118,20 +119,21 @@ function entrySearchHaystack(entry: EntryRow, index: EventIndex): string {
+   const memberNames = entry.members.map((m) => index.athletesById.get(m.athlete_id)?.name ?? '').join(' ');
+   return foldAccents(`${entryDisplayName(entry, index)} ${entry.bib} ${memberNames}`);
+ }
+ 
+ /** Aba Inscrições: lista/filtra as inscrições do evento e abre o `EntryForm` (nova/editar), o
+  * modal de status/penalidade e o `BulkEntryDialog` (inscrição em massa, provas individuais). */
+ export default function EntriesTab() {
+   const { agg, index, refresh } = useEventContext();
+   const toast = useToast();
+   const confirm = useConfirm();
++  const navigate = useNavigate();
+ 
+   const [raceFilter, setRaceFilter] = useState('');
+   const [search, setSearch] = useState('');
+   const [modal, setModal] = useState<EditModalState>(null);
+   const [statusModal, setStatusModal] = useState<EntryRow | null>(null);
+   const [bulkOpen, setBulkOpen] = useState(false);
+ 
+   const races = agg.races.slice().sort((a, b) => a.position - b.position);
+ 
+   const filtered = useMemo(() => {
+@@ -185,26 +187,30 @@ export default function EntriesTab() {
+           <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_2fr]">
+             <Select
+               label="Prova"
+               value={raceFilter}
+               onChange={(e) => setRaceFilter(e.target.value)}
+               options={[{ value: '', label: 'Todas' }, ...races.map((r) => ({ value: r.id, label: r.name }))]}
+             />
+             <Input label="Buscar" placeholder="Nome, equipe ou número" value={search} onChange={(e) => setSearch(e.target.value)} />
+           </div>
+ 
+-          <Card className="text-sm text-muted">
+-            Prefere importar de uma planilha?{' '}
+-            <Link to="/atletas" className="underline underline-offset-2 text-fg">
+-              Importe atletas
+-            </Link>{' '}
+-            — a coluna Prova inscreve automaticamente em provas individuais.
++          {/* Ruling 51: a real Button (not a plain text link) navigating to /atletas asking it
++              to open ImportDialog on arrival (`?import=1`, read by AthletesPage) — a click used
++              to land on the athletes page without the dialog open, needing a second click. */}
++          <Card className="flex flex-col items-start gap-3 text-sm text-muted sm:flex-row sm:items-center sm:justify-between">
++            <p>
++              Prefere importar de uma planilha? — a coluna Prova inscreve automaticamente em provas individuais.
++            </p>
++            <Button variant="secondary" onClick={() => navigate('/atletas?import=1')}>
++              Importar atletas
++            </Button>
+           </Card>
+ 
+           {filtered.length === 0 ? (
+             <EmptyState title="Nenhuma inscrição encontrada" />
+           ) : (
+             <Table>
+               <thead>
+                 <tr>
+                   <th className="px-3 py-2" scope="col">Nº</th>
+                   <th className="px-3 py-2" scope="col">Prova</th>
+@@ -227,21 +233,21 @@ export default function EntriesTab() {
+                     <tr key={entry.id} className="border-t border-border align-top">
+                       <td className="px-3 py-2 tabular">{entry.bib}</td>
+                       <td className="px-3 py-2">{race.name}</td>
+                       <td className="px-3 py-2">{entryDisplayName(entry, index)}</td>
+                       <td className="px-3 py-2">{legsSummary(entry, race, index.athletesById)}</td>
+                       <td className="px-3 py-2">{groupLabel(['sex', 'age', 'level'], category)}</td>
+                       <td className="px-3 py-2">{wave?.name ?? '—'}</td>
+                       <td className="px-3 py-2">
+                         <Badge tone={STATUS_BADGE_TONE[entry.status]}>{ENTRY_STATUS_LABEL[entry.status]}</Badge>
+                       </td>
+-                      <td className="px-3 py-2 tabular">{entry.penalty_ms > 0 ? formatPenaltyMs(entry.penalty_ms) : '—'}</td>
++                      <td className="px-3 py-2 tabular">{entry.penalty_ms > 0 ? formatDuration(entry.penalty_ms) : '—'}</td>
+                       <td className="px-3 py-2">
+                         <div className="flex flex-wrap justify-end gap-2">
+                           <Button variant="ghost" size="sm" onClick={() => setModal(entry)}>
+                             Editar
+                           </Button>
+                           <Button variant="ghost" size="sm" onClick={() => setStatusModal(entry)}>
+                             Status/penalidade
+                           </Button>
+                           <Button variant="ghost" size="sm" onClick={() => void handleDelete(entry)}>
+                             Excluir
+diff --git a/src/features/entries/EntryForm.tsx b/src/features/entries/EntryForm.tsx
+index be273ed..84e4055 100644
+--- a/src/features/entries/EntryForm.tsx
++++ b/src/features/entries/EntryForm.tsx
+@@ -1,20 +1,20 @@
+ import { useId, useState } from 'react';
+-import type { ChangeEvent } from 'react';
++import type { ChangeEvent, KeyboardEvent } from 'react';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { Button, Input, Modal, Select, Textarea } from '../../components/ui';
+ import { api, ApiError } from '../../lib/api';
+ import type { AthleteRow, EntryRow, RaceRow } from '../../lib/types';
+ import { useEventContext } from '../events/EventContext';
+ import { AthleteForm } from '../athletes/AthleteForm';
+-import { emptyEntryForm, entryToForm, foldAccents, setLegOwner, setMember, setRace, toSavePayload, validateEntryForm } from './entryForm';
+-import type { EntryFormState } from './entryForm';
++import { emptyEntryForm, entryToForm, foldAccents, setLegOwner, setMember, setRace, toSavePayload, validateEntryForm } from './entryFormState';
++import type { EntryFormState } from './entryFormState';
+ 
+ export interface EntryFormProps {
+   /** Present when editing an existing entry. */
+   initial?: EntryRow;
+   /** Race preselected when creating (e.g. the tab's current race filter); ignored when `initial` is set. */
+   defaultRaceId?: string;
+   onSaved(e: EntryRow): void;
+   onCancel(): void;
+ }
+ 
+@@ -22,93 +22,180 @@ const MAX_SUGGESTIONS = 8;
+ 
+ interface MemberPickerProps {
+   index: number;
+   label: string;
+   athletes: AthleteRow[];
+   value: string | null;
+   onChange(id: string | null): void;
+   onCreateNew(): void;
+ }
+ 
+-/** A searchable athlete combobox: a text field that filters `athletes` (diacritic-insensitive)
+- * as the organizer types, plus a "+ Novo atleta" row to create one on the fly. Kept local to this
+- * form — no other screen needs an athlete-picking combobox.
++/** A searchable athlete combobox following the WAI-ARIA "combobox with listbox popup" pattern: a
++ * text field that filters `athletes` (diacritic-insensitive) as the organizer types, plus a
++ * "+ Novo atleta" row to create one on the fly. Kept local to this form — no other screen needs
++ * an athlete-picking combobox.
+  *
+  * The field shows the *resolved* selected name (looked up from `athletes` + `value`) whenever the
+  * dropdown is closed, and free-typed search text while it's open — never a copy of the name held
+  * in its own state. That avoids a real bug an earlier version had: seeding `query` from `value` at
+  * mount, then only re-seeding when `value` itself changed, left an editor's picker blank forever
+  * whenever the athlete list was still loading at mount (the common case — `value` never changes
+  * again once an existing entry is being edited, so the name was never picked up once the list
+- * arrived). */
++ * arrived).
++ *
++ * Keyboard: ArrowDown/ArrowUp move a highlighted item (visually and via `aria-activedescendant`;
++ * the "+ Novo atleta" row is the last item, so it is always reachable), Enter activates whatever
++ * is highlighted (an athlete or "+ Novo atleta"), Escape closes the popup. Mouse selection
++ * (onMouseDown-guarded so it survives the input's blur) keeps working exactly as before. */
+ function MemberPicker({ index, label, athletes, value, onChange, onCreateNew }: MemberPickerProps) {
+   const fieldId = useId();
++  const listboxId = useId();
+   const [open, setOpen] = useState(false);
+   const [searchText, setSearchText] = useState('');
++  const [highlighted, setHighlighted] = useState(-1);
+ 
+   const selectedName = athletes.find((a) => a.id === value)?.name ?? '';
+   const displayValue = open ? searchText : selectedName;
+ 
+   const term = foldAccents(searchText.trim());
+   const matches = (term ? athletes.filter((a) => foldAccents(a.name).includes(term)) : athletes).slice(0, MAX_SUGGESTIONS);
++  // "+ Novo atleta" is always the last item in the list, so keyboard nav can always reach it.
++  const createIndex = matches.length;
++  const itemCount = matches.length + 1;
++
++  function optionId(i: number) {
++    return `${listboxId}-option-${i}`;
++  }
++
++  function openList() {
++    setSearchText('');
++    setOpen(true);
++    setHighlighted(-1);
++  }
++
++  function closeList() {
++    setOpen(false);
++    setHighlighted(-1);
++  }
+ 
+   function handleChange(e: ChangeEvent<HTMLInputElement>) {
+     setSearchText(e.target.value);
++    setHighlighted(-1);
+   }
+ 
+   function pick(a: AthleteRow) {
+     onChange(a.id);
+-    setOpen(false);
++    closeList();
+   }
+ 
++  function activateCreate() {
++    closeList();
++    onCreateNew();
++  }
++
++  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
++    switch (e.key) {
++      case 'ArrowDown':
++        e.preventDefault();
++        if (!open) {
++          setOpen(true);
++          setHighlighted(0);
++        } else {
++          setHighlighted((h) => (h + 1) % itemCount);
++        }
++        break;
++      case 'ArrowUp':
++        e.preventDefault();
++        if (!open) {
++          setOpen(true);
++          setHighlighted(itemCount - 1);
++        } else {
++          setHighlighted((h) => (h <= 0 ? itemCount - 1 : h - 1));
++        }
++        break;
++      case 'Enter':
++        if (!open || highlighted < 0) return;
++        e.preventDefault();
++        if (highlighted === createIndex) activateCreate();
++        else pick(matches[highlighted]);
++        break;
++      case 'Escape':
++        if (open) {
++          e.preventDefault();
++          // Also stops the kit Modal's own document-level Escape listener (Modal.tsx) from
++          // seeing this key: without it, Escape would close the popup *and* the whole dialog
++          // in the same keystroke, since that listener sits on `document` too and
++          // `stopPropagation` alone does not block another listener on the same node.
++          e.nativeEvent.stopImmediatePropagation();
++          closeList();
++        }
++        break;
++      default:
++        break;
++    }
++  }
++
++  const activeDescendant = open && highlighted >= 0 ? optionId(highlighted) : undefined;
++
+   return (
+     <div className="relative flex flex-col gap-1.5">
+       <label htmlFor={fieldId} className="text-sm font-medium text-fg">
+         {label}
+       </label>
+       <input
+         id={fieldId}
+         data-testid={`entry-member-${index}`}
++        role="combobox"
++        aria-expanded={open}
++        aria-controls={listboxId}
++        aria-autocomplete="list"
++        aria-activedescendant={activeDescendant}
+         className="w-full min-h-11 rounded-xl border border-border bg-surface px-3 py-2 text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+         placeholder="Buscar atleta"
+         autoComplete="off"
+         value={displayValue}
+         onChange={handleChange}
+-        onFocus={() => {
+-          setSearchText('');
+-          setOpen(true);
+-        }}
+-        onBlur={() => setOpen(false)}
++        onFocus={openList}
++        onBlur={closeList}
++        onKeyDown={handleKeyDown}
+       />
+       {open && (
+-        <div className="absolute top-full z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-border bg-surface shadow-lg">
+-          {matches.map((a) => (
++        <div
++          id={listboxId}
++          role="listbox"
++          aria-label={label}
++          className="absolute top-full z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-border bg-surface shadow-lg"
++        >
++          {matches.map((a, i) => (
+             <button
+               key={a.id}
++              id={optionId(i)}
+               type="button"
++              role="option"
++              aria-selected={highlighted === i}
+               data-testid={`entry-member-${index}-option-${a.id}`}
+-              className="block w-full px-3 py-2 text-left text-sm hover:bg-surface-2"
++              className={`block w-full px-3 py-2 text-left text-sm ${highlighted === i ? 'bg-surface-2' : 'hover:bg-surface-2'}`}
+               onMouseDown={(e) => e.preventDefault()}
+               onClick={() => pick(a)}
+             >
+               {a.name}
+             </button>
+           ))}
+           {matches.length === 0 && <p className="px-3 py-2 text-sm text-muted">Nenhum atleta encontrado</p>}
+           <button
++            id={optionId(createIndex)}
+             type="button"
+-            className="block w-full border-t border-border px-3 py-2 text-left text-sm font-semibold text-fg hover:bg-surface-2"
++            role="option"
++            aria-selected={highlighted === createIndex}
++            className={`block w-full border-t border-border px-3 py-2 text-left text-sm font-semibold text-fg ${highlighted === createIndex ? 'bg-surface-2' : 'hover:bg-surface-2'}`}
+             onMouseDown={(e) => e.preventDefault()}
+-            onClick={() => {
+-              setOpen(false);
+-              onCreateNew();
+-            }}
++            onClick={activateCreate}
+           >
+             + Novo atleta
+           </button>
+         </div>
+       )}
+     </div>
+   );
+ }
+ 
+ function memberLabel(race: RaceRow, i: number): string {
+diff --git a/src/features/entries/entries.test.tsx b/src/features/entries/entries.test.tsx
+index d60107e..48f814c 100644
+--- a/src/features/entries/entries.test.tsx
++++ b/src/features/entries/entries.test.tsx
+@@ -36,26 +36,26 @@ const BETO = makeAthlete({ id: 'a2', name: 'Beto Lima', sex: 'M', birth_date: '1
+ 
+ function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
+   return {
+     event: makeEvent({ id: 'ev1', name: 'Copa EBC', levels: [] }),
+     races: [], waves: [], entries: [], athletes: [], timekeepers: [],
+     marks: [], resolutions: [], results: [], version: 1, server_now: iso(T0), ...p,
+   };
+ }
+ 
+ function renderTab(agg: EventAggregate, refresh = vi.fn(async () => {})) {
+-  renderWithProviders(
++  const { router } = renderWithProviders(
+     <EventProvider eventId="ev1" agg={agg} refresh={refresh} patchAgg={vi.fn()}>
+       <EntriesTab />
+     </EventProvider>,
+   );
+-  return { refresh };
++  return { refresh, router };
+ }
+ 
+ beforeEach(() => {
+   vi.clearAllMocks();
+   listAthletes.mockResolvedValue([ANA, BETO]);
+ });
+ afterEach(() => {
+   vi.useRealTimers();
+ });
+ 
+@@ -164,20 +164,81 @@ describe('creating a team entry', () => {
+     await user.click(await screen.findByTestId('entry-member-0-option-a1'));
+ 
+     const { ApiError } = await import('../../lib/api');
+     saveEntry.mockRejectedValueOnce(new ApiError('Nº já usado nesta prova'));
+     await user.click(screen.getByTestId('entry-save'));
+ 
+     expect(await screen.findByRole('alert')).toHaveTextContent('Nº já usado nesta prova');
+     expect(screen.getByTestId('entry-save')).toBeInTheDocument(); // modal stayed open
+   });
+ 
++  it('selects a member with the keyboard (ArrowDown + Enter) and exposes combobox ARIA', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
++    renderTab(makeAgg({ races: [race] }));
++
++    await user.click(screen.getByTestId('new-entry'));
++    const input = screen.getByTestId('entry-member-0');
++    expect(input).toHaveAttribute('role', 'combobox');
++    expect(input).toHaveAttribute('aria-expanded', 'false');
++
++    await user.type(input, 'Ana');
++    expect(input).toHaveAttribute('aria-expanded', 'true');
++    expect(await screen.findByRole('listbox')).toBeInTheDocument();
++
++    await user.keyboard('{ArrowDown}');
++    const option = screen.getByTestId('entry-member-0-option-a1');
++    expect(option).toHaveAttribute('aria-selected', 'true');
++    expect(input).toHaveAttribute('aria-activedescendant', option.id);
++
++    await user.keyboard('{Enter}');
++    expect(input).toHaveValue('Ana Souza');
++    expect(input).toHaveAttribute('aria-expanded', 'false');
++    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
++  });
++
++  it('closes the suggestion list on Escape without picking anything', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
++    renderTab(makeAgg({ races: [race] }));
++
++    await user.click(screen.getByTestId('new-entry'));
++    const input = screen.getByTestId('entry-member-0');
++    await user.type(input, 'Ana');
++    expect(await screen.findByRole('listbox')).toBeInTheDocument();
++
++    await user.keyboard('{Escape}');
++    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
++    expect(input).toHaveAttribute('aria-expanded', 'false');
++    expect(input).toHaveValue('');
++    // Escape closed only the popup, not the whole "Nova inscrição" dialog.
++    expect(screen.getByTestId('entry-save')).toBeInTheDocument();
++  });
++
++  it('reaches "+ Novo atleta" by keyboard and opens the inline athlete form', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
++    renderTab(makeAgg({ races: [race] }));
++
++    await user.click(screen.getByTestId('new-entry'));
++    const input = screen.getByTestId('entry-member-0');
++    await user.type(input, 'Carla'); // matches neither Ana nor Beto
++    await screen.findByRole('listbox');
++
++    await user.keyboard('{ArrowDown}');
++    const createOption = screen.getByText('+ Novo atleta');
++    expect(createOption).toHaveAttribute('aria-selected', 'true');
++
++    await user.keyboard('{Enter}');
++    expect(await screen.findByTestId('athlete-name')).toBeInTheDocument();
++  });
++
+   it('creates a new athlete inline from the member picker and saves the entry with its id', async () => {
+     const user = userEvent.setup();
+     saveAthlete.mockResolvedValue(makeAthlete({ id: 'a9', name: 'Carla Nova', sex: 'F' }));
+     saveEntry.mockResolvedValue(makeEntry({ id: 'en9' }));
+     const race = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
+     renderTab(makeAgg({ races: [race] }));
+ 
+     await user.click(screen.getByTestId('new-entry'));
+     await user.type(screen.getByTestId('entry-member-0'), 'Carla');
+     await user.click(await screen.findByText('+ Novo atleta'));
+@@ -275,10 +336,25 @@ describe('bulk entry dialog', () => {
+   it('only offers individual races', async () => {
+     const user = userEvent.setup();
+     const teamRace = makeRace({ id: 'r1', name: 'Revezamento', team_size: 2 });
+     renderTab(makeAgg({ races: [teamRace] }));
+ 
+     await user.click(screen.getByTestId('bulk-entries'));
+     expect(screen.getByText(/nenhuma prova individual/i)).toBeInTheDocument();
+     expect(screen.getByTestId('bulk-confirm')).toBeDisabled();
+   });
+ });
++
++describe('import shortcut (Ruling 51)', () => {
++  it('keeps the exact hint text and navigates to /atletas asking it to open the import dialog', async () => {
++    const user = userEvent.setup();
++    const race = makeRace({ id: 'r1', team_size: 1 });
++    const { router } = renderTab(makeAgg({ races: [race] }));
++
++    expect(screen.getByText(/a coluna Prova inscreve automaticamente em provas individuais/)).toBeInTheDocument();
++
++    await user.click(screen.getByRole('button', { name: 'Importar atletas' }));
++
++    expect(router.state.location.pathname).toBe('/atletas');
++    expect(router.state.location.search).toBe('?import=1');
++  });
++});
+diff --git a/src/features/entries/entryForm.test.ts b/src/features/entries/entryFormState.test.ts
+similarity index 95%
+rename from src/features/entries/entryForm.test.ts
+rename to src/features/entries/entryFormState.test.ts
+index 06e51d7..12bbdfd 100644
+--- a/src/features/entries/entryForm.test.ts
++++ b/src/features/entries/entryFormState.test.ts
+@@ -1,24 +1,24 @@
+ import { describe, expect, it } from 'vitest';
+ import { makeEntry, makeRace } from '../../domain/testing/fixtures';
++import { formatDuration } from '../../lib/format';
+ import {
+   emptyEntryForm,
+   entryToForm,
+   foldAccents,
+-  formatPenaltyMs,
+   parsePenaltyMs,
+   setLegOwner,
+   setMember,
+   setRace,
+   toSavePayload,
+   validateEntryForm,
+-} from './entryForm';
++} from './entryFormState';
+ 
+ const teamRace2legs = makeRace({ id: 'r1', team_size: 2, legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }] });
+ const soloRace = makeRace({ id: 'r2', team_size: 1, legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
+ 
+ describe('emptyEntryForm', () => {
+   it('starts with empty member slots and the round-robin leg default', () => {
+     const state = emptyEntryForm(teamRace2legs);
+     expect(state.members).toEqual([null, null]);
+     expect(state.legOwner).toEqual([0, 1]);
+     expect(state.race_id).toBe('r1');
+@@ -173,41 +173,41 @@ describe('toSavePayload', () => {
+     state = setMember(state, 1, 'a2');
+ 
+     const payload = toSavePayload(state);
+     expect(payload.members).toEqual([
+       { athlete_id: 'a1', legs: [0, 2] },
+       { athlete_id: 'a2', legs: [1] },
+     ]);
+   });
+ });
+ 
+-describe('penalty m:ss parsing/formatting', () => {
++describe('penalty m:ss parsing', () => {
+   it('parses minutes:seconds into milliseconds', () => {
+     expect(parsePenaltyMs('1:30')).toBe(90_000);
+     expect(parsePenaltyMs('0:05')).toBe(5_000);
+     expect(parsePenaltyMs('10:00')).toBe(600_000);
+   });
+ 
+   it('blank means no penalty', () => {
+     expect(parsePenaltyMs('')).toBe(0);
+     expect(parsePenaltyMs('   ')).toBe(0);
+   });
+ 
+   it('rejects anything that is not m:ss', () => {
+     expect(parsePenaltyMs('abc')).toBeNull();
+     expect(parsePenaltyMs('1:99')).toBeNull();
+     expect(parsePenaltyMs('1:30:00')).toBeNull();
+   });
+ 
+-  it('formats milliseconds back to m:ss', () => {
+-    expect(formatPenaltyMs(90_000)).toBe('1:30');
+-    expect(formatPenaltyMs(5_000)).toBe('0:05');
+-    expect(formatPenaltyMs(0)).toBe('0:00');
++  it('the display value comes from the shared formatDuration, e.g. 90000 -> "1:30"', () => {
++    expect(formatDuration(90_000)).toBe('1:30');
++    expect(formatDuration(5_000)).toBe('0:05');
++    expect(formatDuration(0)).toBe('0:00');
+   });
+ });
+ 
+ describe('foldAccents', () => {
+   it('strips accents and case for search matching', () => {
+     expect(foldAccents('João Núñez')).toBe('joao nunez');
+     expect(foldAccents('ANA')).toBe('ana');
+   });
+ });
+diff --git a/src/features/entries/entryForm.ts b/src/features/entries/entryFormState.ts
+similarity index 94%
+rename from src/features/entries/entryForm.ts
+rename to src/features/entries/entryFormState.ts
+index 5b3f855..8ab178f 100644
+--- a/src/features/entries/entryForm.ts
++++ b/src/features/entries/entryFormState.ts
+@@ -164,20 +164,11 @@ const PENALTY_RE = /^(\d+):([0-5]?\d)$/;
+ export function parsePenaltyMs(text: string): number | null {
+   const t = text.trim();
+   if (t === '') return 0;
+   const m = PENALTY_RE.exec(t);
+   if (!m) return null;
+   const minutes = Number(m[1]);
+   const seconds = Number(m[2]);
+   return (minutes * 60 + seconds) * 1000;
+ }
+ 
+-/** The inverse of `parsePenaltyMs`, e.g. `90000` → `'1:30'` — used to prefill the status modal
+- * with whatever penalty is already on the entry. */
+-export function formatPenaltyMs(ms: number): string {
+-  const totalSeconds = Math.round(Math.max(0, ms) / 1000);
+-  const minutes = Math.floor(totalSeconds / 60);
+-  const seconds = totalSeconds % 60;
+-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+-}
+-
+ export const ENTRY_STATUS_OPTIONS: EntryStatus[] = ['ok', 'dns', 'dnf', 'dsq'];

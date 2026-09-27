@@ -1,99 +1,64 @@
-# Endurance Base Club — guia rápido do projeto
+# EnduranceBaseClub — contexto do projeto para o Claude Code
 
-App de **cronometragem e resultados** dos eventos multi-modalidade do clube
-(corrida, natação, ciclismo — o que o organizador escrever). Configura o evento
-antes da largada, cronometra no celular com **várias pessoas ao mesmo tempo**,
-e guarda o histórico de cada atleta entre os eventos.
+App web para organizar o evento multiesporte **EnduranceBaseClub** (tipo triatlo: corrida, natação, ciclismo), do organizador Matheus (matheuslsf13@gmail.com, fala pt-BR). A organizadora master configura tudo sozinha: provas, pernas/modalidades, distâncias, ordem, categorias (sexo/idade/nível "Elite"/"Base"), individual ou equipe (dupla/trio com atleta por perna), pódios. Ajudantes cronometram por um **link** (`#/c/:token`) em horário de Brasília; no revezamento, a marcação que fecha a perna de um atleta inicia a do próximo. Com vários cronometristas, o tempo oficial é a **mediana** (ou a marcação escolhida, ou manual). Gera a **planilha de conferência (XLSX)**, resultados/pódios públicos e estatísticas por atleta.
 
-**Antes de mexer em cronometragem, relógio ou no modelo das equipes, leia
-[`DECISOES.md`](DECISOES.md)** — ele guarda o porquê das escolhas que parecem
-estranhas à primeira vista. O plano completo está em
-[`docs/PLANO.md`](docs/PLANO.md).
+**Estado atual e próximos passos: leia `docs/HANDOFF.md` antes de qualquer coisa.**
 
-O projeto irmão é o [`play-de-todas`](https://github.com/matheuslsf13-maker/play-de-todas):
-mesma stack, mesmos padrões de dados e de interface.
+## Documentos de referência
+
+- Spec (autoridade final, pt-BR): `docs/superpowers/specs/2026-09-24-endurance-base-club-design.md`
+- Plano (29 tasks, ondas paralelas): `docs/superpowers/plans/2026-09-24-endurance-base-club.md`
+- Ledger da execução SDD (estado de cada task, Rulings 1–16, minors adiados): `.superpowers/sdd/2026-09-24-endurance-base-club/progress.md`
+- Contratos compartilhados (Global Constraints, Test IDs, `types.ts`, assinaturas de domínio e libs): `.superpowers/sdd/2026-09-24-endurance-base-club/contracts.md`
+- Briefs e relatórios por task: `.superpowers/sdd/2026-09-24-endurance-base-club/task-N-brief.md` / `task-N-report.md`
 
 ## Stack
 
-React 18 + TypeScript + Vite 5. Sem router (o estado das telas fica no
-`App.tsx`). PWA (manifest + service worker). Português do Brasil na interface.
+React 19 SPA (HashRouter, react-router 8), TanStack Query 5, Tailwind v4, TypeScript estrito, Vite 8, Vitest 5 (jsdom + Testing Library), fflate (XLSX próprio), qrcode, vite-plugin-pwa. Supabase **somente via RPC** (`supabase.rpc` em `src/lib/api.ts`; nunca `supabase.from`). Postgres: funções `security definer`, RLS ligado em todas as tabelas **sem policies**. Deploy: Vercel (frontend estático) + Supabase (projeto `wlishmznbhhcqzncdxnq`).
 
 ## Comandos
 
 ```bash
-npm run dev      # servidor local em http://localhost:5173
-npm run build    # tsc -b + vite build (use antes de commitar)
-npx tsc --noEmit # só a checagem de tipos
+npm ci                      # dependências (Node 22)
+npm run typecheck           # tsc --noEmit
+npx vitest run              # testes unitários/componentes
+npm run build               # build de produção (dist/)
+npm run test:integration    # supabase-js contra o shim local (precisa do Postgres local)
+bash scripts/test-sql.sh    # testes SQL (reseta o DB $EBC_DB, aplica bootstrap + migrations, roda supabase/tests/*.sql)
+bash scripts/db-local.sh start|stop|reset|apply|psql|url
+npm run shim                # shim local de Auth + PostgREST RPC na porta 54321
+npm run dev:stack           # Postgres + shim + vite para desenvolvimento local
+python3 scripts/verify-xlsx.py <arquivo.xlsx>   # valida uma planilha gerada (openpyxl)
 ```
 
-## Mapa do código
+Stack local de testes (emula Supabase): Postgres 16 em `127.0.0.1:54322` (cluster em `/var/tmp/ebc-pg`, iniciado via `runuser -u postgres`, exige root — ver HANDOFF §Ambiente), shim Node em `127.0.0.1:54321` com a chave `sb_publishable_local_dev`. Cada agente paralelo usa seu próprio banco: `EBC_DB=ebc_tN bash scripts/test-sql.sh`. Arquivos em `supabase/tests/` **não podem** ter meta-comandos do psql (`\set`, `\i`…): também rodam via MCP em produção.
 
-```
-src/pages/       Eventos, FormEvento (o assistente), Evento, Equipes,
-                 Cronometro (a tela mais importante), Conferencia,
-                 Resultados, Atletas, Atleta (o perfil com o historico)
-src/lib/         types (o modelo), prova (deriva o estado do log de marcacoes),
-                 resultados (classificacao e desempenho), estatisticas
-                 (historico entre eventos), tempo (pace/velocidade/formatos),
-                 relogio (sincronia entre aparelhos), feedback (apito e
-                 vibracao), xlsx (escritor de Excel), exportar (as abas),
-                 store, tema
-src/data/        armazenamento: localRepo (navegador) e supabaseRepo, com
-                 fila de escrita otimista que sobrevive a refresh (queue.ts)
-src/config.ts    URL e chave pública do Supabase (NUNCA a secret/service_role)
-supabase/*.sql   schema, rodado no SQL Editor do Supabase
-docs/PLANO.md    o plano completo do sistema, com as fases
-```
+## Regras globais (valem para todo código)
 
-`hasSupabase` decide qual driver é usado. Leitura é pública; escrita de
-cadastro exige login; marcação de tempo aceita também o cronometrista
-convidado pelo link.
+- Texto de UI em **português do Brasil**; código, identificadores, comentários e commits em inglês.
+- Campos de DTO/JSON em **snake_case** espelhando as colunas (`src/lib/types.ts`); nada de cópias camelCase.
+- Tempos armazenados em UTC; **toda hora exibida em `America/Sao_Paulo`** via `src/lib/format.ts`. Nunca `toLocaleTimeString()` sem `timeZone`.
+- Índices de perna são 0-based internamente; a UI mostra "Perna 1..N".
+- SQL: `security definer`, `set search_path = public, extensions, pg_temp`, parâmetros `p_`, erros de validação `raise exception '<mensagem pt-BR>' using errcode = 'P0001'`, permissão `42501`.
+- Padrões de cronometragem: janela de mesma passagem 30 s, divergência 3 s, fonte `median`, marcação sem atleta vira pendência após 60 s, sync 2 s (backoff até 10 s), público 10 s, sobreposição de fetch 10 s.
+- Marca: tinta `#191513`, papel `#F4F1EC`, neutros `#241F1C #2E2825 #3A332F #6F665E #A39D93 #D9D3C9`, sucesso `#3F8F5B`, alerta `#C8922E`, perigo `#C2413B`, info `#5B7C99`; só fontes do sistema; números tabulares em todo tempo. Logo em `public/logo.png`.
+- Todo controle crítico para E2E tem o `data-testid` exato da seção "Test IDs" do plano/contracts.
+- Propriedade de arquivos: cada task só cria/edita os arquivos do bloco **Files** do seu brief (arquivos compartilhados como `package.json`, `src/App.tsx`, `src/lib/types.ts`, `src/lib/api.ts` só quando listados).
+- Commits convencionais (`feat:`, `fix:`, `test:`, `chore:`) terminando com as linhas de trailer:
+  `Co-Authored-By: Claude <noreply@anthropic.com>` (ajuste ao modelo em uso) e, se desejar, um link de sessão.
+- Nunca commitar a senha da conta owner (criada só no deploy, Task 29).
 
-## As regras do domínio (não invente, elas são específicas)
+## Processo (skills em `.claude/skills/`)
 
-- **Nada de esporte é fixo no código.** O organizador escreve o nome da
-  modalidade e a distância dela. "Corrida" e "Natação" são só o que ele digitou
-  da última vez — não existe enum de esportes, nem deve existir.
-- **A distância é obrigatória** porque é ela que separa "sei o tempo" de "sei o
-  desempenho": sem distância não há pace, velocidade, recorde por distância nem
-  comparação entre eventos.
-- **A prova de uma equipe é uma lista de `Trecho`** (ordem + modalidade +
-  atleta). Solo e grupo não são dois códigos: no solo todos os trechos têm o
-  mesmo atleta, no grupo cada trecho tem o seu. Formato novo entra preenchendo
-  a mesma lista de outro jeito.
-- **`atletas` é do clube, não do evento.** É isso que faz existir histórico.
-- **`marcacoes` é append-only.** Corrigir um tempo não altera a marcação errada:
-  cria uma de `ajuste` apontando para ela. Desfazer cria uma de `desfazer`. O
-  estado de cada equipe é sempre **recalculado** dessa lista. Nunca faça
-  `update` nem `delete` nessa tabela.
-- **Todo tempo gravado passa pelo desvio do relógio** (`lib/relogio.ts`). Nunca
-  use `Date.now()` cru para marcar tempo: com três celulares cronometrando, o
-  relógio de cada um está em um lugar diferente.
-- **Na tela do cronômetro não se digita nada.** O único gesto é um toque no
-  card. Nem no modo grupo se escolhe nome: a configuração da equipe já diz quem
-  faz cada modalidade. Qualquer coisa que exija leitura, busca ou escolha no
-  meio da prova é bug de projeto, não recurso.
-- **Toque de outro cronometrista dentro de `JANELA_CONFIRMACAO` (45s) é voto no
-  mesmo trecho, não passagem nova** (`lib/prova.ts`). Sem isso, três pessoas
-  marcando a mesma chegada fariam a equipe pular três trechos.
-- **Quando há mais de uma marcação no trecho, o tempo é a MEDIANA**, nunca a
-  média — um toque atrasado por distração arrasta a média e não a mediana. A
-  média aparece na Conferência para você comparar, e a escolha final é humana.
-- **Horário é guardado em UTC e mostrado em America/Sao_Paulo.** Formatação só
-  por `lib/tempo.ts`.
-- **O código do link do cronometrista mora em `eventos_codigo`**, tabela que
-  `anon` não lê. Ele é um segredo; `eventos` tem leitura pública.
-- **Comparação entre eventos é sempre por PACE ou percentil, nunca por tempo.**
-  3 km e 5 km não se comparam por tempo; e 3º entre 20 vale mais que 3º entre 4.
-- **No Excel, tempo vai como TEXTO** (`1:24:31`). Duração mandada como número
-  vira hora do dia na planilha do outro lado — é assim que uma planilha de prova
-  chega errada sem ninguém perceber.
+A execução segue **subagent-driven-development** (SDD): um implementador novo por task (worktree + branch `task/N`), revisão de task (spec + qualidade) com os templates da skill, rodadas de correção retomando o implementador, re-revisão escopada, merge `--no-ff` em `feat/ebc-app`, linha no ledger. Tasks independentes rodam em paralelo (`/dispatching-parallel-agents`), cada uma na sua worktree. No fim: revisão ampla de toda a branch (modelo mais forte), deploy (Task 29) e `/finishing-a-development-branch` para levar `feat/ebc-app` a `main`.
 
-## Convenções
+- Nas skills, referências como `superpowers:test-driven-development` apontam para a skill de mesmo nome em `.claude/skills/`.
+- Scripts da SDD: `.claude/skills/subagent-driven-development/scripts/{task-brief,review-package,sdd-workspace}`. Para pacotes de revisão sem o lockfile, use `bash .superpowers/sdd/2026-09-24-endurance-base-club/pkg.sh BASE HEAD` (a partir da raiz do repo).
+- Outras skills instaladas: `agent-browser` (E2E da Task 28), `supabase` e `supabase-postgres-best-practices` (Tasks 6, 7 e 29), `deploy-to-vercel` e `vercel-cli-with-tokens` (Task 29), `vercel-react-best-practices`, `vercel-composition-patterns`, `web-design-guidelines` (telas da onda 2). `skills-lock.json` permite reinstalar com `npx skills experimental_install`.
+- MCP do projeto (`.mcp.json`): `supabase` (projeto `wlishmznbhhcqzncdxnq`) e `vercel`; autentique com `/mcp` na primeira vez.
 
-- Comentários e nomes em português, sem acento em identificadores.
-- Código sem dependências novas sempre que der; o bundle é servido para
-  celulares na beira da pista.
-- Tema **claro por padrão**, mesmo no celular em modo escuro: tela escura no sol
-  vira espelho e o cronometrista erra o toque.
-- Rodar `npm run build` antes de commitar; o push na `main` publica o site.
+## Produção
+
+- Supabase: URL `https://wlishmznbhhcqzncdxnq.supabase.co`, chave publicável `sb_publishable_Py0jUHGMNAjCM8C488RvZg_qviJupEk` (pública, já em `.env.production`). Postgres 17 em produção (local é 16). Banco de produção **ainda vazio** — as migrations só são aplicadas na Task 29.
+- Vercel: time "Matheus Proj" (`team_5RKNbN1EiWlEpXuYzgVp3yy9`, slug `matheus-proj`); projeto planejado `endurance-base-club` (ainda não criado).
+- Conta owner: `bootstrap_owner('matheuslsf13@gmail.com', <senha gerada>, 'Matheus')` na Task 29; primeiro login força troca de senha.

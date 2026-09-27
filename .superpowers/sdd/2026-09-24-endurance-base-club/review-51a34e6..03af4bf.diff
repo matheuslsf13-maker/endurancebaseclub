@@ -1,0 +1,153 @@
+# Review package: 51a34e6..03af4bf (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+03af4bf refactor(timing): share error message helper
+
+## Files changed
+ src/features/timing/LiveBoard.tsx        | 7 ++-----
+ src/features/timing/TimekeepersPanel.tsx | 7 ++-----
+ src/features/timing/TimingTab.tsx        | 7 ++-----
+ src/features/timing/WavesPanel.tsx       | 7 ++-----
+ src/features/timing/timingHelpers.ts     | 7 +++++++
+ 5 files changed, 15 insertions(+), 20 deletions(-)
+
+## Diff
+diff --git a/src/features/timing/LiveBoard.tsx b/src/features/timing/LiveBoard.tsx
+index a0b00d2..e5c898d 100644
+--- a/src/features/timing/LiveBoard.tsx
++++ b/src/features/timing/LiveBoard.tsx
+@@ -1,32 +1,29 @@
+ import { useState } from 'react';
+ import type { FormEvent } from 'react';
+ import { Link } from 'react-router';
+ import { Badge, Button, Card, EmptyState, Table } from '../../components/ui';
+ import { useToast } from '../../components/ui/Toast';
+ import { formatClock, formatDuration } from '../../lib/format';
+-import { api, ApiError } from '../../lib/api';
++import { api } from '../../lib/api';
+ import { entryDisplayName, legAthleteId } from '../../domain/eventModel';
+ import type { EventIndex } from '../../domain/eventModel';
+ import { planBibAssignment } from '../../domain/suggestLeg';
+ import { useEventContext } from '../events/EventContext';
+ import { useNow } from '../../hooks/useNow';
+ import type { EntryRow, MarkRow, RaceRow } from '../../lib/types';
++import { errorMessage } from './timingHelpers';
+ 
+ const RECENT_MARKS_LIMIT = 30;
+ /** Live per-leg timers refresh twice a second (spec §7.6 "cronômetro da perna"). */
+ const LEG_TIMER_TICK_MS = 500;
+ 
+-function errorMessage(e: unknown): string {
+-  return e instanceof ApiError ? e.message : 'Erro inesperado';
+-}
+-
+ /** Author label for a mark's feed row: "Organização" for an organizer mark, the timekeeper's
+  * name when known, or "Cronometrista" for an id no longer in the loaded roster (Ruling 33). */
+ function timekeeperLabel(timekeeperId: string | null, index: EventIndex): string {
+   if (timekeeperId === null) return 'Organização';
+   return index.timekeepersById.get(timekeeperId)?.name ?? 'Cronometrista';
+ }
+ 
+ function markSituacao(mark: MarkRow, byEntry: ReturnType<typeof useEventContext>['timing']['byEntry']): string {
+   if (mark.discarded) return 'Descartada';
+   if (mark.entry_id === null) return 'Sem atleta';
+diff --git a/src/features/timing/TimekeepersPanel.tsx b/src/features/timing/TimekeepersPanel.tsx
+index 379acbf..32be2aa 100644
+--- a/src/features/timing/TimekeepersPanel.tsx
++++ b/src/features/timing/TimekeepersPanel.tsx
+@@ -1,19 +1,16 @@
+ import { useState } from 'react';
+ import { Badge, Card, Checkbox, EmptyState, Table } from '../../components/ui';
+ import { useToast } from '../../components/ui/Toast';
+-import { api, ApiError } from '../../lib/api';
++import { api } from '../../lib/api';
+ import { useEventContext } from '../events/EventContext';
+-
+-function errorMessage(e: unknown): string {
+-  return e instanceof ApiError ? e.message : 'Erro inesperado';
+-}
++import { errorMessage } from './timingHelpers';
+ 
+ /** "há 12 s" / "há 3 min" / "há 2 h" / "há 5 d"; "nunca" when the timekeeper never synced. */
+ function relativeAgo(atIso: string | null | undefined, nowMs: number): string {
+   if (!atIso) return 'nunca';
+   const diffMs = Math.max(0, nowMs - Date.parse(atIso));
+   const s = Math.floor(diffMs / 1000);
+   if (s < 60) return `há ${s} s`;
+   const m = Math.floor(s / 60);
+   if (m < 60) return `há ${m} min`;
+   const h = Math.floor(m / 60);
+diff --git a/src/features/timing/TimingTab.tsx b/src/features/timing/TimingTab.tsx
+index 8bfca71..b0bb862 100644
+--- a/src/features/timing/TimingTab.tsx
++++ b/src/features/timing/TimingTab.tsx
+@@ -1,24 +1,21 @@
+ import { useState } from 'react';
+ import { Button, Card, Checkbox, Input } from '../../components/ui';
+ import { useConfirm } from '../../components/ui/Confirm';
+ import { useToast } from '../../components/ui/Toast';
+ import { QrCode } from '../../components/QrCode';
+-import { api, ApiError } from '../../lib/api';
++import { api } from '../../lib/api';
+ import { useEventContext } from '../events/EventContext';
+ import { TimekeepersPanel } from './TimekeepersPanel';
+ import { WavesPanel } from './WavesPanel';
+ import { LiveBoard } from './LiveBoard';
+-
+-function errorMessage(e: unknown): string {
+-  return e instanceof ApiError ? e.message : 'Erro inesperado';
+-}
++import { errorMessage } from './timingHelpers';
+ 
+ /**
+  * The timekeeper link (spec §7.1): the master copies it or shows the QR code, toggles whether
+  * it currently accepts new marks, and can rotate the token so old links stop working. The copied
+  * text is exactly `${location.origin}${location.pathname}#/c/${event.tk_token}`.
+  */
+ function TimekeeperLinkCard() {
+   const { agg, patchAgg, refresh } = useEventContext();
+   const { event } = agg;
+   const confirm = useConfirm();
+diff --git a/src/features/timing/WavesPanel.tsx b/src/features/timing/WavesPanel.tsx
+index bfa116b..fce5d1f 100644
+--- a/src/features/timing/WavesPanel.tsx
++++ b/src/features/timing/WavesPanel.tsx
+@@ -1,23 +1,20 @@
+ import { useState } from 'react';
+ import type { FormEvent } from 'react';
+ import { Button, Card, Table } from '../../components/ui';
+ import { useConfirm } from '../../components/ui/Confirm';
+ import { useToast } from '../../components/ui/Toast';
+ import { formatClock, parseClockInput } from '../../lib/format';
+-import { api, ApiError } from '../../lib/api';
++import { api } from '../../lib/api';
+ import { useEventContext } from '../events/EventContext';
+ import type { WaveRow } from '../../lib/types';
+-
+-function errorMessage(e: unknown): string {
+-  return e instanceof ApiError ? e.message : 'Erro inesperado';
+-}
++import { errorMessage } from './timingHelpers';
+ 
+ interface WaveRowItemProps {
+   raceName: string;
+   wave: WaveRow;
+ }
+ 
+ /**
+  * One race/wave (spec §7.6). "Largar agora" stamps the synced instant of the confirm tap
+  * (Review Focus 5 + a controller ruling): the handler awaits the confirmation first, then reads
+  * `clock.now()` as the very first thing afterwards — before any further `await` — so the recorded
+diff --git a/src/features/timing/timingHelpers.ts b/src/features/timing/timingHelpers.ts
+new file mode 100644
+index 0000000..a217275
+--- /dev/null
++++ b/src/features/timing/timingHelpers.ts
+@@ -0,0 +1,7 @@
++import { ApiError } from '../../lib/api';
++
++/** The pt-BR message to show for any `api` failure: `ApiError.message` (already pt-BR) or a
++ * generic fallback for anything else thrown. Shared by every panel of the Timing tab. */
++export function errorMessage(e: unknown): string {
++  return e instanceof ApiError ? e.message : 'Erro inesperado';
++}

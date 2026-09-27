@@ -1,0 +1,235 @@
+# Review package: e95faf2..626ad10 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+626ad10 fix(athletes): isolate nested athlete form submit, share date helper
+
+## Files changed
+ src/features/athletes/AthleteForm.tsx        |  4 ++++
+ src/features/athletes/AthleteProfilePage.tsx | 16 ++++------------
+ src/features/athletes/AthletesPage.tsx       | 14 +-------------
+ src/features/athletes/athleteHelpers.ts      | 15 +++++++++++++++
+ src/features/athletes/athletes.test.tsx      | 22 ++++++++++++++++++++++
+ 5 files changed, 46 insertions(+), 25 deletions(-)
+
+## Diff
+diff --git a/src/features/athletes/AthleteForm.tsx b/src/features/athletes/AthleteForm.tsx
+index c7ede9e..c4d9b58 100644
+--- a/src/features/athletes/AthleteForm.tsx
++++ b/src/features/athletes/AthleteForm.tsx
+@@ -32,20 +32,24 @@ export function AthleteForm({ initial, onSaved, onCancel }: AthleteFormProps) {
+   const [notes, setNotes] = useState(initial?.notes ?? '');
+   const [publicProfile, setPublicProfile] = useState(initial?.public_profile ?? true);
+ 
+   const [nameError, setNameError] = useState<string | undefined>();
+   const [birthError, setBirthError] = useState<string | undefined>();
+   const [formError, setFormError] = useState<string | null>(null);
+   const [saving, setSaving] = useState(false);
+ 
+   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
+     e.preventDefault();
++    // React synthetic events bubble through the whole component tree, portals included: when the
++    // entries form (Task 21) renders this form inside its own <form>, an un-stopped submit here
++    // would also fire the outer form's onSubmit. Stop it here so this form can be nested safely.
++    e.stopPropagation();
+ 
+     const trimmedName = name.trim();
+     const hasNameError = trimmedName === '';
+ 
+     let birthDate: string | null = null;
+     let hasBirthError = false;
+     const trimmedBirth = birthText.trim();
+     if (trimmedBirth !== '') {
+       birthDate = parseDateInput(trimmedBirth);
+       hasBirthError = birthDate === null;
+diff --git a/src/features/athletes/AthleteProfilePage.tsx b/src/features/athletes/AthleteProfilePage.tsx
+index 6f65d82..29840d6 100644
+--- a/src/features/athletes/AthleteProfilePage.tsx
++++ b/src/features/athletes/AthleteProfilePage.tsx
+@@ -1,27 +1,19 @@
+ import { useState } from 'react';
+ import { Link, useNavigate, useParams } from 'react-router';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { api, ApiError } from '../../lib/api';
+-import { ageOn } from '../../domain/categories';
++import { sexLabel } from '../../domain/categories';
+ import { Badge, Button, Card, Modal, Spinner, useConfirm, useToast } from '../../components/ui';
+ import { AthleteForm } from './AthleteForm';
+ import { StatsView } from './StatsView';
+-
+-const TZ = 'America/Sao_Paulo';
+-
+-/** Today's date, in Brasília, as 'aaaa-mm-dd' (see AthletesPage for the same helper). */
+-function todayIsoBrasilia(): string {
+-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+-}
+-
+-const SEX_LABEL: Record<'M' | 'F', string> = { M: 'Masculino', F: 'Feminino' };
++import { ageToday } from './athleteHelpers';
+ 
+ export default function AthleteProfilePage() {
+   const { athleteId } = useParams();
+   const navigate = useNavigate();
+   const queryClient = useQueryClient();
+   const toast = useToast();
+   const confirm = useConfirm();
+   const [editing, setEditing] = useState(false);
+ 
+   const query = useQuery({
+@@ -73,34 +65,34 @@ export default function AthleteProfilePage() {
+           </p>
+           <Link to="/atletas" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
+             Voltar para atletas
+           </Link>
+         </Card>
+       </div>
+     );
+   }
+ 
+   const { athlete, results } = query.data;
+-  const age = athlete.birth_date ? ageOn(athlete.birth_date, todayIsoBrasilia(), 'event_date') : null;
++  const age = ageToday(athlete.birth_date);
+ 
+   return (
+     <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
+       <Link to="/atletas" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
+         ← Atletas
+       </Link>
+ 
+       <Card className="mt-4 flex flex-col gap-3">
+         <div className="flex flex-wrap items-start justify-between gap-3">
+           <div>
+             <h1 className="brand-title text-xl font-semibold">{athlete.name}</h1>
+             <p className="mt-1 text-sm text-muted">
+-              {SEX_LABEL[athlete.sex]}
++              {sexLabel(athlete.sex)}
+               {age !== null ? ` · ${age} anos` : ''}
+               {athlete.city ? ` · ${athlete.city}` : ''}
+               {athlete.team_club ? ` · ${athlete.team_club}` : ''}
+             </p>
+             {athlete.public_profile && (
+               <p className="mt-2 flex flex-wrap items-center gap-2">
+                 <Badge tone="info">Perfil público</Badge>
+                 <Link
+                   to={`/atleta/${athlete.id}`}
+                   className="text-sm text-fg underline underline-offset-2 hover:text-muted"
+diff --git a/src/features/athletes/AthletesPage.tsx b/src/features/athletes/AthletesPage.tsx
+index 79c1ae1..231e5da 100644
+--- a/src/features/athletes/AthletesPage.tsx
++++ b/src/features/athletes/AthletesPage.tsx
+@@ -1,31 +1,19 @@
+ import { useMemo, useState } from 'react';
+ import { Link } from 'react-router';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { api, ApiError } from '../../lib/api';
+-import { ageOn } from '../../domain/categories';
+ import { Button, Card, EmptyState, Input, Modal, Select, Spinner, Table, useConfirm, useToast } from '../../components/ui';
+ import type { AthleteRow } from '../../lib/types';
+ import { AthleteForm } from './AthleteForm';
+ import { ImportDialog } from './ImportDialog';
+-
+-const TZ = 'America/Sao_Paulo';
+-
+-/** Today's date, in Brasília, as 'aaaa-mm-dd' — the app-wide rule that every date is shown in
+- * America/Sao_Paulo applies here too, even though "idade hoje" has nothing to do with an event. */
+-function todayIsoBrasilia(): string {
+-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+-}
+-
+-function ageToday(birthDate: string | null): number | null {
+-  return birthDate ? ageOn(birthDate, todayIsoBrasilia(), 'event_date') : null;
+-}
++import { ageToday } from './athleteHelpers';
+ 
+ function foldAccents(s: string): string {
+   return s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+ }
+ 
+ const SEX_FILTER_OPTIONS = [
+   { value: '', label: 'Todos' },
+   { value: 'M', label: 'Masculino' },
+   { value: 'F', label: 'Feminino' },
+ ];
+diff --git a/src/features/athletes/athleteHelpers.ts b/src/features/athletes/athleteHelpers.ts
+new file mode 100644
+index 0000000..271d32e
+--- /dev/null
++++ b/src/features/athletes/athleteHelpers.ts
+@@ -0,0 +1,15 @@
++import { ageOn } from '../../domain/categories';
++
++const TZ = 'America/Sao_Paulo';
++
++/** Today's date, in Brasília, as 'aaaa-mm-dd' — the app-wide rule that every date is shown in
++ * America/Sao_Paulo applies here too, even though "idade hoje" has nothing to do with an event.
++ * Shared by AthletesPage (the "Idade hoje" column) and AthleteProfilePage (the header). */
++export function todayIsoBrasilia(): string {
++  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
++}
++
++/** The athlete's age as of today (Brasília), or `null` when the birth date is unknown. */
++export function ageToday(birthDate: string | null): number | null {
++  return birthDate ? ageOn(birthDate, todayIsoBrasilia(), 'event_date') : null;
++}
+diff --git a/src/features/athletes/athletes.test.tsx b/src/features/athletes/athletes.test.tsx
+index e162b38..fc55a24 100644
+--- a/src/features/athletes/athletes.test.tsx
++++ b/src/features/athletes/athletes.test.tsx
+@@ -1,15 +1,17 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import type { FormEvent } from 'react';
+ import { screen, waitFor } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ 
+ import { renderWithProviders } from '../../test/renderWithProviders';
++import { Modal } from '../../components/ui';
+ import type { AthleteRow, ImportResult, ResultRow, ResultSnapshot } from '../../lib/types';
+ 
+ const mocks = vi.hoisted(() => ({
+   listAthletes: vi.fn(),
+   saveAthlete: vi.fn(),
+   deleteAthlete: vi.fn(),
+   importAthletes: vi.fn(),
+   athleteProfile: vi.fn(),
+   listEvents: vi.fn(),
+ }));
+@@ -110,20 +112,40 @@ describe('AthleteForm', () => {
+     expect(saveAthlete).not.toHaveBeenCalled();
+   });
+ 
+   it('calls onCancel when Cancelar is clicked', async () => {
+     const user = userEvent.setup();
+     const onCancel = vi.fn();
+     renderWithProviders(<AthleteForm onSaved={vi.fn()} onCancel={onCancel} />);
+     await user.click(screen.getByRole('button', { name: 'Cancelar' }));
+     expect(onCancel).toHaveBeenCalledTimes(1);
+   });
++
++  it('does not let its submit bubble into an outer form when reused inside a modal in another form (Task 21 nests it in EntryForm)', async () => {
++    const user = userEvent.setup();
++    saveAthlete.mockResolvedValue(makeAthlete());
++    const outerSpy = vi.fn((e: FormEvent<HTMLFormElement>) => e.preventDefault());
++
++    renderWithProviders(
++      <form onSubmit={outerSpy}>
++        <Modal open onClose={vi.fn()} title="Novo atleta">
++          <AthleteForm onSaved={vi.fn()} onCancel={vi.fn()} />
++        </Modal>
++      </form>,
++    );
++
++    await user.type(screen.getByTestId('athlete-name'), 'Fulano');
++    await user.click(screen.getByTestId('athlete-save'));
++
++    await waitFor(() => expect(saveAthlete).toHaveBeenCalled());
++    expect(outerSpy).not.toHaveBeenCalled();
++  });
+ });
+ 
+ // Review Focus 3 (Brazilian spreadsheets on import): the exact table from Task 14's
+ // importMapping.test.ts, serialized as a ';'-delimited CSV — 2 valid rows, 3 bad rows.
+ const REVIEW_FOCUS_3_HEADER = ['Nome Completo', 'Gênero', 'Data de Nascimento', 'E-mail', 'Celular', 'Cidade', 'Assessoria', 'Prova'];
+ const REVIEW_FOCUS_3_ROWS = [
+   ['  Ana   Souza ', 'Feminino', '15/06/1990', 'ANA@X.COM', '27 99999-0000', 'Vitória', 'EBC Team', 'Corrida 5K'],
+   ['Beto', 'masc', '33039', '', '', '', '', ''],
+   ['', 'F', '', '', '', '', '', ''],
+   ['Caio', 'X', '', '', '', '', '', ''],

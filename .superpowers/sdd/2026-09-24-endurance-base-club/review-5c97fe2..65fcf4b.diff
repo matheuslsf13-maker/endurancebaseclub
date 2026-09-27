@@ -1,0 +1,168 @@
+# Review package: 5c97fe2..65fcf4b (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+65fcf4b fix(pwa): make eventShell tests order-independent and test the timekeeper update guard
+
+## Files changed
+ src/components/UpdatePrompt.test.tsx    | 16 +++++++++++++++-
+ src/components/UpdatePrompt.tsx         | 10 ++++++++++
+ src/features/events/eventShell.test.tsx | 15 +++++++++++++++
+ src/main.tsx                            |  4 ++--
+ 4 files changed, 42 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/components/UpdatePrompt.test.tsx b/src/components/UpdatePrompt.test.tsx
+index 6e88654..fead951 100644
+--- a/src/components/UpdatePrompt.test.tsx
++++ b/src/components/UpdatePrompt.test.tsx
+@@ -1,16 +1,16 @@
+ import { act } from '@testing-library/react';
+ import { render, screen } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { describe, expect, it, vi } from 'vitest';
+ import { ToastProvider } from './ui';
+-import { UpdatePrompt } from './UpdatePrompt';
++import { shouldPromptForUpdate, UpdatePrompt } from './UpdatePrompt';
+ 
+ // Ruling 26: main.tsx dispatches this event (never on the timekeeper route) with an `update`
+ // callback that wraps the service worker's own `updateSW(true)`; UpdatePrompt only wires it to
+ // the kit's toast, so it never has to know about `virtual:pwa-register` itself.
+ function dispatchNeedRefresh(update: () => void) {
+   window.dispatchEvent(new CustomEvent('ebc:sw-need-refresh', { detail: { update } }));
+ }
+ 
+ describe('UpdatePrompt', () => {
+   it('renders nothing until a new version is announced', () => {
+@@ -39,10 +39,24 @@ describe('UpdatePrompt', () => {
+   });
+ 
+   it('ignores the event when rendered without a ToastProvider (nothing to crash)', () => {
+     // UpdatePrompt is mounted once, inside the providers; this only guards against a future
+     // refactor moving it outside them without anyone noticing at review time.
+     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+     expect(() => render(<UpdatePrompt />)).toThrow('useToast must be used within a ToastProvider');
+     spy.mockRestore();
+   });
+ });
++
++describe('shouldPromptForUpdate', () => {
++  // Ruling 26: the timekeeper link is the one route a cronometrista may be mid-race on, so an
++  // incoming update must never interrupt it there — every other route is free to prompt.
++  it('is false on the timekeeper route', () => {
++    expect(shouldPromptForUpdate('#/c/abc')).toBe(false);
++  });
++
++  it('is true everywhere else', () => {
++    expect(shouldPromptForUpdate('#/eventos')).toBe(true);
++    expect(shouldPromptForUpdate('#/')).toBe(true);
++    expect(shouldPromptForUpdate('')).toBe(true);
++  });
++});
+diff --git a/src/components/UpdatePrompt.tsx b/src/components/UpdatePrompt.tsx
+index cebb2be..76f4cc7 100644
+--- a/src/components/UpdatePrompt.tsx
++++ b/src/components/UpdatePrompt.tsx
+@@ -1,15 +1,25 @@
+ import { useEffect } from 'react';
+ import { useToast } from './ui';
+ 
+ const EVENT = 'ebc:sw-need-refresh';
+ 
++/**
++ * Ruling 26: the timekeeper link (`#/c/<token>`) must never see the update prompt — a
++ * cronometrista mid-race must not be interrupted; a new build there only takes over on the next
++ * launch. Every other route (including no hash at all) is free to show it. Exported as a pure
++ * predicate (rather than inlined in main.tsx) so this one-line safety rule has its own unit tests.
++ */
++export function shouldPromptForUpdate(hash: string): boolean {
++  return !hash.startsWith('#/c/');
++}
++
+ interface NeedRefreshDetail {
+   /** Wraps the service worker's `updateSW(true)`: sends skip-waiting, then reloads once it takes over. */
+   update: () => void;
+ }
+ 
+ /**
+  * Mounted once at the app root, inside the providers. main.tsx dispatches `ebc:sw-need-refresh`
+  * whenever a new build is waiting to activate — never on the timekeeper route (Ruling 26): a
+  * cronometrista mid-race must never be interrupted, so the update there only applies on next launch.
+  * Everywhere else this shows a small, non-blocking prompt the organizer chooses when to act on.
+diff --git a/src/features/events/eventShell.test.tsx b/src/features/events/eventShell.test.tsx
+index 7294088..a963568 100644
+--- a/src/features/events/eventShell.test.tsx
++++ b/src/features/events/eventShell.test.tsx
+@@ -234,20 +234,35 @@ describe('EventLayout', () => {
+     getEvent.mockResolvedValue(makeAgg());
+     renderApp(`/eventos/ev1/${tab}`, organizer());
+     expect(await screen.findByTestId(`page-${page}`)).toBeInTheDocument();
+     expect(screen.getByRole('heading', { name: 'Copa EBC' })).toBeInTheDocument();
+   });
+ 
+   it('polls every 2 s only on the timing, review and results tabs', async () => {
+     vi.useFakeTimers();
+     getEvent.mockResolvedValue(makeAgg());
+     const router = renderApp('/eventos/ev1/geral', organizer());
++    // `/eventos/ev1/geral` renders through two nested lazy() boundaries (EventLayout, then
++    // EventGeneralTab inside it). React.lazy() memoizes each page's dynamic import for the lifetime
++    // of this module, so once any earlier test in this file has rendered a given lazy page, a later
++    // render of it resolves synchronously — but in an isolated run (`vitest -t "polls every 2 s"`)
++    // this is the first time either resolves. `useEventData`'s polling effect must see the *fake*
++    // clock from its very first run (it arms its own `setTimeout` on mount), so timers cannot be
++    // switched to real just for this render the way the other, data-free lazy tests do it: instead,
++    // settle each pending `import()` on the real clock via `vi.dynamicImportSettled()` (it uses
++    // Vitest's own un-faked timers internally) and force a fresh render pass with `router.navigate`
++    // so `lazy()` picks up the now-resolved module directly, without depending on React's automatic
++    // retry ping — which in this environment does not reliably fire while timers are faked.
++    await vi.dynamicImportSettled();
++    await act(async () => router.navigate('/eventos/ev1/geral'));
++    await vi.dynamicImportSettled();
++    await act(async () => router.navigate('/eventos/ev1/geral'));
+     await act(() => vi.advanceTimersByTimeAsync(5));
+     expect(screen.getByTestId('page-event-general')).toBeInTheDocument();
+ 
+     await act(() => vi.advanceTimersByTimeAsync(14_000));
+     expect(live).not.toHaveBeenCalled();
+     await act(() => vi.advanceTimersByTimeAsync(1_000));
+     expect(live).toHaveBeenCalledTimes(1);
+ 
+     let calls = 1;
+     for (const tab of ['cronometragem', 'revisao', 'resultados']) {
+diff --git a/src/main.tsx b/src/main.tsx
+index 353e2d5..a58052b 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -1,31 +1,31 @@
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+ import { registerSW } from 'virtual:pwa-register';
+ import App from './App';
+ import { SessionProvider } from './features/auth/session';
+ import { ConfirmProvider, ToastProvider } from './components/ui';
+-import { UpdatePrompt } from './components/UpdatePrompt';
++import { shouldPromptForUpdate, UpdatePrompt } from './components/UpdatePrompt';
+ import { ApiError } from './lib/api';
+ import './index.css';
+ 
+ // Ruling 26: registerType is 'prompt' (vite.config.ts), so a new build never reloads an open tab
+ // on its own — it only takes over once every tab has closed. Registering here (production only;
+ // dev/test never touch a service worker) lets us decide, per route, whether to even mention it:
+ // the timekeeper link (#/c/<token>) stays silent so a cronometrista mid-race is never interrupted;
+ // everywhere else `UpdatePrompt` offers a manual "Atualizar" that calls `updateSW(true)`.
+ if (import.meta.env.PROD) {
+   const updateSW = registerSW({
+     immediate: true,
+     onNeedRefresh() {
+-      if (location.hash.startsWith('#/c/')) return;
++      if (!shouldPromptForUpdate(location.hash)) return;
+       window.dispatchEvent(new CustomEvent('ebc:sw-need-refresh', { detail: { update: () => updateSW(true) } }));
+     },
+   });
+ }
+ 
+ const queryClient = new QueryClient({
+   defaultOptions: {
+     queries: {
+       staleTime: 5_000,
+       // Validation/permission errors do not go away on retry; only network failures are retried.

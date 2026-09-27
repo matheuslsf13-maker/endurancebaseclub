@@ -1,0 +1,450 @@
+# Review package: f532a4e..2427895 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+2427895 Merge branch 'feat/ebc-app' into task/7
+d353d11 test: grant shim probe functions explicitly after least-privilege defaults
+598995f fix(db): revoke default PUBLIC execute on future functions
+4f48716 feat(db): public RPCs and least-privilege grants
+
+## Files changed
+ supabase/migrations/0006_public_grants.sql | 166 +++++++++++++++++++++++++++++
+ supabase/tests/10_schema.sql               |   5 +-
+ supabase/tests/50_public.sql               | 163 ++++++++++++++++++++++++++++
+ supabase/tests/60_security.sql             |  31 ++++++
+ tests/integration/shim.test.ts             |   7 ++
+ 5 files changed, 370 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/supabase/migrations/0006_public_grants.sql b/supabase/migrations/0006_public_grants.sql
+new file mode 100644
+index 0000000..b7f170f
+--- /dev/null
++++ b/supabase/migrations/0006_public_grants.sql
+@@ -0,0 +1,166 @@
++-- Public RPCs (spec §6 "Público") and the final grant model (spec §14, Ruling 15): after this
++-- migration, anon/authenticated can execute only admin_* (authenticated), tk_*/pub_*/server_time
++-- (anon + authenticated) -- every other function in schema public becomes uncallable through
++-- PostgREST, and direct table access is gone for anon/authenticated entirely.
++
++-- 1. resolve_public_event: p_slug -> the event, only if it is public; else the standard "not
++--    found" message. Shared by pub_event/pub_live. Deliberately NOT pub_-prefixed: like tk_event,
++--    it must stay ungranted (it is only ever called from inside another security definer function).
++create or replace function public.resolve_public_event(p_slug text) returns public.events
++language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
++declare ev public.events;
++begin
++  select * into ev from public.events where public_slug = p_slug and is_public;
++  if not found then raise exception 'Evento não encontrado' using errcode = 'P0001'; end if;
++  return ev;
++end $$;
++
++-- 2. mark_public_json: the public mark projection (Ruling 4 + Ruling 29) -- strips the
++--    clock-audit fields (device_ts, clock_offset_ms, clock_rtt_ms) and, when present, the
++--    organizer-only org_edited flag that Task 6's fix round is adding to public.marks. Removing a
++--    jsonb key that does not exist is a no-op, so this works whether or not that column exists.
++create or replace function public.mark_public_json(m public.marks) returns jsonb
++language sql immutable set search_path = public, extensions, pg_temp as $$
++  select to_jsonb(m) - 'device_ts' - 'clock_offset_ms' - 'clock_rtt_ms' - 'org_edited'
++$$;
++
++-- 3. pub_events: public event list for the public home page.
++create or replace function public.pub_events() returns jsonb
++language sql stable security definer set search_path = public, extensions, pg_temp as $$
++  select coalesce(jsonb_agg(jsonb_build_object(
++    'id', e.id, 'public_slug', e.public_slug, 'name', e.name, 'date', e.date,
++    'location', e.location, 'status', e.status
++  ) order by e.date desc), '[]'::jsonb)
++  from public.events e where e.is_public
++$$;
++
++-- 4. pub_event: the full public snapshot for one event (PubEventPayload), shaped like
++--    admin_get_event/tk_open minus tk_token/tk_enabled and every organizer-only field:
++--    entries never carry `notes` (Ruling 29), athletes never carry email/phone/birth_date, and
++--    marks never carry the clock-audit fields (mark_public_json above).
++create or replace function public.pub_event(p_slug text) returns jsonb
++language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
++declare ev public.events := public.resolve_public_event(p_slug);
++begin
++  return jsonb_build_object(
++    'event', to_jsonb(ev) - 'tk_token' - 'tk_enabled',
++    'races', coalesce((
++      select jsonb_agg(to_jsonb(r) order by r.position, r.name)
++      from public.races r where r.event_id = ev.id
++    ), '[]'::jsonb),
++    'waves', coalesce((
++      select jsonb_agg(to_jsonb(w) order by r.position, r.name, w.position)
++      from public.waves w join public.races r on r.id = w.race_id
++      where r.event_id = ev.id
++    ), '[]'::jsonb),
++    'entries', coalesce((
++      select jsonb_agg(public.entry_json(en.id, true) - 'notes'
++                        order by case when en.bib ~ '^\d+$' then lpad(en.bib, 20, '0') else en.bib end)
++      from public.entries en where en.event_id = ev.id
++    ), '[]'::jsonb),
++    'athletes', coalesce((
++      select jsonb_agg(distinct jsonb_build_object(
++        'id', a.id, 'name', a.name, 'sex', a.sex, 'team_club', a.team_club, 'city', a.city,
++        'public_profile', a.public_profile,
++        'age_event', date_part('year', age(ev.date, a.birth_date)),
++        'age_year_end', extract(year from ev.date) - extract(year from a.birth_date)
++      ))
++      from public.athletes a
++      join public.entry_members m on m.athlete_id = a.id
++      join public.entries en on en.id = m.entry_id
++      where en.event_id = ev.id
++    ), '[]'::jsonb),
++    'timekeepers', coalesce((
++      select jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name) order by t.created_at)
++      from public.timekeepers t where t.event_id = ev.id
++    ), '[]'::jsonb),
++    'marks', coalesce((
++      select jsonb_agg(public.mark_public_json(mk) order by mk.ts)
++      from public.marks mk where mk.event_id = ev.id
++    ), '[]'::jsonb),
++    'resolutions', coalesce((
++      select jsonb_agg(to_jsonb(res)) from public.resolutions res where res.event_id = ev.id
++    ), '[]'::jsonb),
++    'results', coalesce((
++      select jsonb_agg(to_jsonb(res)) from public.results res where res.event_id = ev.id
++    ), '[]'::jsonb),
++    'version', ev.version,
++    'server_now', now()
++  );
++end $$;
++
++-- 5. pub_live: like admin_live, with the same public mark projection as pub_event (marks are a
++--    delta since p_since -- including discarded ones, so clients can drop them; resolutions and
++--    waves always come back in full).
++create or replace function public.pub_live(p_slug text, p_since timestamptz) returns jsonb
++language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
++declare ev public.events := public.resolve_public_event(p_slug);
++begin
++  return jsonb_build_object(
++    'server_now', now(),
++    'version', ev.version,
++    'marks', coalesce((
++      select jsonb_agg(public.mark_public_json(mk) order by mk.ts) from public.marks mk
++      where mk.event_id = ev.id and (p_since is null or mk.updated_at >= p_since)
++    ), '[]'::jsonb),
++    'resolutions', coalesce((
++      select jsonb_agg(to_jsonb(res)) from public.resolutions res where res.event_id = ev.id
++    ), '[]'::jsonb),
++    'waves', coalesce((
++      select jsonb_agg(to_jsonb(w) order by r.position, r.name, w.position)
++      from public.waves w join public.races r on r.id = w.race_id
++      where r.event_id = ev.id
++    ), '[]'::jsonb)
++  );
++end $$;
++
++-- 6. pub_athlete: only for athletes who opted into a public profile; results restricted to those
++--    whose event is public (never a private event's result, even for a public-profile athlete).
++create or replace function public.pub_athlete(p_athlete_id uuid) returns jsonb
++language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
++declare a public.athletes;
++begin
++  select * into a from public.athletes where id = p_athlete_id and public_profile;
++  if not found then raise exception 'Perfil não encontrado' using errcode = 'P0001'; end if;
++  return jsonb_build_object(
++    'athlete', jsonb_build_object('id', a.id, 'name', a.name, 'sex', a.sex, 'city', a.city, 'team_club', a.team_club),
++    'results', coalesce((
++      select jsonb_agg(to_jsonb(r) order by (r.data->'event'->>'date') desc)
++      from public.results r
++      join public.events ev on ev.id = r.event_id
++      where p_athlete_id = any(r.athlete_ids) and ev.is_public
++    ), '[]'::jsonb)
++  );
++end $$;
++
++-- 7. Grants (Ruling 15): revoke everything from anon/authenticated -- tables, sequences, function
++--    execute, and the default privileges dev/db/bootstrap.sql granted at schema level -- then walk
++--    every function in schema public and grant execute back explicitly by name prefix. Nothing
++--    without an admin_/tk_/pub_ prefix (or server_time) is granted; tk_event stays ungranted too.
++--    Every later migration that adds an RPC must repeat this same block at its end.
++revoke all on all tables in schema public from anon, authenticated;
++revoke all on all sequences in schema public from anon, authenticated;
++revoke execute on all functions in schema public from public, anon, authenticated;
++alter default privileges in schema public revoke all on tables from anon, authenticated;
++alter default privileges in schema public revoke all on sequences from anon, authenticated;
++alter default privileges in schema public revoke execute on functions from public, anon, authenticated;
++-- Ruling 35: the schema-scoped form above cannot remove Postgres's built-in "PUBLIC gets EXECUTE
++-- on new functions" default (verified empirically: once a schema-scoped REVOKE from PUBLIC leaves
++-- nothing else granted, Postgres just drops that override row instead of storing it, so CREATE
++-- FUNCTION falls back to the hard-coded default again). Only the role-global form (no `in schema`)
++-- actually suppresses it, so every function created from now on -- in any schema, by anything this
++-- migration runs as -- starts truly PUBLIC-execute-free; this only needs to be set once (it is not
++-- schema-scoped, so later migrations don't need to repeat it). The schema-scoped anon/authenticated
++-- revokes above stay too, since they also undo dev/db/bootstrap.sql's (and Supabase's own) default
++-- grants to those two roles specifically.
++alter default privileges revoke execute on functions from public;
++do $$ declare f record; begin
++  for f in select p.oid::regprocedure as sig, p.proname from pg_proc p
++           join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' loop
++    if f.proname like 'admin\_%' then
++      execute format('grant execute on function %s to authenticated', f.sig);
++    elsif f.proname like 'tk\_%' and f.proname <> 'tk_event' or f.proname like 'pub\_%' or f.proname = 'server_time' then
++      execute format('grant execute on function %s to anon, authenticated', f.sig);
++    end if;
++  end loop;
++end $$;
+diff --git a/supabase/tests/10_schema.sql b/supabase/tests/10_schema.sql
+index 6fc2376..3cd787f 100644
+--- a/supabase/tests/10_schema.sql
++++ b/supabase/tests/10_schema.sql
+@@ -27,15 +27,16 @@ insert into public.events (id, name, date) values ('00000000-0000-0000-0000-0000
+ do $$ declare v bigint; begin
+   assert (select length(tk_token) from public.events where id = '00000000-0000-0000-0000-0000000000e1') = 24;
+   select version into v from public.events where id = '00000000-0000-0000-0000-0000000000e1';
+   insert into public.races (id, event_id, name, legs, config) values ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000e1', 'Corrida', '[{"modality":"run","label":"Corrida","distance_m":5000}]', public.default_race_config(1));
+   assert (select version from public.events where id = '00000000-0000-0000-0000-0000000000e1') > v, 'race insert bumps version';
+ end $$;
+ -- constraints
+ insert into public.entries (event_id, race_id, bib) values ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000a1', '10');
+ select tests.assert_raises($$insert into public.entries (event_id, race_id, bib) values ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000a1', '10')$$, '23505');
+ select tests.assert_raises($$insert into public.marks (id, event_id, ts, entry_id) select gen_random_uuid(), '00000000-0000-0000-0000-0000000000e1', now(), id from public.entries limit 1$$, '23514');
+--- RLS denies direct reads for anon (grants are revoked later in 0006; here RLS alone returns no rows)
++-- Direct reads for anon are refused outright: 0006 revokes all table grants from anon/authenticated
++-- (RLS alone, with no policies, would otherwise just return no rows instead of erroring).
+ select tests.as_anon();
+-do $$ begin assert (select count(*) from public.events) = 0; end $$;
++select tests.assert_raises($$select count(*) from public.events$$, '42501');
+ reset role;
+ rollback;
+diff --git a/supabase/tests/50_public.sql b/supabase/tests/50_public.sql
+new file mode 100644
+index 0000000..50d002d
+--- /dev/null
++++ b/supabase/tests/50_public.sql
+@@ -0,0 +1,163 @@
++begin;
++select tests.set('owner', public.bootstrap_owner('owner@ebc.test','senha-forte-1','Owner')::text);
++select tests.as_user(tests.get('owner')::uuid);
++
++-- fixtures: one event (created private), a relay race (swim leg 0, run leg 1), two athletes (one
++-- with email/phone/birth_date, one without), a team entry bib 101, and the wave's start time set.
++do $$ declare ev jsonb; ra jsonb; a jsonb; b jsonb; e jsonb; v_t0 timestamptz := now(); begin
++  perform tests.set('t0', v_t0::text);
++  ev := public.admin_save_event(jsonb_build_object('name', 'Copa Pública', 'date', v_t0::date, 'is_public', false));
++  perform tests.set('ev', ev ->> 'id');
++  perform tests.set('slug', ev ->> 'public_slug');
++
++  ra := public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'Revezamento', 'team_size', 2,
++        'legs', '[{"modality":"swim","label":"Natação","distance_m":750},{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb));
++  perform tests.set('race', ra -> 'race' ->> 'id');
++  perform public.admin_set_wave_start((ra -> 'waves' -> 0 ->> 'id')::uuid, v_t0);
++
++  a := public.admin_save_athlete('{"name":"Atleta A","sex":"M","email":"a@x.com","phone":"11999999999","birth_date":"1990-01-01"}'::jsonb);
++  perform tests.set('ath_a', a ->> 'id');
++  b := public.admin_save_athlete('{"name":"Atleta B","sex":"F"}'::jsonb);
++  perform tests.set('ath_b', b ->> 'id');
++
++  e := public.admin_save_entry(jsonb_build_object('race_id', ra -> 'race' ->> 'id', 'bib', '101', 'team_name', 'Equipe AB', 'notes', 'segredo da organização',
++        'members', jsonb_build_array(
++          jsonb_build_object('athlete_id', tests.get('ath_a'), 'legs', jsonb_build_array(0)),
++          jsonb_build_object('athlete_id', tests.get('ath_b'), 'legs', jsonb_build_array(1))
++        )));
++  perform tests.set('entry', e ->> 'id');
++end $$;
++
++-- while the event is private: pub_event and pub_events both refuse it.
++reset role;
++select tests.as_anon();
++select tests.assert_raises($$select public.pub_event(tests.get('slug'))$$, 'P0001', 'Evento não encontrado');
++do $$ begin
++  assert not exists (
++    select 1 from jsonb_array_elements(public.pub_events()) x where x ->> 'id' = tests.get('ev')
++  ), 'a private event must not appear in pub_events()';
++end $$;
++
++-- make it public, then add one live mark and one discarded one (inserted directly, as tk_sync and
++-- admin_update_mark belong to Task 6 -- pub_live must return both so clients can drop the discarded one).
++reset role;
++select tests.as_user(tests.get('owner')::uuid);
++do $$ begin perform public.admin_save_event(jsonb_build_object('id', tests.get('ev'), 'is_public', true)); end $$;
++reset role;
++do $$ declare m1 uuid := gen_random_uuid(); m2 uuid := gen_random_uuid(); begin
++  insert into public.marks (id, event_id, ts, device_ts, clock_offset_ms, clock_rtt_ms, entry_id, leg_index, discarded, discarded_by)
++    values (m1, tests.get('ev')::uuid, tests.get('t0')::timestamptz + interval '10 minutes', now(), 120, 40, tests.get('entry')::uuid, 0, false, null);
++  insert into public.marks (id, event_id, ts, device_ts, clock_offset_ms, clock_rtt_ms, entry_id, leg_index, discarded, discarded_by)
++    values (m2, tests.get('ev')::uuid, tests.get('t0')::timestamptz + interval '11 minutes', now(), 80, 30, tests.get('entry')::uuid, 1, true, 'organizer');
++  perform tests.set('mark_live', m1::text);
++  perform tests.set('mark_discarded', m2::text);
++end $$;
++
++-- pub_events(): now public.
++select tests.as_anon();
++do $$ begin
++  assert exists (
++    select 1 from jsonb_array_elements(public.pub_events()) x where x ->> 'id' = tests.get('ev')
++  ), 'the event should appear in pub_events() once public';
++end $$;
++
++-- pub_event: event has no tk_token/tk_enabled, entries include member names but not notes,
++-- athletes never carry email/phone/birth_date, age_year_end/age_event are computed (null when
++-- there is no birth_date), marks include the discarded one and never carry clock-audit fields.
++do $$ declare pub jsonb; v_athlete jsonb; v_a jsonb; v_b jsonb; v_expected_year_end int; v_expected_age int; begin
++  pub := public.pub_event(tests.get('slug'));
++
++  assert not (pub -> 'event' ? 'tk_token'), 'public event payload must not carry tk_token';
++  assert not (pub -> 'event' ? 'tk_enabled'), 'public event payload must not carry tk_enabled';
++
++  assert jsonb_array_length(pub -> 'entries') = 1;
++  assert (pub -> 'entries' -> 0 -> 'members' -> 0 ->> 'name') is not null, 'pub_event entries should include member names';
++  assert not (pub -> 'entries' -> 0 ? 'notes'), 'pub_event entries must not carry the organizer-only notes field';
++  assert (pub -> 'entries' -> 0 ->> 'status') is not null, 'pub_event entries should keep status';
++  assert (pub -> 'entries' -> 0 ->> 'penalty_ms') is not null, 'pub_event entries should keep penalty_ms';
++
++  assert jsonb_array_length(pub -> 'athletes') = 2;
++  for v_athlete in select el from jsonb_array_elements(pub -> 'athletes') as t(el) loop
++    assert not (v_athlete ? 'email'), 'pub_event athletes must not carry email';
++    assert not (v_athlete ? 'phone'), 'pub_event athletes must not carry phone';
++    assert not (v_athlete ? 'birth_date'), 'pub_event athletes must not carry birth_date';
++  end loop;
++
++  select el into v_a from jsonb_array_elements(pub -> 'athletes') as t(el) where el ->> 'id' = tests.get('ath_a');
++  -- computed straight from t0 (== the event's own date), not by reading public.events directly:
++  -- this whole block runs as anon, and anon has no table grants at all after 0006.
++  v_expected_year_end := date_part('year', tests.get('t0')::timestamptz::date) - date_part('year', '1990-01-01'::date);
++  v_expected_age := date_part('year', age(tests.get('t0')::timestamptz::date, '1990-01-01'::date));
++  assert (v_a ->> 'age_year_end')::int = v_expected_year_end,
++    'expected age_year_end ' || v_expected_year_end || ', got ' || (v_a ->> 'age_year_end');
++  assert (v_a ->> 'age_event')::int = v_expected_age,
++    'expected age_event ' || v_expected_age || ', got ' || (v_a ->> 'age_event');
++
++  select el into v_b from jsonb_array_elements(pub -> 'athletes') as t(el) where el ->> 'id' = tests.get('ath_b');
++  assert (v_b ->> 'age_year_end') is null, 'age_year_end should be null without a birth_date';
++  assert (v_b ->> 'age_event') is null, 'age_event should be null without a birth_date';
++
++  assert jsonb_array_length(pub -> 'marks') = 2, 'pub_event marks should include the discarded one too';
++  assert not (pub -> 'marks' -> 0 ? 'device_ts'), 'pub_event marks must not carry device_ts';
++  assert not (pub -> 'marks' -> 0 ? 'clock_offset_ms'), 'pub_event marks must not carry clock_offset_ms';
++  assert not (pub -> 'marks' -> 0 ? 'clock_rtt_ms'), 'pub_event marks must not carry clock_rtt_ms';
++end $$;
++
++-- pub_live: same delta semantics as admin_live, same mark projection, discarded included.
++do $$ declare live jsonb; begin
++  live := public.pub_live(tests.get('slug'), null);
++  assert jsonb_array_length(live -> 'marks') = 2, 'pub_live should include the discarded mark too';
++  assert jsonb_array_length(live -> 'waves') = 1;
++  assert not (live -> 'marks' -> 0 ? 'device_ts');
++
++  live := public.pub_live(tests.get('slug'), now() + interval '1 hour');
++  assert jsonb_array_length(live -> 'marks') = 0, 'marks after the cutoff should be empty';
++  assert jsonb_array_length(live -> 'waves') = 1, 'waves should always come back in full';
++end $$;
++select tests.assert_raises($$select public.pub_live('errado', null)$$, 'P0001', 'Evento não encontrado');
++
++-- pub_athlete: finalize the public race (one result for both athletes of entry 101), plus a
++-- second, private event+race+result for Atleta A only.
++reset role;
++select tests.as_user(tests.get('owner')::uuid);
++do $$ begin
++  perform public.admin_finalize_race(tests.get('race')::uuid, jsonb_build_array(jsonb_build_object(
++    'entry_id', tests.get('entry'), 'athlete_ids', jsonb_build_array(tests.get('ath_a'), tests.get('ath_b')),
++    'status', 'finished', 'final_ms', 1800000, 'overall_pos', 1, 'data', '{}'::jsonb
++  )));
++end $$;
++do $$ declare ev2 jsonb; ra2 jsonb; e2 jsonb; begin
++  ev2 := public.admin_save_event(jsonb_build_object('name', 'Copa Privada', 'date', tests.get('t0')::date));
++  perform tests.set('ev2', ev2 ->> 'id');
++  ra2 := public.admin_save_race(jsonb_build_object('event_id', ev2 ->> 'id', 'name', 'Corrida', 'team_size', 1,
++        'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb));
++  e2 := public.admin_save_entry(jsonb_build_object('race_id', ra2 -> 'race' ->> 'id',
++        'members', jsonb_build_array(jsonb_build_object('athlete_id', tests.get('ath_a')))));
++  perform public.admin_finalize_race((ra2 -> 'race' ->> 'id')::uuid, jsonb_build_array(jsonb_build_object(
++    'entry_id', e2 ->> 'id', 'athlete_ids', jsonb_build_array(tests.get('ath_a')),
++    'status', 'finished', 'final_ms', 1500000, 'overall_pos', 1, 'data', '{}'::jsonb
++  )));
++end $$;
++
++reset role;
++select tests.as_anon();
++do $$ declare prof jsonb; begin
++  prof := public.pub_athlete(tests.get('ath_a')::uuid);
++  assert prof -> 'athlete' ->> 'name' = 'Atleta A';
++  assert not (prof -> 'athlete' ? 'email'), 'pub_athlete must not carry email';
++  assert not (prof -> 'athlete' ? 'birth_date'), 'pub_athlete must not carry birth_date';
++  assert jsonb_array_length(prof -> 'results') = 1,
++    'pub_athlete should omit results from private events, got ' || jsonb_array_length(prof -> 'results');
++  assert (prof -> 'results' -> 0 ->> 'race_id') = tests.get('race'), 'expected only the public race''s result';
++end $$;
++
++-- pub_athlete: an athlete with public_profile=false is refused, even though they exist.
++reset role;
++select tests.as_user(tests.get('owner')::uuid);
++do $$ begin perform public.admin_save_athlete(jsonb_build_object('id', tests.get('ath_b'), 'public_profile', false)); end $$;
++reset role;
++select tests.as_anon();
++select tests.assert_raises($$select public.pub_athlete(tests.get('ath_b')::uuid)$$, 'P0001', 'Perfil não encontrado');
++
++reset role;
++rollback;
+diff --git a/supabase/tests/60_security.sql b/supabase/tests/60_security.sql
+new file mode 100644
+index 0000000..9fc5b82
+--- /dev/null
++++ b/supabase/tests/60_security.sql
+@@ -0,0 +1,31 @@
++begin;
++select tests.set('owner', public.bootstrap_owner('owner@ebc.test','senha-forte-1','Owner')::text);
++select tests.set('stranger', public.internal_create_auth_user('x@ebc.test','senha-forte-1')::text);
++
++-- Ruling 35: a function created *after* 0006 (here, inside this test transaction) must still not
++-- be PUBLIC-executable -- the schema-scoped default-privileges revoke alone cannot suppress
++-- Postgres's built-in "PUBLIC gets EXECUTE on new functions" rule; only the role-global form
++-- (`alter default privileges revoke execute on functions from public;`, no `in schema`) can.
++create function public.zz_probe() returns int language sql as $$ select 1 $$;
++do $$ begin
++  assert not has_function_privilege('anon', 'public.zz_probe()', 'execute'),
++    'a function created after 0006 must not be executable by anon';
++  assert not has_function_privilege('authenticated', 'public.zz_probe()', 'execute'),
++    'a function created after 0006 must not be executable by authenticated';
++end $$;
++
++select tests.as_anon();
++select tests.assert_raises($$select * from public.events$$, '42501');
++select tests.assert_raises($$select * from public.marks$$, '42501');
++select tests.assert_raises($$select public.admin_list_events()$$, '42501');
++select tests.assert_raises($$select public.internal_create_auth_user('a@b.co','12345678')$$, '42501');
++select tests.assert_raises($$select public.bootstrap_owner('a@b.co','12345678','x')$$, '42501');
++select tests.assert_raises($$select public.tk_event('x')$$, '42501');
++select tests.assert_raises($$select public.entry_json(gen_random_uuid(), true)$$, '42501');
++do $$ begin assert public.server_time() > 0; assert jsonb_typeof(public.pub_events()) = 'array'; end $$;
++reset role;
++select tests.as_user(tests.get('stranger')::uuid);
++select tests.assert_raises($$select public.admin_list_events()$$, '42501');
++select tests.assert_raises($$select * from public.athletes$$, '42501');
++reset role;
++rollback;
+diff --git a/tests/integration/shim.test.ts b/tests/integration/shim.test.ts
+index 78faf46..decfba5 100644
+--- a/tests/integration/shim.test.ts
++++ b/tests/integration/shim.test.ts
+@@ -12,20 +12,27 @@ const pgUrl = () => execSync('bash scripts/db-local.sh url', { env: { ...process
+ beforeAll(async () => {
+   execSync('bash scripts/db-local.sh reset', { env: { ...process.env, EBC_DB: DB }, stdio: 'inherit' });
+   const c = new pg.Client({ connectionString: pgUrl() });
+   await c.connect();
+   await c.query(`
+     create function public.shim_echo(p_value jsonb, p_n int default 1) returns jsonb language sql as
+       $$ select jsonb_build_object('value', p_value, 'n', p_n, 'role', current_user, 'uid', auth.uid()) $$;
+     create function public.shim_fail() returns void language plpgsql as
+       $$ begin raise exception 'Falhou' using errcode = 'P0001'; end $$;
+     create function public.shim_bigint() returns bigint language sql as $$ select 1790000000000::bigint $$;
++    -- 0006's grants (revoke execute on all functions, plus the role-global default-privileges
++    -- revoke from public per Ruling 35) mean a function created here, after the migrations have
++    -- already run, is no longer PUBLIC-executable by default. These probe functions exist only to
++    -- exercise the shim's own RPC/error/bigint plumbing, not the app's grant model, so grant them
++    -- explicitly (and only them) rather than weakening 0006 or dev/db/bootstrap.sql.
++    grant execute on function public.shim_echo(jsonb, int), public.shim_fail(), public.shim_bigint()
++      to anon, authenticated;
+     insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
+     values ('00000000-0000-0000-0000-000000000000', '11111111-1111-1111-1111-111111111111', 'authenticated', 'authenticated',
+             'tester@ebc.test', extensions.crypt('senha-123', extensions.gen_salt('bf')), now(), '{}', '{}', now(), now());
+   `);
+   await c.end();
+   shim = spawn('node', ['dev/shim/server.mjs'], { env: { ...process.env, EBC_DB: DB, SHIM_PORT: String(PORT) }, stdio: 'ignore' });
+   for (let i = 0; i < 50; i++) {
+     try { await fetch(`${url}/rest/v1/`); break; } catch { await new Promise(r => setTimeout(r, 100)); }
+   }
+ });

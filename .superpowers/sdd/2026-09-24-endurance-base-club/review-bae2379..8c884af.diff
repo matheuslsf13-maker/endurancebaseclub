@@ -1,0 +1,851 @@
+# Review package: bae2379..8c884af (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+8c884af feat(review): pending issues and official time decisions
+
+## Files changed
+ src/features/review/CrossingEditor.tsx | 313 +++++++++++++++++++++++++++++++++
+ src/features/review/ReviewTab.tsx      | 285 +++++++++++++++++++++++++++++-
+ src/features/review/review.test.tsx    | 224 +++++++++++++++++++++++
+ 3 files changed, 821 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/features/review/CrossingEditor.tsx b/src/features/review/CrossingEditor.tsx
+new file mode 100644
+index 0000000..259e1a1
+--- /dev/null
++++ b/src/features/review/CrossingEditor.tsx
+@@ -0,0 +1,313 @@
++import { useMemo, useState } from 'react';
++import { Badge, Button, Input, Modal, Select, Table, useToast } from '../../components/ui';
++import { api, ApiError } from '../../lib/api';
++import { formatClock, formatDuration, parseClockInput } from '../../lib/format';
++import { computeEntryTiming } from '../../domain/consolidation';
++import type { ResolutionMode, ResolutionRow, MarkRow } from '../../lib/types';
++import { entryDisplayName, entryWave, legAthleteId } from '../../domain/eventModel';
++import { planBibAssignment } from '../../domain/suggestLeg';
++import { useEventContext } from '../events/EventContext';
++
++export interface CrossingEditorProps {
++  entryId: string;
++  legIndex: number;
++  onClose: () => void;
++}
++
++/** Modal to review one entry's leg crossing (spec §8): the candidate marks (with per-mark
++ * discard/restore and move actions), a decision (system time / a specific mark / a manual time)
++ * and a live preview of the resulting leg time and total — recomputed with `computeEntryTiming`,
++ * never with ad-hoc arithmetic. */
++export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorProps) {
++  const { agg, index, timing, refresh } = useEventContext();
++  const toast = useToast();
++
++  const entry = index.entriesById.get(entryId);
++  const race = entry ? index.racesById.get(entry.race_id) : undefined;
++  const legTiming = timing.byEntry.get(entryId)?.legs[legIndex];
++  const crossing = legTiming?.crossing ?? null;
++  const resolution = crossing?.resolution ?? null;
++
++  const [mode, setMode] = useState<ResolutionMode>(resolution?.mode ?? 'system');
++  const [markId, setMarkId] = useState<string | null>(resolution?.mode === 'mark' ? resolution.mark_id : null);
++  const [manualText, setManualText] = useState(() =>
++    resolution?.mode === 'manual' && resolution.manual_ts ? formatClock(Date.parse(resolution.manual_ts), { millis: true }) : '',
++  );
++  const [manualError, setManualError] = useState<string | null>(null);
++  const [note, setNote] = useState(resolution?.note ?? '');
++  const [saving, setSaving] = useState(false);
++  const [clearing, setClearing] = useState(false);
++  const [busyMarkId, setBusyMarkId] = useState<string | null>(null);
++  const [moveBib, setMoveBib] = useState<Record<string, string>>({});
++  const [moveLeg, setMoveLeg] = useState<Record<string, number>>({});
++
++  const legMarks = useMemo(
++    () =>
++      agg.marks
++        .filter((m) => m.entry_id === entryId && m.leg_index === legIndex)
++        .slice()
++        .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)),
++    [agg.marks, entryId, legIndex],
++  );
++
++  const preview = useMemo(() => {
++    if (!entry || !race) return null;
++    const wave = entryWave(entry, index);
++    const entryMarks = agg.marks.filter((m) => m.entry_id === entryId);
++    let manualTs: string | null = null;
++    if (mode === 'manual') {
++      const ms = parseClockInput(manualText, agg.event.date);
++      manualTs = ms !== null ? new Date(ms).toISOString() : null;
++    }
++    const hypothetical: ResolutionRow = {
++      entry_id: entryId,
++      leg_index: legIndex,
++      event_id: agg.event.id,
++      mode,
++      mark_id: mode === 'mark' ? markId : null,
++      manual_ts: manualTs,
++      note,
++      updated_at: new Date().toISOString(),
++    };
++    const otherResolutions = agg.resolutions.filter((r) => !(r.entry_id === entryId && r.leg_index === legIndex));
++    return computeEntryTiming(entry, race, wave, entryMarks, [...otherResolutions, hypothetical]);
++  }, [entry, race, index, agg.marks, agg.resolutions, agg.event, entryId, legIndex, mode, markId, manualText, note]);
++
++  function authorOf(timekeeperId: string | null): string {
++    return timekeeperId === null ? 'Organização' : (index.timekeepersById.get(timekeeperId)?.name ?? 'Cronometrista');
++  }
++
++  async function toggleDiscard(mark: MarkRow) {
++    setBusyMarkId(mark.id);
++    try {
++      await api.admin.updateMark(mark.id, { discarded: !mark.discarded });
++      await refresh();
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    } finally {
++      setBusyMarkId(null);
++    }
++  }
++
++  async function moveMark(mark: MarkRow) {
++    const bib = (moveBib[mark.id] ?? '').trim();
++    setBusyMarkId(mark.id);
++    try {
++      if (bib) {
++        const plan = planBibAssignment({
++          entries: agg.entries,
++          racesById: index.racesById,
++          marks: agg.marks,
++          markId: mark.id,
++          tsMs: Date.parse(mark.ts),
++          bibText: bib,
++        });
++        if ('error' in plan) {
++          toast.show({ message: plan.error, tone: 'danger' });
++          return;
++        }
++        await api.admin.updateMark(mark.id, { entry_id: plan.entry.id, leg_index: plan.suggestion.leg_index });
++        if (plan.warning) toast.show({ message: plan.warning, tone: 'warning' });
++      } else {
++        const target = moveLeg[mark.id] ?? legIndex;
++        if (target === legIndex) return;
++        await api.admin.updateMark(mark.id, { leg_index: target });
++      }
++      await refresh();
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    } finally {
++      setBusyMarkId(null);
++    }
++  }
++
++  async function save() {
++    setManualError(null);
++    let manualTs: string | null = null;
++    if (mode === 'manual') {
++      const ms = parseClockInput(manualText, agg.event.date);
++      if (ms === null) {
++        setManualError('Hora inválida (hh:mm:ss)');
++        return;
++      }
++      manualTs = new Date(ms).toISOString();
++    }
++    setSaving(true);
++    try {
++      await api.admin.setResolution(entryId, legIndex, mode, mode === 'mark' ? markId : null, manualTs, note);
++      await refresh();
++      onClose();
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  async function clearDecision() {
++    setClearing(true);
++    try {
++      await api.admin.clearResolution(entryId, legIndex);
++      await refresh();
++      onClose();
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    } finally {
++      setClearing(false);
++    }
++  }
++
++  if (!entry || !race || !crossing) {
++    return (
++      <Modal open onClose={onClose} title="Passagem">
++        <p className="text-sm text-muted">Passagem não encontrada.</p>
++      </Modal>
++    );
++  }
++
++  const leg = race.legs[legIndex];
++  const athleteId = legAthleteId(entry, legIndex);
++  const athleteName = athleteId ? index.athletesById.get(athleteId)?.name : undefined;
++  const systemLabel = crossing.system_source === 'reference' ? 'Tempo do sistema (cronometrista de referência)' : 'Tempo do sistema (mediana)';
++  const systemTime = crossing.system_ms !== null ? formatClock(crossing.system_ms, { millis: true }) : '—';
++
++  return (
++    <Modal
++      open
++      onClose={onClose}
++      title={`Nº ${entry.bib} · Perna ${legIndex + 1} (${leg.label})`}
++      size="lg"
++      footer={
++        <>
++          {resolution && (
++            <Button variant="secondary" onClick={() => void clearDecision()} loading={clearing}>
++              Remover decisão
++            </Button>
++          )}
++          <Button onClick={() => void save()} loading={saving} data-testid="resolution-save">
++            Salvar
++          </Button>
++        </>
++      }
++    >
++      <div className="flex flex-col gap-4">
++        <p className="text-sm text-muted">
++          {entryDisplayName(entry, index)}
++          {athleteName ? ` · ${athleteName}` : ''}
++        </p>
++
++        <Table>
++          <thead>
++            <tr className="text-muted">
++              <th className="py-1 pr-2">Cronometrista</th>
++              <th className="py-1 pr-2">Hora</th>
++              <th className="py-1 pr-2">Δ mediana</th>
++              <th className="py-1 pr-2">Situação</th>
++              <th className="py-1 pr-2">Ações</th>
++            </tr>
++          </thead>
++          <tbody>
++            {legMarks.map((m) => {
++              const ts = Date.parse(m.ts);
++              const delta = crossing.median_ms !== null ? (ts - crossing.median_ms) / 1000 : null;
++              const isDuplicate = crossing.duplicates.includes(m.id);
++              return (
++                <tr key={m.id} className="border-t border-border align-top">
++                  <td className="py-2 pr-2 whitespace-nowrap">{authorOf(m.timekeeper_id)}</td>
++                  <td className="py-2 pr-2 whitespace-nowrap tabular">{formatClock(ts, { millis: true })}</td>
++                  <td className="py-2 pr-2 whitespace-nowrap tabular">
++                    {delta !== null ? `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} s` : '—'}
++                  </td>
++                  <td className="py-2 pr-2">
++                    <div className="flex flex-wrap gap-1">
++                      {isDuplicate && <Badge tone="info">Duplicada</Badge>}
++                      {m.discarded && <Badge tone="danger">Descartada</Badge>}
++                    </div>
++                  </td>
++                  <td className="py-2 pr-2">
++                    <div className="flex flex-wrap items-center gap-2">
++                      <Button size="sm" variant="secondary" loading={busyMarkId === m.id} onClick={() => void toggleDiscard(m)}>
++                        {m.discarded ? 'Restaurar' : 'Descartar'}
++                      </Button>
++                      <Select
++                        label="Mover para"
++                        className="w-auto"
++                        value={String(moveLeg[m.id] ?? legIndex)}
++                        onChange={(e) => setMoveLeg((s) => ({ ...s, [m.id]: Number(e.target.value) }))}
++                        options={race.legs.map((l, i) => ({ value: String(i), label: `Perna ${i + 1} (${l.label})` }))}
++                      />
++                      <Input
++                        label="Nº (opcional)"
++                        className="w-20"
++                        value={moveBib[m.id] ?? ''}
++                        onChange={(e) => setMoveBib((s) => ({ ...s, [m.id]: e.target.value }))}
++                      />
++                      <Button size="sm" variant="secondary" loading={busyMarkId === m.id} onClick={() => void moveMark(m)}>
++                        Mover
++                      </Button>
++                    </div>
++                  </td>
++                </tr>
++              );
++            })}
++          </tbody>
++        </Table>
++
++        <fieldset className="flex flex-col gap-3">
++          <legend className="text-sm font-medium">Decisão</legend>
++          <label className="flex min-h-11 items-center gap-2">
++            <input type="radio" name="resolution" data-testid="resolution-system" checked={mode === 'system'} onChange={() => setMode('system')} />
++            <span>
++              {systemLabel}: {systemTime}
++            </span>
++          </label>
++          {crossing.candidates.map((c) => (
++            <label key={c.mark_id} className="flex min-h-11 items-center gap-2">
++              <input
++                type="radio"
++                name="resolution"
++                data-testid={`resolution-mark-${c.mark_id}`}
++                checked={mode === 'mark' && markId === c.mark_id}
++                onChange={() => {
++                  setMode('mark');
++                  setMarkId(c.mark_id);
++                }}
++              />
++              <span>
++                {authorOf(c.timekeeper_id)}: {formatClock(c.ts_ms, { millis: true })}
++              </span>
++            </label>
++          ))}
++          <label className="flex min-h-11 items-center gap-2">
++            <input type="radio" name="resolution" data-testid="resolution-manual" checked={mode === 'manual'} onChange={() => setMode('manual')} />
++            <span>Manual:</span>
++            <input
++              type="text"
++              placeholder="hh:mm:ss.d"
++              value={manualText}
++              onChange={(e) => {
++                setManualText(e.target.value);
++                setMode('manual');
++              }}
++              data-testid="resolution-manual-input"
++              className="min-h-11 w-32 rounded-xl border border-border bg-surface px-2"
++            />
++          </label>
++          {manualError && (
++            <p role="alert" className="text-sm text-danger">
++              {manualError}
++            </p>
++          )}
++          <Input label="Observação" value={note} onChange={(e) => setNote(e.target.value)} />
++        </fieldset>
++
++        {preview && (
++          <div className="rounded-xl border border-border bg-surface-2 p-3 text-sm tabular">
++            <p>Tempo da perna: {formatDuration(preview.legs[legIndex]?.leg_ms ?? null)}</p>
++            <p>Total: {formatDuration(preview.total_ms)}</p>
++          </div>
++        )}
++      </div>
++    </Modal>
++  );
++}
+diff --git a/src/features/review/ReviewTab.tsx b/src/features/review/ReviewTab.tsx
+index 822bccc..7d19223 100644
+--- a/src/features/review/ReviewTab.tsx
++++ b/src/features/review/ReviewTab.tsx
+@@ -1 +1,284 @@
+-export default function ReviewTab() { return <h1 className="p-6 brand-title">ReviewTab</h1>; }
++import { useMemo, useState } from 'react';
++import type { FormEvent } from 'react';
++import { Badge, Button, EmptyState, Input, Select, useToast } from '../../components/ui';
++import type { BadgeTone } from '../../components/ui';
++import { api, ApiError } from '../../lib/api';
++import { formatClock } from '../../lib/format';
++import type { Crossing, Issue, IssueType } from '../../domain/consolidation';
++import { ISSUE_LABEL, SEVERITY_LABEL, crossingSourceLabel } from '../../domain/labels';
++import { entryDisplayName } from '../../domain/eventModel';
++import type { EventIndex } from '../../domain/eventModel';
++import { planBibAssignment } from '../../domain/suggestLeg';
++import { useEventContext } from '../events/EventContext';
++import { CrossingEditor } from './CrossingEditor';
++
++type Severity = Issue['severity'];
++const SEVERITY_ORDER: Severity[] = ['error', 'warning', 'info'];
++const SEVERITY_PLURAL: Record<Severity, string> = { error: 'Erros', warning: 'Avisos', info: 'Info' };
++const SEVERITY_TONE: Record<Severity, BadgeTone> = { error: 'danger', warning: 'warning', info: 'info' };
++
++/** Which leg an issue's suggested move points to, resolved through its entry's race. */
++function suggestedLegLabel(issue: Issue, index: EventIndex): string {
++  const entry = issue.entry_id ? index.entriesById.get(issue.entry_id) : undefined;
++  const race = entry ? index.racesById.get(entry.race_id) : undefined;
++  const leg = race && issue.suggested_leg_index !== undefined ? race.legs[issue.suggested_leg_index] : undefined;
++  return leg?.label ?? '';
++}
++
++function crossingStatus(c: Crossing): { label: string; tone: BadgeTone } {
++  if (c.official_ms === null) return { label: 'Sem passagem', tone: 'neutral' };
++  if (c.chosen_mark_discarded) return { label: 'Escolha descartada', tone: 'danger' };
++  if (c.divergent && !c.resolution) return { label: 'Divergência', tone: 'warning' };
++  if (c.resolution) return { label: 'Resolvido', tone: 'info' };
++  return { label: 'OK', tone: 'success' };
++}
++
++/** Editing target for the modal: which entry/leg crossing is open, or none. */
++interface EditingTarget {
++  entryId: string;
++  legIndex: number;
++}
++
++export default function ReviewTab() {
++  const { agg, index, timing, refresh } = useEventContext();
++  const toast = useToast();
++  const [raceFilter, setRaceFilter] = useState('all');
++  const [typeFilter, setTypeFilter] = useState<'all' | IssueType>('all');
++  const [expanded, setExpanded] = useState<Record<Severity, boolean>>({ error: true, warning: true, info: false });
++  const [search, setSearch] = useState('');
++  const [editing, setEditing] = useState<EditingTarget | null>(null);
++
++  const filteredIssues = useMemo(
++    () =>
++      timing.issues.filter(
++        (i) => (raceFilter === 'all' || i.race_id === raceFilter) && (typeFilter === 'all' || i.type === typeFilter),
++      ),
++    [timing.issues, raceFilter, typeFilter],
++  );
++  const bySeverity = useMemo(() => {
++    const map = new Map<Severity, Issue[]>();
++    for (const sev of SEVERITY_ORDER) map.set(sev, []);
++    for (const issue of filteredIssues) map.get(issue.severity)!.push(issue);
++    return map;
++  }, [filteredIssues]);
++
++  const crossings = useMemo(() => {
++    const term = search.trim().toLowerCase();
++    const rows: EditingTarget[] = [];
++    for (const entry of agg.entries) {
++      const race = index.racesById.get(entry.race_id);
++      if (!race) continue;
++      if (term) {
++        const name = entryDisplayName(entry, index).toLowerCase();
++        if (!entry.bib.toLowerCase().includes(term) && !name.includes(term)) continue;
++      }
++      for (let k = 0; k < race.legs.length; k++) rows.push({ entryId: entry.id, legIndex: k });
++    }
++    return rows;
++  }, [agg.entries, index, search]);
++
++  async function moveSuggested(issue: Issue) {
++    const markId = issue.mark_ids?.[0];
++    if (!markId || issue.suggested_leg_index === undefined) return;
++    try {
++      await api.admin.updateMark(markId, { leg_index: issue.suggested_leg_index });
++      await refresh();
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    }
++  }
++
++  return (
++    <div className="flex flex-col gap-8">
++      <section className="flex flex-col gap-3">
++        <div className="flex flex-wrap items-end justify-between gap-3">
++          <h2 className="brand-title text-lg font-semibold">Pendências</h2>
++          <div className="flex flex-wrap items-end gap-3">
++            <Select
++              label="Prova"
++              value={raceFilter}
++              onChange={(e) => setRaceFilter(e.target.value)}
++              className="w-auto"
++              options={[{ value: 'all', label: 'Todas as provas' }, ...agg.races.map((r) => ({ value: r.id, label: r.name }))]}
++            />
++            <Select
++              label="Tipo"
++              value={typeFilter}
++              onChange={(e) => setTypeFilter(e.target.value as 'all' | IssueType)}
++              className="w-auto"
++              options={[
++                { value: 'all', label: 'Todos os tipos' },
++                ...(Object.entries(ISSUE_LABEL) as [IssueType, string][]).map(([value, label]) => ({ value, label })),
++              ]}
++            />
++          </div>
++        </div>
++
++        {filteredIssues.length === 0 ? (
++          <EmptyState title="Nenhuma pendência" />
++        ) : (
++          <div data-testid="issues-list" className="flex flex-col gap-3">
++            {SEVERITY_ORDER.map((sev) => {
++              const list = bySeverity.get(sev) ?? [];
++              const isOpen = expanded[sev];
++              return (
++                <div key={sev} className="overflow-hidden rounded-xl border border-border">
++                  <button
++                    type="button"
++                    className="flex min-h-11 w-full items-center justify-between px-4 py-2 text-left font-medium hover:bg-surface-2"
++                    onClick={() => setExpanded((prev) => ({ ...prev, [sev]: !prev[sev] }))}
++                  >
++                    <span>
++                      {SEVERITY_PLURAL[sev]} ({list.length})
++                    </span>
++                    <span aria-hidden="true">{isOpen ? '−' : '+'}</span>
++                  </button>
++                  {isOpen && list.length > 0 && (
++                    <ul className="flex flex-col divide-y divide-border border-t border-border">
++                      {list.map((issue, i) => (
++                        <li key={i} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
++                          <div className="min-w-0">
++                            <Badge tone={SEVERITY_TONE[issue.severity]}>{SEVERITY_LABEL[issue.severity]}</Badge>{' '}
++                            <span className="text-sm">{issue.message}</span>
++                          </div>
++                          <div className="flex flex-wrap items-center gap-2">
++                            {issue.type === 'unassigned' && issue.mark_ids?.[0] && <UnassignedAssign markId={issue.mark_ids[0]} />}
++                            {issue.entry_id !== undefined && issue.leg_index !== undefined && (
++                              <Button
++                                size="sm"
++                                variant="secondary"
++                                onClick={() => setEditing({ entryId: issue.entry_id!, legIndex: issue.leg_index! })}
++                              >
++                                Resolver
++                              </Button>
++                            )}
++                            {issue.type === 'divergence' && issue.suggested_leg_index !== undefined && issue.mark_ids?.[0] && (
++                              <Button size="sm" data-testid="move-mark-suggested" onClick={() => void moveSuggested(issue)}>
++                                Mover marcação para a perna {issue.suggested_leg_index + 1} ({suggestedLegLabel(issue, index)})
++                              </Button>
++                            )}
++                          </div>
++                        </li>
++                      ))}
++                    </ul>
++                  )}
++                </div>
++              );
++            })}
++          </div>
++        )}
++      </section>
++
++      <section className="flex flex-col gap-3">
++        <div className="flex flex-wrap items-end justify-between gap-3">
++          <h2 className="brand-title text-lg font-semibold">Todas as passagens</h2>
++          <Input label="Buscar" placeholder="Nº ou nome" value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-xs" />
++        </div>
++        {crossings.length === 0 ? (
++          <EmptyState title="Nenhuma passagem encontrada" />
++        ) : (
++          <ul className="flex flex-col gap-2">
++            {crossings.map(({ entryId, legIndex }) => (
++              <CrossingRow
++                key={`${entryId}-${legIndex}`}
++                entryId={entryId}
++                legIndex={legIndex}
++                onOpen={() => setEditing({ entryId, legIndex })}
++              />
++            ))}
++          </ul>
++        )}
++      </section>
++
++      {editing && <CrossingEditor entryId={editing.entryId} legIndex={editing.legIndex} onClose={() => setEditing(null)} />}
++    </div>
++  );
++}
++
++function CrossingRow({ entryId, legIndex, onOpen }: { entryId: string; legIndex: number; onOpen: () => void }) {
++  const { agg, index, timing } = useEventContext();
++  const entry = index.entriesById.get(entryId);
++  const race = entry ? index.racesById.get(entry.race_id) : undefined;
++  const legTiming = timing.byEntry.get(entryId)?.legs[legIndex];
++  if (!entry || !race || !legTiming) return null;
++
++  const leg = race.legs[legIndex];
++  const c = legTiming.crossing;
++  const status = crossingStatus(c);
++  const source = crossingSourceLabel(c, index.timekeepersById, agg.marks);
++
++  return (
++    <li>
++      <button
++        type="button"
++        data-testid="crossing-row"
++        onClick={onOpen}
++        className="flex w-full flex-col gap-1 rounded-xl border border-border bg-surface px-4 py-3 text-left hover:bg-surface-2 sm:flex-row sm:items-center sm:justify-between"
++      >
++        <span className="min-w-0 truncate">
++          Nº {entry.bib} · {entryDisplayName(entry, index)} · Perna {legIndex + 1} ({leg.label})
++        </span>
++        <span className="flex flex-wrap items-center gap-3 text-sm tabular text-muted">
++          <span>{c.official_ms !== null ? formatClock(c.official_ms, { tenths: true }) : '—'}</span>
++          <span>{source || '—'}</span>
++          <span>{c.candidates.length} marc.</span>
++          <span>{c.spread_ms !== null ? `${(c.spread_ms / 1000).toFixed(1)} s` : '—'}</span>
++          <Badge tone={status.tone}>{status.label}</Badge>
++        </span>
++      </button>
++    </li>
++  );
++}
++
++/** Inline "typed bib → suggested leg" assignment for an `unassigned` issue (Ruling 2: reuses
++ * `planBibAssignment`, the same helper the timekeeper app and live board use). */
++function UnassignedAssign({ markId }: { markId: string }) {
++  const { agg, index, refresh } = useEventContext();
++  const toast = useToast();
++  const [bib, setBib] = useState('');
++  const [busy, setBusy] = useState(false);
++
++  async function onSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const mark = agg.marks.find((m) => m.id === markId);
++    if (!mark) return;
++    const plan = planBibAssignment({
++      entries: agg.entries,
++      racesById: index.racesById,
++      marks: agg.marks,
++      markId: mark.id,
++      tsMs: Date.parse(mark.ts),
++      bibText: bib,
++    });
++    if ('error' in plan) {
++      toast.show({ message: plan.error, tone: 'danger' });
++      return;
++    }
++    setBusy(true);
++    try {
++      await api.admin.updateMark(mark.id, { entry_id: plan.entry.id, leg_index: plan.suggestion.leg_index });
++      if (plan.warning) toast.show({ message: plan.warning, tone: 'warning' });
++      await refresh();
++      setBib('');
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form onSubmit={(e) => void onSubmit(e)} className="flex items-center gap-2">
++      <input
++        aria-label="Nº de peito"
++        placeholder="Nº"
++        value={bib}
++        onChange={(e) => setBib(e.target.value)}
++        className="min-h-11 w-20 rounded-xl border border-border bg-surface px-2 text-sm"
++      />
++      <Button type="submit" size="sm" variant="secondary" loading={busy}>
++        Atribuir
++      </Button>
++    </form>
++  );
++}
+diff --git a/src/features/review/review.test.tsx b/src/features/review/review.test.tsx
+new file mode 100644
+index 0000000..30f07a8
+--- /dev/null
++++ b/src/features/review/review.test.tsx
+@@ -0,0 +1,224 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { screen } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++
++import { renderWithProviders } from '../../test/renderWithProviders';
++import type { EventAggregate } from '../../lib/types';
++import {
++  iso, makeAthlete, makeEntry, makeEvent, makeMark, makeRace, makeResolution, makeTimekeeper, makeWave,
++  MIN, SEC, T0,
++} from '../../domain/testing/fixtures';
++import { EventProvider } from '../events/EventContext';
++import ReviewTab from './ReviewTab';
++
++const L0 = T0 + 10 * MIN;
++
++const mocks = vi.hoisted(() => ({
++  serverTime: vi.fn<() => Promise<number>>(),
++  updateMark: vi.fn(),
++  setResolution: vi.fn(),
++  clearResolution: vi.fn(),
++}));
++
++vi.mock('../../lib/api', () => ({
++  ApiError: class ApiError extends Error {
++    code: string | null = null;
++  },
++  api: {
++    serverTime: mocks.serverTime,
++    admin: {
++      updateMark: mocks.updateMark,
++      setResolution: mocks.setResolution,
++      clearResolution: mocks.clearResolution,
++    },
++  },
++}));
++
++function makeAgg(p: Partial<EventAggregate> = {}): EventAggregate {
++  return {
++    event: makeEvent(), races: [makeRace()], waves: [makeWave()], entries: [makeEntry()],
++    athletes: [makeAthlete()], timekeepers: [makeTimekeeper({ id: 'tk1', name: 'Ana' }), makeTimekeeper({ id: 'tk2', name: 'Bia' })],
++    marks: [], resolutions: [], results: [], version: 1, server_now: iso(T0), ...p,
++  };
++}
++
++function renderReview(agg: EventAggregate) {
++  const refresh = vi.fn(async () => {});
++  const patchAgg = vi.fn();
++  return renderWithProviders(
++    <EventProvider eventId="e1" agg={agg} refresh={refresh} patchAgg={patchAgg}>
++      <ReviewTab />
++    </EventProvider>,
++  );
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.serverTime.mockResolvedValue(Date.now());
++  mocks.updateMark.mockResolvedValue({});
++  mocks.setResolution.mockResolvedValue({});
++  mocks.clearResolution.mockResolvedValue(undefined);
++});
++
++describe('ReviewTab: issues list', () => {
++  it('shows the divergence message', () => {
++    const marks = [
++      makeMark({ at: L0, timekeeper_id: 'tk1' }),
++      makeMark({ at: L0 + 14 * SEC, timekeeper_id: 'tk2' }),
++      makeMark({ at: T0 + 30 * MIN, leg_index: 1 }),
++    ];
++    renderReview(makeAgg({ marks }));
++    expect(screen.getByTestId('issues-list')).toHaveTextContent('divergência de 14,0 s');
++  });
++
++  it('groups issues by severity and keeps Info collapsed by default', async () => {
++    const user = userEvent.setup();
++    // Same timekeeper marks the leg twice: a 'duplicate' (info) issue, plus the finish so the entry is 'finished'.
++    const marks = [makeMark({ at: L0 }), makeMark({ at: L0 + 200 }), makeMark({ at: T0 + 30 * MIN, leg_index: 1 })];
++    renderReview(makeAgg({ marks }));
++
++    expect(screen.getByText('Avisos (0)')).toBeInTheDocument();
++    expect(screen.getByText('Info (1)')).toBeInTheDocument();
++    expect(screen.queryByText(/marcou mais de uma vez/)).not.toBeInTheDocument();
++
++    await user.click(screen.getByText('Info (1)'));
++    expect(screen.getByText(/marcou mais de uma vez/)).toBeInTheDocument();
++  });
++
++  it('filters the issues by type', async () => {
++    const user = userEvent.setup();
++    const marks = [
++      makeMark({ at: L0, timekeeper_id: 'tk1' }),
++      makeMark({ at: L0 + 14 * SEC, timekeeper_id: 'tk2' }),
++      makeMark({ at: L0 + 200, timekeeper_id: 'tk1' }),
++      makeMark({ at: T0 + 30 * MIN, leg_index: 1 }),
++    ];
++    renderReview(makeAgg({ marks }));
++    expect(screen.getByText('Avisos (1)')).toBeInTheDocument();
++    expect(screen.getByText('Info (1)')).toBeInTheDocument();
++
++    await user.selectOptions(screen.getByLabelText('Tipo'), 'duplicate');
++    expect(screen.getByText('Avisos (0)')).toBeInTheDocument();
++    expect(screen.getByText('Info (1)')).toBeInTheDocument();
++  });
++});
++
++describe('ReviewTab: resolving a divergence', () => {
++  function divergenceAgg() {
++    const a = makeMark({ at: L0, timekeeper_id: 'tk1' });
++    const b = makeMark({ at: L0 + 14 * SEC, timekeeper_id: 'tk2' });
++    const finish = makeMark({ at: T0 + 30 * MIN, leg_index: 1 });
++    return { agg: makeAgg({ marks: [a, b, finish] }), a, b };
++  }
++
++  it('choosing a candidate mark and saving calls setResolution with that mark', async () => {
++    const user = userEvent.setup();
++    const { agg, b } = divergenceAgg();
++    renderReview(agg);
++
++    await user.click(screen.getByRole('button', { name: 'Resolver' }));
++    await user.click(screen.getByTestId(`resolution-mark-${b.id}`));
++    await user.click(screen.getByTestId('resolution-save'));
++
++    expect(mocks.setResolution).toHaveBeenCalledWith('en1', 0, 'mark', b.id, null, '');
++  });
++
++  it('shows the system (median) time by default', async () => {
++    const user = userEvent.setup();
++    const { agg } = divergenceAgg();
++    renderReview(agg);
++
++    await user.click(screen.getByRole('button', { name: 'Resolver' }));
++    expect(screen.getByTestId('resolution-system')).toBeChecked();
++    expect(screen.getByText(/08:10:07\.000/)).toBeInTheDocument();
++  });
++
++  it('typing a manual time and saving calls setResolution with the parsed instant', async () => {
++    const user = userEvent.setup();
++    const { agg } = divergenceAgg();
++    renderReview(agg);
++
++    await user.click(screen.getByRole('button', { name: 'Resolver' }));
++    await user.type(screen.getByTestId('resolution-manual-input'), '08:10:02.5');
++    await user.click(screen.getByTestId('resolution-save'));
++
++    expect(mocks.setResolution).toHaveBeenCalledWith('en1', 0, 'manual', null, '2026-10-11T11:10:02.500Z', '');
++  });
++
++  it('removes an existing decision via "Remover decisão"', async () => {
++    const user = userEvent.setup();
++    const { agg, a } = divergenceAgg();
++    // A resolved crossing is no longer a pending issue, so it is opened from "Todas as
++    // passagens" instead of the issues list's "Resolver" button.
++    agg.resolutions = [makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: a.id })];
++    renderReview(agg);
++
++    await user.click(screen.getAllByTestId('crossing-row')[0]);
++    await user.click(screen.getByRole('button', { name: 'Remover decisão' }));
++
++    expect(mocks.clearResolution).toHaveBeenCalledWith('en1', 0);
++  });
++
++  it('discarding a candidate mark calls updateMark', async () => {
++    const user = userEvent.setup();
++    const { agg, a } = divergenceAgg();
++    renderReview(agg);
++
++    await user.click(screen.getByRole('button', { name: 'Resolver' }));
++    await user.click(screen.getAllByRole('button', { name: 'Descartar' })[0]);
++
++    expect(mocks.updateMark).toHaveBeenCalledWith(a.id, { discarded: true });
++  });
++});
++
++describe('ReviewTab: suggested move (Review Focus 1)', () => {
++  it('the suggested-move button moves the misassigned mark to the suggested leg', async () => {
++    const user = userEvent.setup();
++    const swim = makeMark({ at: L0, timekeeper_id: 'tk1', leg_index: 0 });
++    const wrong = makeMark({ at: T0 + 30 * MIN + SEC, timekeeper_id: 'tk2', leg_index: 0 });
++    const finish = makeMark({ at: T0 + 30 * MIN, timekeeper_id: 'tk1', leg_index: 1 });
++    renderReview(makeAgg({ marks: [swim, wrong, finish] }));
++
++    await user.click(screen.getByTestId('move-mark-suggested'));
++
++    expect(mocks.updateMark).toHaveBeenCalledWith(wrong.id, { leg_index: 1 });
++  });
++});
++
++describe('ReviewTab: unassigned marks', () => {
++  it('assigns an unassigned mark to a typed bib', async () => {
++    const user = userEvent.setup();
++    const swim = makeMark({ at: L0, leg_index: 0 });
++    const finish = makeMark({ at: T0 + 30 * MIN, leg_index: 1 });
++    const stray = makeMark({ at: Date.now() - 5 * MIN, entry_id: null, leg_index: null });
++    renderReview(makeAgg({ marks: [swim, finish, stray] }));
++
++    expect(screen.getByText(/sem atleta/)).toBeInTheDocument();
++    await user.type(screen.getByLabelText('Nº de peito'), '101');
++    await user.click(screen.getByRole('button', { name: 'Atribuir' }));
++
++    expect(mocks.updateMark).toHaveBeenCalledWith(stray.id, { entry_id: 'en1', leg_index: 0 });
++  });
++});
++
++describe('ReviewTab: todas as passagens', () => {
++  it('renders a crossing-row per leg and opens the editor on click', async () => {
++    const user = userEvent.setup();
++    const marks = [makeMark({ at: L0 }), makeMark({ at: T0 + 30 * MIN, leg_index: 1 })];
++    renderReview(makeAgg({ marks }));
++
++    const rows = screen.getAllByTestId('crossing-row');
++    expect(rows).toHaveLength(2);
++    expect(rows[0]).toHaveTextContent('Nº 101');
++
++    await user.click(rows[0]);
++    expect(screen.getByTestId('resolution-system')).toBeInTheDocument();
++  });
++
++  it('filters the list by search term', async () => {
++    const user = userEvent.setup();
++    renderReview(makeAgg());
++    await user.type(screen.getByLabelText('Buscar'), 'nada-encontra-isso');
++    expect(screen.queryAllByTestId('crossing-row')).toHaveLength(0);
++  });
++});

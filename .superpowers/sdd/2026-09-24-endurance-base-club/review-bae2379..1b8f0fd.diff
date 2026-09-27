@@ -1,0 +1,1388 @@
+# Review package: bae2379..1b8f0fd (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+1b8f0fd feat(athletes): athlete management, import and statistics profile
+
+## Files changed
+ src/features/athletes/AthleteForm.tsx        | 139 +++++++++
+ src/features/athletes/AthleteProfilePage.tsx | 134 ++++++++-
+ src/features/athletes/AthletesPage.tsx       | 178 +++++++++++-
+ src/features/athletes/ImportDialog.tsx       | 239 +++++++++++++++
+ src/features/athletes/StatsView.tsx          | 231 +++++++++++++++
+ src/features/athletes/athletes.test.tsx      | 418 +++++++++++++++++++++++++++
+ 6 files changed, 1337 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/features/athletes/AthleteForm.tsx b/src/features/athletes/AthleteForm.tsx
+new file mode 100644
+index 0000000..c7ede9e
+--- /dev/null
++++ b/src/features/athletes/AthleteForm.tsx
+@@ -0,0 +1,139 @@
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import { api, ApiError } from '../../lib/api';
++import { formatDateBR, parseDateInput } from '../../lib/format';
++import { Button, Checkbox, Input, Select, Textarea } from '../../components/ui';
++import type { AthleteRow, Sex } from '../../lib/types';
++
++export interface AthleteFormProps {
++  /** Present when editing: pre-fills the fields and makes the save an update of this athlete. */
++  initial?: AthleteRow;
++  /** Called with the row `admin_save_athlete` returned once the save succeeds. */
++  onSaved(a: AthleteRow): void;
++  onCancel(): void;
++}
++
++const SEX_OPTIONS = [
++  { value: 'M', label: 'Masculino' },
++  { value: 'F', label: 'Feminino' },
++];
++
++/** Athlete create/edit form. Owns its own save (calls `api.admin.saveAthlete` itself and reports
++ * the saved row through `onSaved`) so it can be dropped in as-is by the entries form (Task 21) to
++ * create an athlete on the fly, without that caller needing to know about the mutation. */
++export function AthleteForm({ initial, onSaved, onCancel }: AthleteFormProps) {
++  const [name, setName] = useState(initial?.name ?? '');
++  const [sex, setSex] = useState<Sex>(initial?.sex ?? 'M');
++  const [birthText, setBirthText] = useState(initial?.birth_date ? formatDateBR(initial.birth_date) : '');
++  const [email, setEmail] = useState(initial?.email ?? '');
++  const [phone, setPhone] = useState(initial?.phone ?? '');
++  const [city, setCity] = useState(initial?.city ?? '');
++  const [teamClub, setTeamClub] = useState(initial?.team_club ?? '');
++  const [notes, setNotes] = useState(initial?.notes ?? '');
++  const [publicProfile, setPublicProfile] = useState(initial?.public_profile ?? true);
++
++  const [nameError, setNameError] = useState<string | undefined>();
++  const [birthError, setBirthError] = useState<string | undefined>();
++  const [formError, setFormError] = useState<string | null>(null);
++  const [saving, setSaving] = useState(false);
++
++  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++
++    const trimmedName = name.trim();
++    const hasNameError = trimmedName === '';
++
++    let birthDate: string | null = null;
++    let hasBirthError = false;
++    const trimmedBirth = birthText.trim();
++    if (trimmedBirth !== '') {
++      birthDate = parseDateInput(trimmedBirth);
++      hasBirthError = birthDate === null;
++    }
++
++    setNameError(hasNameError ? 'Nome é obrigatório' : undefined);
++    setBirthError(hasBirthError ? 'Data inválida — use dd/mm/aaaa' : undefined);
++    if (hasNameError || hasBirthError) return;
++
++    setSaving(true);
++    setFormError(null);
++    try {
++      const saved = await api.admin.saveAthlete({
++        id: initial?.id,
++        name: trimmedName,
++        sex,
++        birth_date: birthDate,
++        email: email.trim() || null,
++        phone: phone.trim() || null,
++        city: city.trim() || null,
++        team_club: teamClub.trim() || null,
++        notes: notes.trim(),
++        public_profile: publicProfile,
++      });
++      onSaved(saved);
++    } catch (err) {
++      setFormError(err instanceof ApiError ? err.message : 'Erro inesperado');
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  return (
++    <form className="flex flex-col gap-4" onSubmit={(e) => void handleSubmit(e)} noValidate>
++      <Input
++        label="Nome"
++        required
++        value={name}
++        onChange={(e) => setName(e.target.value)}
++        data-testid="athlete-name"
++        error={nameError}
++      />
++      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
++        <Select
++          label="Sexo"
++          value={sex}
++          onChange={(e) => setSex(e.target.value as Sex)}
++          options={SEX_OPTIONS}
++          data-testid="athlete-sex"
++        />
++        <Input
++          label="Data de nascimento"
++          placeholder="dd/mm/aaaa"
++          inputMode="numeric"
++          value={birthText}
++          onChange={(e) => setBirthText(e.target.value)}
++          data-testid="athlete-birth"
++          error={birthError}
++        />
++      </div>
++      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
++        <Input label="E-mail" type="email" value={email ?? ''} onChange={(e) => setEmail(e.target.value)} />
++        <Input label="Telefone" type="tel" value={phone ?? ''} onChange={(e) => setPhone(e.target.value)} />
++      </div>
++      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
++        <Input label="Cidade" value={city ?? ''} onChange={(e) => setCity(e.target.value)} />
++        <Input label="Equipe / assessoria" value={teamClub ?? ''} onChange={(e) => setTeamClub(e.target.value)} />
++      </div>
++      <Textarea label="Observações" value={notes} onChange={(e) => setNotes(e.target.value)} />
++      <Checkbox
++        label="Perfil público"
++        hint="Aparece nos resultados públicos do clube, sem e-mail, telefone ou data de nascimento."
++        checked={publicProfile}
++        onChange={(e) => setPublicProfile(e.target.checked)}
++      />
++      {formError && (
++        <p role="alert" className="text-sm text-danger">
++          {formError}
++        </p>
++      )}
++      <div className="flex justify-end gap-2">
++        <Button type="button" variant="secondary" onClick={onCancel}>
++          Cancelar
++        </Button>
++        <Button type="submit" loading={saving} data-testid="athlete-save">
++          Salvar
++        </Button>
++      </div>
++    </form>
++  );
++}
+diff --git a/src/features/athletes/AthleteProfilePage.tsx b/src/features/athletes/AthleteProfilePage.tsx
+index 6197076..6f65d82 100644
+--- a/src/features/athletes/AthleteProfilePage.tsx
++++ b/src/features/athletes/AthleteProfilePage.tsx
+@@ -1 +1,133 @@
+-export default function AthleteProfilePage() { return <h1 className="p-6 brand-title">AthleteProfilePage</h1>; }
++import { useState } from 'react';
++import { Link, useNavigate, useParams } from 'react-router';
++import { useQuery, useQueryClient } from '@tanstack/react-query';
++import { api, ApiError } from '../../lib/api';
++import { ageOn } from '../../domain/categories';
++import { Badge, Button, Card, Modal, Spinner, useConfirm, useToast } from '../../components/ui';
++import { AthleteForm } from './AthleteForm';
++import { StatsView } from './StatsView';
++
++const TZ = 'America/Sao_Paulo';
++
++/** Today's date, in Brasília, as 'aaaa-mm-dd' (see AthletesPage for the same helper). */
++function todayIsoBrasilia(): string {
++  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
++}
++
++const SEX_LABEL: Record<'M' | 'F', string> = { M: 'Masculino', F: 'Feminino' };
++
++export default function AthleteProfilePage() {
++  const { athleteId } = useParams();
++  const navigate = useNavigate();
++  const queryClient = useQueryClient();
++  const toast = useToast();
++  const confirm = useConfirm();
++  const [editing, setEditing] = useState(false);
++
++  const query = useQuery({
++    queryKey: ['athlete-profile', athleteId],
++    queryFn: () => api.admin.athleteProfile(athleteId as string),
++    enabled: athleteId !== undefined,
++  });
++
++  async function handleDelete() {
++    if (!query.data) return;
++    const { athlete } = query.data;
++    const ok = await confirm({
++      title: 'Excluir atleta',
++      message: `Excluir ${athlete.name}? Essa ação não pode ser desfeita.`,
++      confirmLabel: 'Excluir',
++      danger: true,
++    });
++    if (!ok) return;
++    try {
++      await api.admin.deleteAthlete(athlete.id);
++      void queryClient.invalidateQueries({ queryKey: ['athletes'] });
++      toast.show({ message: 'Atleta excluído.', tone: 'success' });
++      navigate('/atletas');
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    }
++  }
++
++  function handleSaved() {
++    setEditing(false);
++    void queryClient.invalidateQueries({ queryKey: ['athlete-profile', athleteId] });
++    void queryClient.invalidateQueries({ queryKey: ['athletes'] });
++  }
++
++  if (query.isLoading) {
++    return (
++      <div className="flex justify-center px-4 py-16">
++        <Spinner size={32} />
++      </div>
++    );
++  }
++
++  if (query.error || !query.data) {
++    return (
++      <div className="mx-auto w-full max-w-md px-4 py-12">
++        <Card className="flex flex-col gap-4">
++          <p role="alert" className="text-sm text-danger">
++            {query.error instanceof Error ? query.error.message : 'Atleta não encontrado'}
++          </p>
++          <Link to="/atletas" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
++            Voltar para atletas
++          </Link>
++        </Card>
++      </div>
++    );
++  }
++
++  const { athlete, results } = query.data;
++  const age = athlete.birth_date ? ageOn(athlete.birth_date, todayIsoBrasilia(), 'event_date') : null;
++
++  return (
++    <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
++      <Link to="/atletas" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
++        ← Atletas
++      </Link>
++
++      <Card className="mt-4 flex flex-col gap-3">
++        <div className="flex flex-wrap items-start justify-between gap-3">
++          <div>
++            <h1 className="brand-title text-xl font-semibold">{athlete.name}</h1>
++            <p className="mt-1 text-sm text-muted">
++              {SEX_LABEL[athlete.sex]}
++              {age !== null ? ` · ${age} anos` : ''}
++              {athlete.city ? ` · ${athlete.city}` : ''}
++              {athlete.team_club ? ` · ${athlete.team_club}` : ''}
++            </p>
++            {athlete.public_profile && (
++              <p className="mt-2 flex flex-wrap items-center gap-2">
++                <Badge tone="info">Perfil público</Badge>
++                <Link
++                  to={`/atleta/${athlete.id}`}
++                  className="text-sm text-fg underline underline-offset-2 hover:text-muted"
++                >
++                  Ver perfil público
++                </Link>
++              </p>
++            )}
++          </div>
++          <div className="flex gap-2">
++            <Button variant="secondary" onClick={() => setEditing(true)}>
++              Editar
++            </Button>
++            <Button variant="danger" onClick={() => void handleDelete()}>
++              Excluir
++            </Button>
++          </div>
++        </div>
++      </Card>
++
++      <div className="mt-6">
++        <StatsView athlete={athlete} results={results} />
++      </div>
++
++      <Modal open={editing} onClose={() => setEditing(false)} title="Editar atleta" size="lg">
++        <AthleteForm initial={athlete} onSaved={handleSaved} onCancel={() => setEditing(false)} />
++      </Modal>
++    </div>
++  );
++}
+diff --git a/src/features/athletes/AthletesPage.tsx b/src/features/athletes/AthletesPage.tsx
+index 6d3f99a..79c1ae1 100644
+--- a/src/features/athletes/AthletesPage.tsx
++++ b/src/features/athletes/AthletesPage.tsx
+@@ -1 +1,177 @@
+-export default function AthletesPage() { return <h1 className="p-6 brand-title">AthletesPage</h1>; }
++import { useMemo, useState } from 'react';
++import { Link } from 'react-router';
++import { useQuery, useQueryClient } from '@tanstack/react-query';
++import { api, ApiError } from '../../lib/api';
++import { ageOn } from '../../domain/categories';
++import { Button, Card, EmptyState, Input, Modal, Select, Spinner, Table, useConfirm, useToast } from '../../components/ui';
++import type { AthleteRow } from '../../lib/types';
++import { AthleteForm } from './AthleteForm';
++import { ImportDialog } from './ImportDialog';
++
++const TZ = 'America/Sao_Paulo';
++
++/** Today's date, in Brasília, as 'aaaa-mm-dd' — the app-wide rule that every date is shown in
++ * America/Sao_Paulo applies here too, even though "idade hoje" has nothing to do with an event. */
++function todayIsoBrasilia(): string {
++  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
++}
++
++function ageToday(birthDate: string | null): number | null {
++  return birthDate ? ageOn(birthDate, todayIsoBrasilia(), 'event_date') : null;
++}
++
++function foldAccents(s: string): string {
++  return s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
++}
++
++const SEX_FILTER_OPTIONS = [
++  { value: '', label: 'Todos' },
++  { value: 'M', label: 'Masculino' },
++  { value: 'F', label: 'Feminino' },
++];
++
++type ModalState = 'new' | AthleteRow | null;
++
++export default function AthletesPage() {
++  const queryClient = useQueryClient();
++  const toast = useToast();
++  const confirm = useConfirm();
++  const query = useQuery({ queryKey: ['athletes'], queryFn: () => api.admin.listAthletes() });
++
++  const [search, setSearch] = useState('');
++  const [sexFilter, setSexFilter] = useState('');
++  const [modal, setModal] = useState<ModalState>(null);
++  const [importOpen, setImportOpen] = useState(false);
++
++  const athletes = query.data ?? [];
++  const filtered = useMemo(() => {
++    const term = foldAccents(search.trim());
++    return athletes.filter((a) => {
++      if (sexFilter && a.sex !== sexFilter) return false;
++      if (!term) return true;
++      const haystack = foldAccents(`${a.name} ${a.city ?? ''} ${a.team_club ?? ''}`);
++      return haystack.includes(term);
++    });
++  }, [athletes, search, sexFilter]);
++
++  function refreshList() {
++    return queryClient.invalidateQueries({ queryKey: ['athletes'] });
++  }
++
++  function handleSaved() {
++    setModal(null);
++    void refreshList();
++  }
++
++  async function handleDelete(a: AthleteRow) {
++    const ok = await confirm({
++      title: 'Excluir atleta',
++      message: `Excluir ${a.name}? Essa ação não pode ser desfeita.`,
++      confirmLabel: 'Excluir',
++      danger: true,
++    });
++    if (!ok) return;
++    try {
++      await api.admin.deleteAthlete(a.id);
++      toast.show({ message: 'Atleta excluído.', tone: 'success' });
++      void refreshList();
++    } catch (err) {
++      toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
++    }
++  }
++
++  return (
++    <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <h1 className="brand-title text-xl font-semibold">Atletas</h1>
++        <div className="flex flex-wrap gap-2">
++          <Button variant="secondary" onClick={() => setImportOpen(true)} data-testid="import-athletes">
++            Importar planilha
++          </Button>
++          <Button onClick={() => setModal('new')} data-testid="new-athlete">
++            Novo atleta
++          </Button>
++        </div>
++      </div>
++
++      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[2fr_1fr]">
++        <Input
++          label="Buscar"
++          placeholder="Nome, cidade ou equipe"
++          value={search}
++          onChange={(e) => setSearch(e.target.value)}
++          data-testid="athlete-search"
++        />
++        <Select label="Sexo" value={sexFilter} onChange={(e) => setSexFilter(e.target.value)} options={SEX_FILTER_OPTIONS} />
++      </div>
++
++      <div className="mt-4">
++        {query.isLoading ? (
++          <div className="flex justify-center py-12">
++            <Spinner size={32} />
++          </div>
++        ) : query.error ? (
++          <Card>
++            <p role="alert" className="text-sm text-danger">
++              {query.error instanceof Error ? query.error.message : 'Erro inesperado'}
++            </p>
++          </Card>
++        ) : filtered.length === 0 ? (
++          <EmptyState title="Nenhum atleta encontrado" />
++        ) : (
++          <Table>
++            <thead>
++              <tr>
++                <th className="px-3 py-2" scope="col">Nome</th>
++                <th className="px-3 py-2" scope="col">Sexo</th>
++                <th className="px-3 py-2" scope="col">Idade hoje</th>
++                <th className="px-3 py-2" scope="col">Cidade</th>
++                <th className="px-3 py-2" scope="col">Equipe</th>
++                <th className="px-3 py-2" scope="col">Participações</th>
++                <th className="px-3 py-2" scope="col">Vitórias</th>
++                <th className="px-3 py-2" scope="col">Pódios</th>
++                <th className="px-3 py-2" scope="col" />
++              </tr>
++            </thead>
++            <tbody>
++              {filtered.map((a) => (
++                <tr key={a.id} className="border-t border-border">
++                  <td className="px-3 py-2">
++                    <Link to={`/atletas/${a.id}`} className="text-fg underline underline-offset-2 hover:text-muted">
++                      {a.name}
++                    </Link>
++                  </td>
++                  <td className="px-3 py-2">{a.sex}</td>
++                  <td className="px-3 py-2 tabular">{ageToday(a.birth_date) ?? '—'}</td>
++                  <td className="px-3 py-2">{a.city ?? '—'}</td>
++                  <td className="px-3 py-2">{a.team_club ?? '—'}</td>
++                  <td className="px-3 py-2 tabular">{a.participations ?? 0}</td>
++                  <td className="px-3 py-2 tabular">{a.wins ?? 0}</td>
++                  <td className="px-3 py-2 tabular">{a.podiums ?? 0}</td>
++                  <td className="px-3 py-2">
++                    <div className="flex justify-end gap-2">
++                      <Button variant="ghost" size="sm" onClick={() => setModal(a)}>
++                        Editar
++                      </Button>
++                      <Button variant="ghost" size="sm" onClick={() => void handleDelete(a)}>
++                        Excluir
++                      </Button>
++                    </div>
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </Table>
++        )}
++      </div>
++
++      <Modal open={modal !== null} onClose={() => setModal(null)} title={modal === 'new' ? 'Novo atleta' : 'Editar atleta'} size="lg">
++        {modal !== null && (
++          <AthleteForm initial={modal === 'new' ? undefined : modal} onSaved={handleSaved} onCancel={() => setModal(null)} />
++        )}
++      </Modal>
++
++      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={() => void refreshList()} />
++    </div>
++  );
++}
+diff --git a/src/features/athletes/ImportDialog.tsx b/src/features/athletes/ImportDialog.tsx
+new file mode 100644
+index 0000000..79fec78
+--- /dev/null
++++ b/src/features/athletes/ImportDialog.tsx
+@@ -0,0 +1,239 @@
++import { useEffect, useState } from 'react';
++import type { ChangeEvent } from 'react';
++import { useQuery } from '@tanstack/react-query';
++import { api, ApiError } from '../../lib/api';
++import { parseCsv } from '../../lib/csv';
++import { readXlsxFirstSheet } from '../../lib/xlsx/reader';
++import { mapImportRows } from '../../lib/importMapping';
++import type { MappedImport } from '../../lib/importMapping';
++import { formatDateBR } from '../../lib/format';
++import { sexLabel } from '../../domain/categories';
++import { Button, EmptyState, Modal, Select, Table } from '../../components/ui';
++import type { ImportResult } from '../../lib/types';
++
++export interface ImportDialogProps {
++  open: boolean;
++  onClose(): void;
++  /** Called once `admin_import_athletes` succeeds, so the caller can refresh its athlete list. */
++  onImported(): void;
++}
++
++const TEMPLATE_HEADER = 'Nome;Sexo;Data de nascimento;E-mail;Telefone;Cidade;Equipe;Prova';
++const PREVIEW_LIMIT = 20;
++
++/** Reads a spreadsheet File into a raw string table. `.xlsx` goes through the XLSX reader;
++ * anything else is read as CSV, decoded UTF-8 first and re-decoded as Windows-1252 (the common
++ * Brazilian-Excel export encoding) when the UTF-8 pass leaves replacement characters behind. */
++async function readTable(file: File): Promise<string[][]> {
++  const buf = await file.arrayBuffer();
++  if (file.name.toLowerCase().endsWith('.xlsx')) {
++    return readXlsxFirstSheet(new Uint8Array(buf));
++  }
++  const utf8 = new TextDecoder('utf-8').decode(buf);
++  const text = utf8.includes('�') ? new TextDecoder('windows-1252').decode(buf) : utf8;
++  return parseCsv(text);
++}
++
++export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
++  const [fileName, setFileName] = useState<string | null>(null);
++  const [mapped, setMapped] = useState<MappedImport | null>(null);
++  const [readError, setReadError] = useState<string | null>(null);
++  const [eventId, setEventId] = useState('');
++  const [importing, setImporting] = useState(false);
++  const [result, setResult] = useState<ImportResult | null>(null);
++  const [importError, setImportError] = useState<string | null>(null);
++
++  const eventsQuery = useQuery({ queryKey: ['events', 'summary'], queryFn: () => api.admin.listEvents(), enabled: open });
++
++  // Start clean every time the dialog opens, so a previous import's preview/result never bleeds
++  // into the next one.
++  useEffect(() => {
++    if (!open) return;
++    setFileName(null);
++    setMapped(null);
++    setReadError(null);
++    setEventId('');
++    setResult(null);
++    setImportError(null);
++  }, [open]);
++
++  async function handleFile(e: ChangeEvent<HTMLInputElement>) {
++    const file = e.target.files?.[0];
++    e.target.value = ''; // lets the same file be re-selected later (e.g. after fixing it)
++    if (!file) return;
++    setFileName(file.name);
++    setResult(null);
++    setImportError(null);
++    try {
++      const table = await readTable(file);
++      setMapped(mapImportRows(table));
++      setReadError(null);
++    } catch {
++      setMapped(null);
++      setReadError('Não foi possível ler o arquivo. Verifique se é uma planilha .csv ou .xlsx válida.');
++    }
++  }
++
++  async function handleConfirm() {
++    if (!mapped || mapped.rows.length === 0) return;
++    setImporting(true);
++    setImportError(null);
++    try {
++      const res = await api.admin.importAthletes(eventId || null, mapped.rows);
++      setResult(res);
++      onImported();
++    } catch (err) {
++      setImportError(err instanceof ApiError ? err.message : 'Erro inesperado');
++    } finally {
++      setImporting(false);
++    }
++  }
++
++  const eventOptions = [
++    { value: '', label: 'Nenhum — só cadastrar atletas' },
++    ...(eventsQuery.data ?? []).map((ev) => ({ value: ev.id, label: ev.name })),
++  ];
++
++  return (
++    <Modal
++      open={open}
++      onClose={onClose}
++      title="Importar atletas"
++      size="xl"
++      footer={
++        result ? (
++          <Button onClick={onClose}>Fechar</Button>
++        ) : (
++          <>
++            <Button variant="secondary" onClick={onClose}>
++              Cancelar
++            </Button>
++            <Button
++              onClick={() => void handleConfirm()}
++              loading={importing}
++              disabled={!mapped || mapped.rows.length === 0}
++              data-testid="import-confirm"
++            >
++              Confirmar importação
++            </Button>
++          </>
++        )
++      }
++    >
++      <div className="flex flex-col gap-4">
++        <p className="text-sm text-muted">
++          Planilha com colunas Nome, Sexo, Data de nascimento, E-mail, Telefone, Cidade, Equipe e Prova. Quando o
++          nome da coluna Prova bater com uma prova individual do evento escolhido abaixo, o atleta já entra inscrito.
++        </p>
++        <a
++          href={`data:text/csv;charset=utf-8,${encodeURIComponent(`${TEMPLATE_HEADER}\r\n`)}`}
++          download="modelo-atletas.csv"
++          className="self-start text-sm text-fg underline underline-offset-2 hover:text-muted"
++        >
++          Baixar modelo
++        </a>
++
++        <div className="flex flex-col gap-1.5">
++          <label htmlFor="import-file-input" className="text-sm font-medium text-fg">
++            Arquivo (.csv ou .xlsx)
++          </label>
++          <input
++            id="import-file-input"
++            type="file"
++            accept=".csv,.xlsx"
++            data-testid="import-file"
++            onChange={(e) => void handleFile(e)}
++            className="text-sm text-fg"
++          />
++        </div>
++
++        {!result && (
++          <Select
++            label="Inscrever na prova da coluna Prova do evento"
++            value={eventId}
++            onChange={(e) => setEventId(e.target.value)}
++            options={eventOptions}
++          />
++        )}
++
++        {readError && (
++          <p role="alert" className="text-sm text-danger">
++            {readError}
++          </p>
++        )}
++
++        {result ? (
++          <div className="flex flex-col gap-2">
++            <p className="text-sm font-medium text-fg">
++              {result.inserted} novos, {result.updated} atualizados, {result.entries_created} inscrições
++            </p>
++            {result.errors.length > 0 && (
++              <ul className="flex flex-col gap-1 text-sm text-danger">
++                {result.errors.map((e, i) => (
++                  <li key={i}>
++                    Linha {e.row}: {e.message}
++                  </li>
++                ))}
++              </ul>
++            )}
++          </div>
++        ) : (
++          mapped && (
++            <div className="flex flex-col gap-3">
++              <p className="text-sm text-fg">
++                {fileName} — {mapped.rows.length} atleta(s) válido(s), {mapped.errors.length} erro(s)
++              </p>
++              {mapped.errors.length > 0 && (
++                <ul className="flex flex-col gap-1 text-sm text-danger">
++                  {mapped.errors.map((e, i) => (
++                    <li key={i}>
++                      Linha {e.row}: {e.message}
++                    </li>
++                  ))}
++                </ul>
++              )}
++              {mapped.rows.length === 0 ? (
++                <EmptyState title="Nenhuma linha válida para importar" />
++              ) : (
++                <Table>
++                  <thead>
++                    <tr>
++                      <th className="px-3 py-2" scope="col">Nome</th>
++                      <th className="px-3 py-2" scope="col">Sexo</th>
++                      <th className="px-3 py-2" scope="col">Nascimento</th>
++                      <th className="px-3 py-2" scope="col">E-mail</th>
++                      <th className="px-3 py-2" scope="col">Telefone</th>
++                      <th className="px-3 py-2" scope="col">Cidade</th>
++                      <th className="px-3 py-2" scope="col">Equipe</th>
++                      <th className="px-3 py-2" scope="col">Prova</th>
++                    </tr>
++                  </thead>
++                  <tbody>
++                    {mapped.rows.slice(0, PREVIEW_LIMIT).map((r, i) => (
++                      <tr key={i} className="border-t border-border">
++                        <td className="px-3 py-2">{r.name}</td>
++                        <td className="px-3 py-2">{sexLabel(r.sex)}</td>
++                        <td className="px-3 py-2 tabular">{r.birth_date ? formatDateBR(r.birth_date) : ''}</td>
++                        <td className="px-3 py-2">{r.email ?? ''}</td>
++                        <td className="px-3 py-2">{r.phone ?? ''}</td>
++                        <td className="px-3 py-2">{r.city ?? ''}</td>
++                        <td className="px-3 py-2">{r.team_club ?? ''}</td>
++                        <td className="px-3 py-2">{r.race_name ?? ''}</td>
++                      </tr>
++                    ))}
++                  </tbody>
++                </Table>
++              )}
++            </div>
++          )
++        )}
++
++        {importError && (
++          <p role="alert" className="text-sm text-danger">
++            {importError}
++          </p>
++        )}
++      </div>
++    </Modal>
++  );
++}
+diff --git a/src/features/athletes/StatsView.tsx b/src/features/athletes/StatsView.tsx
+new file mode 100644
+index 0000000..8c12c05
+--- /dev/null
++++ b/src/features/athletes/StatsView.tsx
+@@ -0,0 +1,231 @@
++import { useMemo } from 'react';
++import { Link } from 'react-router';
++import { computeAthleteStats } from '../../domain/stats';
++import { MODALITY_LABEL } from '../../domain/presets';
++import { formatDateBR, formatDuration } from '../../lib/format';
++import { LineChart } from '../../components/LineChart';
++import { Badge, Card, EmptyState, Table } from '../../components/ui';
++import type { AthleteRow, Modality, ResultRow, SnapshotStatus } from '../../lib/types';
++
++export interface StatsViewProps {
++  athlete: AthleteRow;
++  results: ResultRow[];
++  /** Reused as-is by the public athlete page (Task 26): hides nothing (stats only ever use
++   * public data) but routes team-partner links to the public profile instead of the organizer one. */
++  publicMode?: boolean;
++}
++
++const STATUS_LABEL: Record<SnapshotStatus, string> = {
++  finished: 'Concluído', on_course: 'Em prova', not_started: 'Não iniciado', dnf: 'DNF', dns: 'DNS', dsq: 'DSQ',
++};
++const STATUS_TONE: Record<SnapshotStatus, 'success' | 'danger' | 'neutral'> = {
++  finished: 'success', dnf: 'danger', dsq: 'danger', on_course: 'neutral', not_started: 'neutral', dns: 'neutral',
++};
++/** Ruling 20: pace_by_modality never carries 'other'; this fixes the display order for the ones it does. */
++const PACE_MODALITY_ORDER: Modality[] = ['run', 'swim', 'bike'];
++
++function ordinal(pos: number | null): string {
++  return pos === null ? '—' : `${pos}º`;
++}
++
++function percent(v: number | null): string {
++  return v === null ? '—' : `${Math.round(v * 100)}%`;
++}
++
++function formatDistance(m: number): string {
++  if (m >= 1000) {
++    const km = m / 1000;
++    const value = Number.isInteger(km) ? String(km) : km.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
++    return `${value} km`;
++  }
++  return `${m} m`;
++}
++
++function formatKm(km: number): string {
++  return `${km.toLocaleString('pt-BR', { maximumFractionDigits: 2 })} km`;
++}
++
++export function StatsView({ athlete, results, publicMode = false }: StatsViewProps) {
++  const stats = useMemo(() => computeAthleteStats(athlete.id, results), [athlete.id, results]);
++
++  if (results.length === 0) {
++    return (
++      <EmptyState title="Sem resultados oficiais ainda">
++        As estatísticas aparecem quando a organização finaliza as provas.
++      </EmptyState>
++    );
++  }
++
++  const tiles: { label: string; value: string }[] = [
++    { label: 'Participações', value: String(stats.participations) },
++    { label: 'Conclusões', value: String(stats.finishes) },
++    { label: 'Vitórias gerais', value: String(stats.wins_overall) },
++    { label: 'Vitórias na categoria', value: String(stats.wins_category) },
++    { label: 'Pódios', value: String(stats.podiums) },
++    { label: 'Melhor colocação', value: ordinal(stats.best_overall_pos) },
++    { label: 'Top X% médio', value: percent(stats.avg_percentile) },
++  ];
++
++  const paceRows = PACE_MODALITY_ORDER
++    .map((m) => stats.pace_by_modality.find((p) => p.modality === m))
++    .filter((p): p is NonNullable<typeof p> => p !== undefined);
++
++  const kmRows = (Object.keys(stats.km_by_modality) as Modality[])
++    .filter((m) => stats.km_by_modality[m])
++    .map((m) => ({ modality: m, km: stats.km_by_modality[m]! }));
++
++  const evolution = stats.evolution;
++  const evolutionPoints = evolution
++    ? evolution.points.map((p) => ({ label: formatDateBR(p.date), value: p.time_ms, tooltip: p.event_name }))
++    : [];
++  const evolutionTitle = evolution
++    ? `Evolução — ${MODALITY_LABEL[evolution.modality]} ${formatDistance(evolution.distance_m)}`
++    : 'Evolução';
++
++  const partnerHref = (id: string) => (publicMode ? `/atleta/${id}` : `/atletas/${id}`);
++
++  return (
++    <div className="flex flex-col gap-6">
++      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
++        {tiles.map((t) => (
++          <Card key={t.label} className="flex flex-col gap-1">
++            <span className="text-sm text-muted">{t.label}</span>
++            <span className="text-2xl font-semibold text-fg">{t.value}</span>
++          </Card>
++        ))}
++      </div>
++
++      <section>
++        <h3 className="brand-title mb-2 text-sm font-semibold text-fg">Recordes pessoais</h3>
++        {stats.records.length === 0 ? (
++          <EmptyState title="Sem recordes ainda" />
++        ) : (
++          <Table>
++            <thead>
++              <tr>
++                <th className="px-3 py-2" scope="col">Modalidade</th>
++                <th className="px-3 py-2" scope="col">Distância</th>
++                <th className="px-3 py-2" scope="col">Tempo</th>
++                <th className="px-3 py-2" scope="col">Ritmo</th>
++                <th className="px-3 py-2" scope="col">Evento</th>
++              </tr>
++            </thead>
++            <tbody>
++              {stats.records.map((r) => (
++                <tr key={`${r.modality}-${r.distance_m}`} className="border-t border-border">
++                  <td className="px-3 py-2">{MODALITY_LABEL[r.modality]}</td>
++                  <td className="px-3 py-2 tabular">{formatDistance(r.distance_m)}</td>
++                  <td className="px-3 py-2 tabular">{formatDuration(r.time_ms)}</td>
++                  <td className="px-3 py-2 tabular">{r.pace}</td>
++                  <td className="px-3 py-2">
++                    {r.event_name} · {formatDateBR(r.event_date)}
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </Table>
++        )}
++      </section>
++
++      <section>
++        <h3 className="brand-title mb-2 text-sm font-semibold text-fg">Ritmo por modalidade</h3>
++        {paceRows.length === 0 ? (
++          <EmptyState title="Sem dados de ritmo ainda" />
++        ) : (
++          <Table>
++            <thead>
++              <tr>
++                <th className="px-3 py-2" scope="col">Modalidade</th>
++                <th className="px-3 py-2" scope="col">Ritmo</th>
++              </tr>
++            </thead>
++            <tbody>
++              {paceRows.map((p) => (
++                <tr key={p.modality} className="border-t border-border">
++                  <td className="px-3 py-2">{MODALITY_LABEL[p.modality]}</td>
++                  <td className="px-3 py-2 tabular">{p.pace}</td>
++                </tr>
++              ))}
++            </tbody>
++          </Table>
++        )}
++      </section>
++
++      <section>
++        <h3 className="brand-title mb-2 text-sm font-semibold text-fg">Km em prova</h3>
++        {kmRows.length === 0 ? (
++          <EmptyState title="Sem quilometragem ainda" />
++        ) : (
++          <ul className="flex flex-wrap gap-2">
++            {kmRows.map((k) => (
++              <li key={k.modality}>
++                <Badge tone="neutral">
++                  {MODALITY_LABEL[k.modality]}: {formatKm(k.km)}
++                </Badge>
++              </li>
++            ))}
++          </ul>
++        )}
++      </section>
++
++      <section>
++        <LineChart points={evolutionPoints} formatValue={(v) => formatDuration(v)} title={evolutionTitle} />
++      </section>
++
++      <section>
++        <h3 className="brand-title mb-2 text-sm font-semibold text-fg">Histórico</h3>
++        <Table>
++          <thead>
++            <tr>
++              <th className="px-3 py-2" scope="col">Evento</th>
++              <th className="px-3 py-2" scope="col">Prova</th>
++              <th className="px-3 py-2" scope="col">Categoria</th>
++              <th className="px-3 py-2" scope="col">Status</th>
++              <th className="px-3 py-2" scope="col">Posição</th>
++              <th className="px-3 py-2" scope="col">Tempo final</th>
++              <th className="px-3 py-2" scope="col">Pódios</th>
++            </tr>
++          </thead>
++          <tbody>
++            {stats.history.map((h, i) => (
++              <tr key={i} className="border-t border-border">
++                <td className="px-3 py-2">
++                  {h.event_name} · {formatDateBR(h.event_date)}
++                </td>
++                <td className="px-3 py-2">{h.race_name}</td>
++                <td className="px-3 py-2">{h.category}</td>
++                <td className="px-3 py-2">
++                  <Badge tone={STATUS_TONE[h.status]}>{STATUS_LABEL[h.status]}</Badge>
++                </td>
++                <td className="px-3 py-2 tabular">
++                  {ordinal(h.overall_pos)} / {h.finishers}
++                </td>
++                <td className="px-3 py-2 tabular">{formatDuration(h.final_ms)}</td>
++                <td className="px-3 py-2">{h.podiums.join(' · ') || '—'}</td>
++              </tr>
++            ))}
++          </tbody>
++        </Table>
++      </section>
++
++      {stats.partners.length > 0 && (
++        <section>
++          <h3 className="brand-title mb-2 text-sm font-semibold text-fg">Parceiros de equipe</h3>
++          <ul className="flex flex-col gap-1">
++            {stats.partners.map((p) => (
++              <li key={p.athlete_id}>
++                <Link
++                  to={partnerHref(p.athlete_id)}
++                  className="text-sm text-fg underline underline-offset-2 hover:text-muted"
++                >
++                  {p.name}
++                </Link>
++                <span className="ml-2 text-sm text-muted tabular">×{p.count}</span>
++              </li>
++            ))}
++          </ul>
++        </section>
++      )}
++    </div>
++  );
++}
+diff --git a/src/features/athletes/athletes.test.tsx b/src/features/athletes/athletes.test.tsx
+new file mode 100644
+index 0000000..e162b38
+--- /dev/null
++++ b/src/features/athletes/athletes.test.tsx
+@@ -0,0 +1,418 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { screen, waitFor } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++
++import { renderWithProviders } from '../../test/renderWithProviders';
++import type { AthleteRow, ImportResult, ResultRow, ResultSnapshot } from '../../lib/types';
++
++const mocks = vi.hoisted(() => ({
++  listAthletes: vi.fn(),
++  saveAthlete: vi.fn(),
++  deleteAthlete: vi.fn(),
++  importAthletes: vi.fn(),
++  athleteProfile: vi.fn(),
++  listEvents: vi.fn(),
++}));
++vi.mock('../../lib/supabase', () => ({ supabase: {} }));
++vi.mock('../../lib/api', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('../../lib/api')>()),
++  api: {
++    admin: {
++      listAthletes: mocks.listAthletes,
++      saveAthlete: mocks.saveAthlete,
++      deleteAthlete: mocks.deleteAthlete,
++      importAthletes: mocks.importAthletes,
++      athleteProfile: mocks.athleteProfile,
++      listEvents: mocks.listEvents,
++    },
++  },
++}));
++const { listAthletes, saveAthlete, deleteAthlete, importAthletes, athleteProfile, listEvents } = mocks;
++
++import { ApiError } from '../../lib/api';
++import { AthleteForm } from './AthleteForm';
++import { ImportDialog } from './ImportDialog';
++import { StatsView } from './StatsView';
++import AthletesPage from './AthletesPage';
++import AthleteProfilePage from './AthleteProfilePage';
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  listEvents.mockResolvedValue([]);
++});
++afterEach(() => {
++  vi.useRealTimers();
++});
++
++function makeAthlete(p: Partial<AthleteRow> = {}): AthleteRow {
++  return {
++    id: 'a1', name: 'Ana Souza', sex: 'F', birth_date: '1990-06-15', email: null, phone: null,
++    city: null, team_club: null, notes: '', public_profile: true, ...p,
++  };
++}
++
++describe('AthleteForm', () => {
++  it('creates an athlete, converting the dd/mm/aaaa birth date, and reports the saved row', async () => {
++    const user = userEvent.setup();
++    const saved = makeAthlete({ id: 'a9', name: 'Nova Atleta' });
++    saveAthlete.mockResolvedValue(saved);
++    const onSaved = vi.fn();
++
++    renderWithProviders(<AthleteForm onSaved={onSaved} onCancel={vi.fn()} />);
++    await user.type(screen.getByTestId('athlete-name'), 'Nova Atleta');
++    await user.selectOptions(screen.getByTestId('athlete-sex'), 'F');
++    await user.type(screen.getByTestId('athlete-birth'), '15/06/1990');
++    await user.click(screen.getByTestId('athlete-save'));
++
++    await waitFor(() =>
++      expect(saveAthlete).toHaveBeenCalledWith(
++        expect.objectContaining({ name: 'Nova Atleta', sex: 'F', birth_date: '1990-06-15' }),
++      ),
++    );
++    expect(onSaved).toHaveBeenCalledWith(saved);
++  });
++
++  it('prefills from `initial` and sends its id back so the save updates the same athlete', async () => {
++    const user = userEvent.setup();
++    const initial = makeAthlete({ id: 'a1', name: 'Ana Souza', birth_date: '1990-06-15' });
++    saveAthlete.mockResolvedValue(initial);
++    renderWithProviders(<AthleteForm initial={initial} onSaved={vi.fn()} onCancel={vi.fn()} />);
++
++    expect(screen.getByTestId('athlete-name')).toHaveValue('Ana Souza');
++    expect(screen.getByTestId('athlete-birth')).toHaveValue('15/06/1990');
++    await user.click(screen.getByTestId('athlete-save'));
++
++    await waitFor(() => expect(saveAthlete).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' })));
++  });
++
++  it('shows the server error message and does not call onSaved when saving fails', async () => {
++    const user = userEvent.setup();
++    saveAthlete.mockRejectedValue(new ApiError('Já existe um atleta com esse nome', 'P0001'));
++    const onSaved = vi.fn();
++    renderWithProviders(<AthleteForm onSaved={onSaved} onCancel={vi.fn()} />);
++
++    await user.type(screen.getByTestId('athlete-name'), 'Duplicado');
++    await user.click(screen.getByTestId('athlete-save'));
++
++    expect(await screen.findByText('Já existe um atleta com esse nome')).toBeInTheDocument();
++    expect(onSaved).not.toHaveBeenCalled();
++  });
++
++  it('rejects an invalid birth date locally without calling saveAthlete', async () => {
++    const user = userEvent.setup();
++    renderWithProviders(<AthleteForm onSaved={vi.fn()} onCancel={vi.fn()} />);
++
++    await user.type(screen.getByTestId('athlete-name'), 'Fulano');
++    await user.type(screen.getByTestId('athlete-birth'), '31/02/2000');
++    await user.click(screen.getByTestId('athlete-save'));
++
++    expect(await screen.findByText(/data.*inv/i)).toBeInTheDocument();
++    expect(saveAthlete).not.toHaveBeenCalled();
++  });
++
++  it('calls onCancel when Cancelar is clicked', async () => {
++    const user = userEvent.setup();
++    const onCancel = vi.fn();
++    renderWithProviders(<AthleteForm onSaved={vi.fn()} onCancel={onCancel} />);
++    await user.click(screen.getByRole('button', { name: 'Cancelar' }));
++    expect(onCancel).toHaveBeenCalledTimes(1);
++  });
++});
++
++// Review Focus 3 (Brazilian spreadsheets on import): the exact table from Task 14's
++// importMapping.test.ts, serialized as a ';'-delimited CSV — 2 valid rows, 3 bad rows.
++const REVIEW_FOCUS_3_HEADER = ['Nome Completo', 'Gênero', 'Data de Nascimento', 'E-mail', 'Celular', 'Cidade', 'Assessoria', 'Prova'];
++const REVIEW_FOCUS_3_ROWS = [
++  ['  Ana   Souza ', 'Feminino', '15/06/1990', 'ANA@X.COM', '27 99999-0000', 'Vitória', 'EBC Team', 'Corrida 5K'],
++  ['Beto', 'masc', '33039', '', '', '', '', ''],
++  ['', 'F', '', '', '', '', '', ''],
++  ['Caio', 'X', '', '', '', '', '', ''],
++  ['Dani', 'fem', '31/02/1990', '', '', '', '', ''],
++  ['', '', '', '', '', '', '', ''],
++];
++const REVIEW_FOCUS_3_CSV = [REVIEW_FOCUS_3_HEADER, ...REVIEW_FOCUS_3_ROWS].map((r) => r.join(';')).join('\n');
++
++function csvFile(text: string, name = 'atletas.csv'): File {
++  return new File([text], name, { type: 'text/csv' });
++}
++
++/** Bytes for a Windows-1252 CSV: every char here sits in the ASCII/Latin-1 range, where the
++ * Unicode code point and the cp1252 byte coincide, so this doubles as a literal encoder. */
++function latin1Bytes(text: string): Uint8Array {
++  const bytes = new Uint8Array(text.length);
++  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
++  return bytes;
++}
++
++describe('ImportDialog', () => {
++  it('parses a Brazilian CSV (UTF-8, ; delimiter, dd/mm/aaaa, Excel serial date), previews 2 valid rows and 3 errors by row number, and imports with no event selected', async () => {
++    const user = userEvent.setup();
++    const result: ImportResult = { inserted: 2, updated: 0, entries_created: 0, errors: [] };
++    importAthletes.mockResolvedValue(result);
++    const onImported = vi.fn();
++
++    renderWithProviders(<ImportDialog open onClose={vi.fn()} onImported={onImported} />);
++
++    await user.upload(screen.getByTestId('import-file'), csvFile(REVIEW_FOCUS_3_CSV));
++
++    expect(await screen.findByText(/2 atleta/)).toBeInTheDocument();
++    expect(screen.getByText(/3 erro/)).toBeInTheDocument();
++    expect(screen.getByText('Linha 4: Nome vazio')).toBeInTheDocument();
++    expect(screen.getByText('Linha 5: Sexo inválido: "X"')).toBeInTheDocument();
++    expect(screen.getByText('Linha 6: Data de nascimento inválida: "31/02/1990"')).toBeInTheDocument();
++    expect(screen.getByText('Ana Souza')).toBeInTheDocument();
++    expect(screen.getByText('Beto')).toBeInTheDocument();
++
++    await user.click(screen.getByTestId('import-confirm'));
++
++    await waitFor(() =>
++      expect(importAthletes).toHaveBeenCalledWith(null, [
++        { name: 'Ana Souza', sex: 'F', birth_date: '1990-06-15', email: 'ana@x.com', phone: '27 99999-0000', city: 'Vitória', team_club: 'EBC Team', race_name: 'Corrida 5K' },
++        { name: 'Beto', sex: 'M', birth_date: '1990-06-15', email: null, phone: null, city: null, team_club: null, race_name: null },
++      ]),
++    );
++    expect(onImported).toHaveBeenCalledTimes(1);
++    expect(await screen.findByText(/2 novos, 0 atualizados, 0 inscrições/)).toBeInTheDocument();
++  });
++
++  it('imports into the chosen event when one is selected', async () => {
++    const user = userEvent.setup();
++    listEvents.mockResolvedValue([
++      { id: 'ev1', name: 'Copa EBC', date: '2026-10-11', location: '', description: '', levels: [], status: 'planejado', is_public: false, public_slug: null, version: 1, races_count: 1, entries_count: 0 },
++    ]);
++    importAthletes.mockResolvedValue({ inserted: 2, updated: 0, entries_created: 1, errors: [] });
++    renderWithProviders(<ImportDialog open onClose={vi.fn()} onImported={vi.fn()} />);
++
++    await user.upload(screen.getByTestId('import-file'), csvFile(REVIEW_FOCUS_3_CSV));
++    await screen.findByText(/2 atleta/);
++    await user.selectOptions(screen.getByLabelText(/Inscrever na prova/), 'ev1');
++    await user.click(screen.getByTestId('import-confirm'));
++
++    await waitFor(() => expect(importAthletes).toHaveBeenCalledWith('ev1', expect.any(Array)));
++  });
++
++  it('re-decodes as Windows-1252 when the UTF-8 reading shows replacement characters', async () => {
++    const user = userEvent.setup();
++    importAthletes.mockResolvedValue({ inserted: 1, updated: 0, entries_created: 0, errors: [] });
++    renderWithProviders(<ImportDialog open onClose={vi.fn()} onImported={vi.fn()} />);
++
++    const text = 'Nome;Sexo;Data de nascimento;E-mail;Telefone;Cidade;Equipe;Prova\nJosé Vitória;M;;;;;;';
++    const file = new File([latin1Bytes(text) as BlobPart], 'latin1.csv', { type: 'text/csv' });
++
++    await user.upload(screen.getByTestId('import-file'), file);
++    expect(await screen.findByText('José Vitória')).toBeInTheDocument();
++  });
++
++  it('shows the server error and keeps the preview when the import call fails', async () => {
++    const user = userEvent.setup();
++    importAthletes.mockRejectedValue(new ApiError('Evento não encontrado', 'P0001'));
++    renderWithProviders(<ImportDialog open onClose={vi.fn()} onImported={vi.fn()} />);
++
++    await user.upload(screen.getByTestId('import-file'), csvFile(REVIEW_FOCUS_3_CSV));
++    await screen.findByText(/2 atleta/);
++    await user.click(screen.getByTestId('import-confirm'));
++
++    expect(await screen.findByText('Evento não encontrado')).toBeInTheDocument();
++  });
++
++  it('offers a template download link with the expected header', () => {
++    renderWithProviders(<ImportDialog open onClose={vi.fn()} onImported={vi.fn()} />);
++    const link = screen.getByRole('link', { name: /baixar modelo/i });
++    expect(decodeURIComponent(link.getAttribute('href') ?? '')).toContain(
++      'Nome;Sexo;Data de nascimento;E-mail;Telefone;Cidade;Equipe;Prova',
++    );
++  });
++});
++
++// The Task 12 (`src/domain/stats.test.ts`) fixture, copied verbatim so this test exercises the
++// real shape computeAthleteStats works with.
++function result(p: { date: string; name: string; race: string; status: ResultSnapshot['status']; final: number | null; pos: number | null; fin: number; podiums?: ResultSnapshot['podiums']; members?: ResultSnapshot['members']; legs: ResultSnapshot['legs'] }): ResultRow {
++  const members = p.members ?? [{ athlete_id: 'a1', name: 'Ana', legs: p.legs.map((l) => l.leg_index) }];
++  return {
++    race_id: `r-${p.date}`, entry_id: `en-${p.date}`, event_id: `e-${p.date}`, athlete_ids: members.map((m) => m.athlete_id),
++    status: p.status, final_ms: p.final, overall_pos: p.pos, finalized_at: `${p.date}T20:00:00Z`,
++    data: { event: { id: `e-${p.date}`, name: p.name, date: p.date }, race: { id: `r-${p.date}`, name: p.race, team_size: members.length }, bib: '1', team_name: members.length > 1 ? 'Tubarões' : null, members, legs: p.legs, category: { sex: 'F', age: 36, age_group: '30-39', level: null }, status: p.status, total_ms: p.final, penalty_ms: 0, final_ms: p.final, positions: { overall: p.pos, sex: p.pos, finishers: p.fin }, podiums: p.podiums ?? [] },
++  };
++}
++const run = (t: number | null) => ({ leg_index: 0, modality: 'run' as const, label: 'Corrida', distance_m: 5000, athlete_id: 'a1', time_ms: t });
++const STATS_FIXTURE_RESULTS = [
++  result({ date: '2026-03-10', name: 'Etapa 1', race: 'Corrida 5K', status: 'finished', final: 1_350_000, pos: 1, fin: 20, podiums: [{ ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Feminino', podium_pos: 1 }], legs: [run(1_350_000)] }),
++  result({ date: '2026-06-20', name: 'Etapa 2', race: 'Aquathlon Revezamento', status: 'finished', final: 2_400_000, pos: 3, fin: 12, podiums: [{ ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Misto', podium_pos: 2 }],
++    members: [{ athlete_id: 'a1', name: 'Ana', legs: [0] }, { athlete_id: 'a2', name: 'Bia', legs: [1] }],
++    legs: [{ leg_index: 0, modality: 'swim', label: 'Natação', distance_m: 750, athlete_id: 'a1', time_ms: 750_000 }, { leg_index: 1, modality: 'run', label: 'Corrida', distance_m: 5000, athlete_id: 'a2', time_ms: 1_650_000 }] }),
++  result({ date: '2026-09-01', name: 'Etapa 3', race: 'Corrida 5K', status: 'dnf', final: null, pos: null, fin: 25, legs: [run(null)] }),
++  result({ date: '2026-09-20', name: 'Etapa 4', race: 'Corrida 5K', status: 'finished', final: 1_300_000, pos: 5, fin: 30, podiums: [{ ranking_id: 'faixa', ranking_name: 'Faixa etária', group_label: 'Feminino · 30-39', podium_pos: 1 }], legs: [run(1_300_000)] }),
++];
++
++describe('StatsView', () => {
++  const athlete = makeAthlete();
++
++  it('renders KPI tiles, personal records (including an empty pace cell for an "other" leg), the pace-by-modality table (excluding "other") and the evolution chart', () => {
++    const otherLegResult = result({
++      date: '2026-01-01', name: 'Etapa X', race: 'Prova Mista', status: 'finished', final: 500_000, pos: 1, fin: 5,
++      legs: [{ leg_index: 0, modality: 'other', label: 'Transição', distance_m: 1000, athlete_id: 'a1', time_ms: 500_000 }],
++    });
++    renderWithProviders(<StatsView athlete={athlete} results={[...STATS_FIXTURE_RESULTS, otherLegResult]} />);
++
++    expect(screen.getByText('Recordes pessoais')).toBeInTheDocument();
++    expect(screen.getByText('Ritmo por modalidade')).toBeInTheDocument();
++    expect(screen.getByText('4:20 /km')).toBeInTheDocument();
++    // The swim record ("1:40 /100m") happens to equal the swim ritmo-por-modalidade cell too
++    // (a single swim leg), so both tables show it — hence 2, not 1.
++    expect(screen.getAllByText('1:40 /100m')).toHaveLength(2);
++    expect(screen.getByText('4:25 /km')).toBeInTheDocument();
++    // The "other" leg's record row shows its time with an empty pace cell (Ruling 20).
++    const otherRow = screen.getByText('Outro', { selector: 'td' }).closest('tr');
++    expect(otherRow).not.toBeNull();
++    expect(otherRow).toHaveTextContent('8:20');
++    expect(otherRow?.querySelector('td:nth-child(4)')).toHaveTextContent('');
++    // pace_by_modality (Ritmo por modalidade) never lists "other": only run/swim/bike appear there.
++    const paceSection = screen.getByText('Ritmo por modalidade').closest('section');
++    expect(paceSection).not.toBeNull();
++    expect(paceSection).not.toHaveTextContent('Outro');
++
++    expect(screen.getByRole('img', { name: /Evolução/ })).toBeInTheDocument();
++    expect(screen.getAllByText('Participações').length).toBeGreaterThan(0);
++  });
++
++  it('shows the empty state when the athlete has no finalized results', () => {
++    renderWithProviders(<StatsView athlete={athlete} results={[]} />);
++    expect(screen.getByText('Sem resultados oficiais ainda')).toBeInTheDocument();
++  });
++
++  it('routes partner links to the public athlete page in public mode', () => {
++    renderWithProviders(<StatsView athlete={athlete} results={STATS_FIXTURE_RESULTS} publicMode />);
++    expect(screen.getByRole('link', { name: 'Bia' })).toHaveAttribute('href', '/atleta/a2');
++  });
++
++  it('routes partner links to the organizer profile outside public mode', () => {
++    renderWithProviders(<StatsView athlete={athlete} results={STATS_FIXTURE_RESULTS} />);
++    expect(screen.getByRole('link', { name: 'Bia' })).toHaveAttribute('href', '/atletas/a2');
++  });
++});
++
++describe('AthletesPage', () => {
++  beforeEach(() => {
++    listAthletes.mockResolvedValue([
++      makeAthlete({ id: 'a1', name: 'Ana Souza', sex: 'F', city: 'Vitória', team_club: 'EBC', participations: 3, wins: 1, podiums: 2 }),
++      makeAthlete({ id: 'a2', name: 'Beto Alves', sex: 'M', birth_date: null, city: 'Vila Velha', team_club: null, participations: 0, wins: 0, podiums: 0 }),
++    ]);
++  });
++
++  it('lists athletes with a link from the name to the profile', async () => {
++    renderWithProviders(<AthletesPage />);
++    expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
++    expect(screen.getByRole('link', { name: 'Ana Souza' })).toHaveAttribute('href', '/atletas/a1');
++    expect(screen.getByText('Beto Alves')).toBeInTheDocument();
++  });
++
++  it('filters by search term on name/city/team, accent-insensitive', async () => {
++    const user = userEvent.setup();
++    renderWithProviders(<AthletesPage />);
++    await screen.findByText('Ana Souza');
++
++    await user.type(screen.getByTestId('athlete-search'), 'vitoria');
++    expect(screen.getByText('Ana Souza')).toBeInTheDocument();
++    expect(screen.queryByText('Beto Alves')).not.toBeInTheDocument();
++  });
++
++  it('creates a new athlete through the modal and refreshes the list', async () => {
++    const user = userEvent.setup();
++    saveAthlete.mockResolvedValue(makeAthlete({ id: 'a3', name: 'Caio Lima', sex: 'M' }));
++    renderWithProviders(<AthletesPage />);
++    await screen.findByText('Ana Souza');
++
++    await user.click(screen.getByTestId('new-athlete'));
++    await user.type(screen.getByTestId('athlete-name'), 'Caio Lima');
++    await user.click(screen.getByTestId('athlete-save'));
++
++    await waitFor(() => expect(screen.queryByTestId('athlete-name')).not.toBeInTheDocument());
++    await waitFor(() => expect(listAthletes).toHaveBeenCalledTimes(2));
++  });
++
++  it('deletes an athlete after confirming', async () => {
++    const user = userEvent.setup();
++    deleteAthlete.mockResolvedValue(undefined);
++    renderWithProviders(<AthletesPage />);
++    await screen.findByText('Ana Souza');
++
++    await user.click(screen.getAllByRole('button', { name: 'Excluir' })[0]);
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    await waitFor(() => expect(deleteAthlete).toHaveBeenCalledWith('a1'));
++  });
++
++  it('shows the server error message and does not remove the row when delete fails', async () => {
++    const user = userEvent.setup();
++    deleteAthlete.mockRejectedValue(new ApiError('Atleta possui inscrições', 'P0001'));
++    renderWithProviders(<AthletesPage />);
++    await screen.findByText('Ana Souza');
++
++    await user.click(screen.getAllByRole('button', { name: 'Excluir' })[0]);
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    expect(await screen.findByText('Atleta possui inscrições')).toBeInTheDocument();
++    expect(screen.getByText('Ana Souza')).toBeInTheDocument();
++  });
++
++  it('opens the import dialog from the toolbar button', async () => {
++    const user = userEvent.setup();
++    renderWithProviders(<AthletesPage />);
++    await screen.findByText('Ana Souza');
++
++    await user.click(screen.getByTestId('import-athletes'));
++    expect(screen.getByTestId('import-file')).toBeInTheDocument();
++  });
++});
++
++describe('AthleteProfilePage', () => {
++  it('renders the athlete header, the public profile link and the stats view', async () => {
++    athleteProfile.mockResolvedValue({
++      athlete: makeAthlete({ id: 'a1', name: 'Ana Souza', city: 'Vitória', team_club: 'EBC' }),
++      results: [],
++    });
++    renderWithProviders(<AthleteProfilePage />, { route: '/atletas/a1', path: '/atletas/:athleteId' });
++
++    expect(await screen.findByRole('heading', { name: 'Ana Souza' })).toBeInTheDocument();
++    expect(athleteProfile).toHaveBeenCalledWith('a1');
++    expect(screen.getByRole('link', { name: /perfil público/i })).toHaveAttribute('href', '/atleta/a1');
++    expect(screen.getByText('Sem resultados oficiais ainda')).toBeInTheDocument();
++  });
++
++  it('does not link to a public profile when the athlete opted out', async () => {
++    athleteProfile.mockResolvedValue({ athlete: makeAthlete({ public_profile: false }), results: [] });
++    renderWithProviders(<AthleteProfilePage />, { route: '/atletas/a1', path: '/atletas/:athleteId' });
++
++    await screen.findByRole('heading', { name: 'Ana Souza' });
++    expect(screen.queryByRole('link', { name: /perfil público/i })).not.toBeInTheDocument();
++  });
++
++  it('opens the edit modal, saves and refreshes the profile', async () => {
++    const user = userEvent.setup();
++    const initial = makeAthlete({ id: 'a1', name: 'Ana Souza' });
++    athleteProfile.mockResolvedValue({ athlete: initial, results: [] });
++    saveAthlete.mockResolvedValue({ ...initial, city: 'Vila Velha' });
++    renderWithProviders(<AthleteProfilePage />, { route: '/atletas/a1', path: '/atletas/:athleteId' });
++
++    await screen.findByRole('heading', { name: 'Ana Souza' });
++    await user.click(screen.getByRole('button', { name: 'Editar' }));
++    expect(screen.getByTestId('athlete-name')).toHaveValue('Ana Souza');
++    await user.click(screen.getByTestId('athlete-save'));
++
++    await waitFor(() => expect(screen.queryByTestId('athlete-name')).not.toBeInTheDocument());
++    await waitFor(() => expect(athleteProfile).toHaveBeenCalledTimes(2));
++  });
++
++  it('deletes the athlete after confirming and shows the server error on failure', async () => {
++    const user = userEvent.setup();
++    athleteProfile.mockResolvedValue({ athlete: makeAthlete(), results: [] });
++    deleteAthlete.mockRejectedValue(new ApiError('Atleta possui inscrições', 'P0001'));
++    renderWithProviders(<AthleteProfilePage />, { route: '/atletas/a1', path: '/atletas/:athleteId' });
++
++    await screen.findByRole('heading', { name: 'Ana Souza' });
++    await user.click(screen.getByRole('button', { name: 'Excluir' }));
++    await user.click(screen.getByTestId('confirm-ok'));
++
++    expect(await screen.findByText('Atleta possui inscrições')).toBeInTheDocument();
++  });
++});

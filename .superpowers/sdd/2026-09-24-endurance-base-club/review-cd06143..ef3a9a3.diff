@@ -1,0 +1,425 @@
+# Review package: cd06143..ef3a9a3 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+ef3a9a3 fix(public): podium groups in canonical order on official results
+
+## Files changed
+ src/domain/ranking.test.ts              |  27 +++++-
+ src/domain/ranking.ts                   |   6 +-
+ src/features/public/PublicEventPage.tsx |  22 +++--
+ src/features/public/public.test.tsx     | 143 ++++++++++++++++++++++++++++++++
+ 4 files changed, 189 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/src/domain/ranking.test.ts b/src/domain/ranking.test.ts
+index 8abc594..d6cae98 100644
+--- a/src/domain/ranking.test.ts
++++ b/src/domain/ranking.test.ts
+@@ -1,13 +1,14 @@
+ import { describe, it, expect } from 'vitest';
+-import { classifyRace } from './ranking';
++import { classifyRace, compareGroupOrder } from './ranking';
+ import type { EntryTiming, TimingStatus } from './consolidation';
++import type { EntryCategory } from './categories';
+ import type { AthleteRow, EntryRow } from '../lib/types';
+ import { makeRace, makeEntry, makeAthlete, T0, MIN } from './testing/fixtures';
+ 
+ const ev = { date: '2026-10-11', levels: [] as string[] };
+ function timing(entry_id: string, final_ms: number | null, status: TimingStatus = final_ms === null ? 'on_course' : 'finished'): EntryTiming {
+   return { entry_id, race_id: 'r1', start_ms: T0, legs: [], total_ms: final_ms, final_ms, status, current_leg: null, current_leg_start_ms: null };
+ }
+ const people: [string, 'M' | 'F', string | null, number | null, EntryRow['status']?][] = [
+   ['f1', 'F', '1990-01-01', 20 * MIN], ['f2', 'F', '2000-01-01', 21 * MIN], ['f3', 'F', '1992-01-01', 22 * MIN],
+   ['f4', 'F', '1988-01-01', 23 * MIN], ['f5', 'F', '2001-01-01', 24 * MIN],
+@@ -79,10 +80,34 @@ describe('classifyRace', () => {
+ 
+     const withGhost = classifyRace(race, [...entries, ghostEntry, ocEntry], extraTimings, extraAthletes, ev);
+ 
+     expect(withGhost.rows.map(idOf)).toEqual(['m1', 'm2', 'm3', 'f1', 'f2', 'f3', 'f4', 'f5', 'm4', 'ghost', 'oc', 'm5', 'f6']);
+     const ghostRow = withGhost.rows.find(r => idOf(r) === 'ghost')!;
+     expect(ghostRow.overall_pos).toBeNull();
+     expect(ghostRow.sex_pos).toBeNull();
+     expect(withGhost.finishers).toBe(9);
+   });
+ });
++
++describe('compareGroupOrder (exported for reuse by public.PublicEventPage\'s finalized-race podium reconstruction)', () => {
++  const cat = (p: Partial<EntryCategory>): EntryCategory => ({ sex: 'M', age: null, age_group: null, level: null, ...p });
++  const ageGroups = [{ label: 'até 19', min: 0, max: 19 }, { label: '20-29', min: 20, max: 29 }, { label: '60+', min: 60, max: null }];
++  const levels = ['Elite', 'Base'];
++
++  it('orders sex M, F, MISTO', () => {
++    const order: EntryCategory['sex'][] = ['MISTO', 'F', 'M'];
++    const sorted = [...order].sort((a, b) => compareGroupOrder(['sex'], cat({ sex: a }), cat({ sex: b }), ageGroups, levels));
++    expect(sorted).toEqual(['M', 'F', 'MISTO']);
++  });
++
++  it('orders age groups by min, with "até 19" first and "60+" last', () => {
++    const labels = ['60+', 'até 19', '20-29'];
++    const sorted = [...labels].sort((a, b) => compareGroupOrder(['age'], cat({ age_group: a }), cat({ age_group: b }), ageGroups, levels));
++    expect(sorted).toEqual(['até 19', '20-29', '60+']);
++  });
++
++  it('orders levels by their position in event.levels, "Sem nível" last', () => {
++    const vals: (string | null)[] = [null, 'Base', 'Elite'];
++    const sorted = [...vals].sort((a, b) => compareGroupOrder(['level'], cat({ level: a }), cat({ level: b }), ageGroups, levels));
++    expect(sorted).toEqual(['Elite', 'Base', null]);
++  });
++});
+diff --git a/src/domain/ranking.ts b/src/domain/ranking.ts
+index e02fb4c..676571b 100644
+--- a/src/domain/ranking.ts
++++ b/src/domain/ranking.ts
+@@ -88,22 +88,26 @@ function levelIndex(levels: string[], level: string | null): number {
+   if (level === null) return Infinity;
+   const i = levels.indexOf(level);
+   return i === -1 ? Infinity : i;
+ }
+ 
+ /**
+  * Orders podium groups within one ranking (spec §9): sex M, F, MISTO; then age group by `min`
+  * ("Sem faixa" last); then level in `event.levels` order ("Sem nível" last) — only for the
+  * dimensions that ranking actually groups by (a dimension absent from `dims` never splits the
+  * group, so it plays no part in ordering it).
++ *
++ * Exported so any other reconstruction of podium groups from frozen data (e.g. the public
++ * finalized-race view in `features/public/PublicEventPage.tsx`) can reuse the same canonical
++ * order instead of re-deriving or approximating it (e.g. alphabetically).
+  */
+-function compareGroupOrder(dims: RankingDim[], a: EntryCategory, b: EntryCategory, ageGroups: AgeGroup[], levels: string[]): number {
++export function compareGroupOrder(dims: RankingDim[], a: EntryCategory, b: EntryCategory, ageGroups: AgeGroup[], levels: string[]): number {
+   if (dims.includes('sex')) {
+     const c = SEX_ORDER[a.sex] - SEX_ORDER[b.sex];
+     if (c !== 0) return c;
+   }
+   if (dims.includes('age')) {
+     const c = ageGroupMin(ageGroups, a.age_group) - ageGroupMin(ageGroups, b.age_group);
+     if (c !== 0) return c;
+   }
+   if (dims.includes('level')) {
+     const c = levelIndex(levels, a.level) - levelIndex(levels, b.level);
+diff --git a/src/features/public/PublicEventPage.tsx b/src/features/public/PublicEventPage.tsx
+index 35ec561..38fd5b5 100644
+--- a/src/features/public/PublicEventPage.tsx
++++ b/src/features/public/PublicEventPage.tsx
+@@ -1,19 +1,20 @@
+ import { useEffect, useMemo, useRef, useState } from 'react';
+ import { Link, useParams } from 'react-router';
+ import { useQuery, useQueryClient } from '@tanstack/react-query';
+ import { api } from '../../lib/api';
+ import { indexEvent, mergeById } from '../../domain/eventModel';
+ import { computeEventTiming } from '../../domain/consolidation';
+ import type { Crossing, EntryTiming, LegTiming } from '../../domain/consolidation';
+-import { classifyRace } from '../../domain/ranking';
++import { classifyRace, compareGroupOrder } from '../../domain/ranking';
+ import type { PodiumGroup, PodiumPlace, RaceClassification, RankedEntry } from '../../domain/ranking';
++import type { EntryCategory } from '../../domain/categories';
+ import { formatDateBR } from '../../lib/format';
+ import { Badge, Card, EmptyState, Spinner } from '../../components/ui';
+ import { ClassificationTable } from '../results/ClassificationTable';
+ import { PodiumView } from '../results/PodiumView';
+ import { EVENT_STATUS_LABEL, PublicShell } from './PublicHome';
+ import type { AthleteRow, EntryRow, PubEventPayload, RaceRow, ResultRow } from '../../lib/types';
+ 
+ /** Cadence for `pub_live` while the tab is visible (spec §12, Global Constraints "público 10 s");
+  * the overlap below re-reads the same window every poll (spec "sobreposição de fetch 10 s"). */
+ const PUBLIC_POLL_MS = 10_000;
+@@ -65,52 +66,59 @@ function timingFromSnapshot(r: ResultRow): EntryTiming {
+   return {
+     entry_id: r.entry_id, race_id: r.race_id, start_ms: null, legs,
+     total_ms: r.data.total_ms, final_ms: r.data.final_ms, status: r.data.status,
+     current_leg: null, current_leg_start_ms: null,
+   };
+ }
+ 
+ /** Groups every entry's frozen `data.podiums` places by ranking + group label, resolving the full
+  * `RankingDef` from the race's current config when it still has that ranking (falls back to a
+  * name-only stub otherwise — the config could have changed since the race was finalized). Orders
+- * groups by the race's ranking order so `PodiumView`'s "adjacent same ranking" grouping holds. */
+-function reconstructPodiums(race: RaceRow, results: ResultRow[], rowsByEntry: Map<string, RankedEntry>): PodiumGroup[] {
++ * groups by the race's ranking order, then within a ranking by the same canonical group order
++ * (`compareGroupOrder`, spec §9: sex M, F, MISTO; age groups by `min`; levels in event order) that
++ * `domain/ranking.ts`'s `buildPodiums` uses for the live view — reused here instead of an ad-hoc
++ * alphabetical sort so a finalized race's podiums match the order shown before it was finalized. */
++function reconstructPodiums(race: RaceRow, results: ResultRow[], rowsByEntry: Map<string, RankedEntry>, levels: string[]): PodiumGroup[] {
+   const groups = new Map<string, PodiumGroup>();
++  const groupCategory = new Map<string, EntryCategory>();
+   for (const r of results) {
+     const ranked = rowsByEntry.get(r.entry_id);
+     if (!ranked) continue;
+     for (const p of r.data.podiums) {
+       const key = `${p.ranking_id}::${p.group_label}`;
+       let group = groups.get(key);
+       if (!group) {
+         const rankingDef = race.config.rankings.find((rd) => rd.id === p.ranking_id) ?? {
+           id: p.ranking_id, name: p.ranking_name, dims: [], size: 3,
+         };
+         group = { ranking: rankingDef, group_key: key, group_label: p.group_label, places: [] };
+         groups.set(key, group);
++        groupCategory.set(key, r.data.category);
+       }
+       group.places.push({ podium_pos: p.podium_pos, ranked });
+     }
+   }
+   for (const g of groups.values()) g.places.sort((a: PodiumPlace, b: PodiumPlace) => a.podium_pos - b.podium_pos);
+   const order = race.config.rankings.map((rd) => rd.id);
+   return [...groups.values()].sort((a, b) => {
+     const ai = order.indexOf(a.ranking.id);
+     const bi = order.indexOf(b.ranking.id);
+-    return (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi) || a.group_label.localeCompare(b.group_label, 'pt-BR');
++    const rankingOrder = (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi);
++    if (rankingOrder !== 0) return rankingOrder;
++    return compareGroupOrder(a.ranking.dims, groupCategory.get(a.group_key)!, groupCategory.get(b.group_key)!, race.config.age_groups, levels);
+   });
+ }
+ 
+ /** Rebuilds the `RaceClassification` `ClassificationTable`/`PodiumView` expect from a finalized
+  * race's stored `results`, ordering rows by their frozen `overall_pos` (spec: "ordenados por
+  * overall_pos, a partir dos snapshots") instead of recomputing anything from live marks. */
+-function classificationFromResults(race: RaceRow, results: ResultRow[], athletesById: Map<string, AthleteRow>): RaceClassification {
++function classificationFromResults(race: RaceRow, results: ResultRow[], athletesById: Map<string, AthleteRow>, levels: string[]): RaceClassification {
+   const rowsByEntry = new Map<string, RankedEntry>();
+   const built = results.map((r) => {
+     const entry = entryFromSnapshot(r);
+     const timing = timingFromSnapshot(r);
+     const ranked: RankedEntry = {
+       entry, timing, category: r.data.category,
+       overall_pos: r.overall_pos, sex_pos: r.data.positions.sex,
+       ranking_pos: Object.fromEntries(race.config.rankings.map((rd) => [rd.id, null])),
+       gap_ms: null,
+     };
+@@ -124,21 +132,21 @@ function classificationFromResults(race: RaceRow, results: ResultRow[], athletes
+   const unranked = built
+     .filter((r) => r.overall_pos === null)
+     .sort((a, b) => UNRANKED_STATUS_ORDER[a.timing.status] - UNRANKED_STATUS_ORDER[b.timing.status] || compareBib(a.entry, b.entry));
+ 
+   const leaderFinal = ranked.length > 0 ? ranked[0].timing.final_ms : null;
+   for (const r of ranked) {
+     r.gap_ms = leaderFinal !== null && r.timing.final_ms !== null ? r.timing.final_ms - leaderFinal : null;
+   }
+ 
+   const rows = [...ranked, ...unranked];
+-  return { race, rows, finishers: ranked.length, podiums: reconstructPodiums(race, results, rowsByEntry) };
++  return { race, rows, finishers: ranked.length, podiums: reconstructPodiums(race, results, rowsByEntry, levels) };
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // Live polling: `pub_live` every 10 s while the tab is visible, merging marks by id like the
+ // admin's `useEventData` (Ruling 43: discarded marks are included too — the domain ignores them),
+ // replacing resolutions/waves, and refetching the whole payload when the version moves.
+ // ---------------------------------------------------------------------------
+ 
+ function usePublicLivePoll(slug: string | undefined, enabled: boolean) {
+   const queryClient = useQueryClient();
+@@ -227,21 +235,21 @@ export default function PublicEventPage() {
+ 
+   const isOfficial = useMemo(
+     () => (payload && race ? payload.results.some((r) => r.race_id === race.id) : false),
+     [payload, race],
+   );
+ 
+   const cls = useMemo(() => {
+     if (!payload || !index || !race) return null;
+     if (isOfficial) {
+       const raceResults = payload.results.filter((r) => r.race_id === race.id);
+-      return classificationFromResults(race, raceResults, index.athletesById);
++      return classificationFromResults(race, raceResults, index.athletesById, payload.event.levels);
+     }
+     if (!liveTiming) return null;
+     const entries = payload.entries.filter((e) => e.race_id === race.id);
+     return classifyRace(race, entries, liveTiming.byEntry, index.athletesById, payload.event);
+   }, [payload, index, race, isOfficial, liveTiming]);
+ 
+   if (query.isLoading) {
+     return (
+       <PublicShell>
+         <div data-testid="public-results" className="flex justify-center px-4 py-16">
+diff --git a/src/features/public/public.test.tsx b/src/features/public/public.test.tsx
+index d3f4116..9eaf7ee 100644
+--- a/src/features/public/public.test.tsx
++++ b/src/features/public/public.test.tsx
+@@ -105,20 +105,145 @@ function makeResultRow(p: {
+   return {
+     race_id: 'r1', entry_id: p.entry_id, event_id: 'e1', athlete_ids: [p.athlete_id],
+     status: data.status, final_ms: p.final_ms, overall_pos: p.overall_pos, data, finalized_at: iso(NOW),
+   };
+ }
+ 
+ function renderEventPage(slug = 'evento-teste') {
+   return renderWithProviders(<PublicEventPage />, { route: `/p/${slug}`, path: '/p/:slug' });
+ }
+ 
++// ---------------------------------------------------------------------------
++// Podium group order (spec §9: sex M, F, MISTO; age groups by `min`). Six single-leg entries,
++// M/F crossed with three age brackets ("até 19", "20-29", "60+" — the default race config's
++// youngest and oldest buckets), all finishing at distinct times so every (sex, age) combination
++// in the "faixa" ranking has exactly one member (podium position 1) and the "geral" ranking has
++// three men and three women (positions 1-3 each).
++// ---------------------------------------------------------------------------
++
++const GROUP_ORDER_PEOPLE = [
++  { id: 'a1', sex: 'F' as const, birth: '2008-01-01', name: 'Ana Jovem', age: 18, age_group: 'até 19', at: T0 + 21 * MIN },
++  { id: 'a2', sex: 'F' as const, birth: '2000-01-01', name: 'Ana Adulta', age: 26, age_group: '20-29', at: T0 + 23 * MIN },
++  { id: 'a3', sex: 'F' as const, birth: '1960-01-01', name: 'Ana Veterana', age: 66, age_group: '60+', at: T0 + 25 * MIN },
++  { id: 'a4', sex: 'M' as const, birth: '2008-01-01', name: 'Bruno Jovem', age: 18, age_group: 'até 19', at: T0 + 20 * MIN },
++  { id: 'a5', sex: 'M' as const, birth: '2000-01-01', name: 'Bruno Adulto', age: 26, age_group: '20-29', at: T0 + 22 * MIN },
++  { id: 'a6', sex: 'M' as const, birth: '1960-01-01', name: 'Bruno Veterano', age: 66, age_group: '60+', at: T0 + 24 * MIN },
++];
++
++const GROUP_ORDER_EXPECTED = [
++  'Masculino', 'Feminino',
++  'Masculino · até 19', 'Masculino · 20-29', 'Masculino · 60+',
++  'Feminino · até 19', 'Feminino · 20-29', 'Feminino · 60+',
++];
++
++function makeGroupResultRow(p: {
++  entry_id: string; bib: string; athlete_id: string; name: string;
++  sex: 'M' | 'F'; age: number; age_group: string;
++  final_ms: number; overall_pos: number; sex_pos: number;
++  podiums: ResultSnapshot['podiums'];
++}): ResultRow {
++  const data: ResultSnapshot = {
++    event: { id: 'e1', name: 'Evento Teste', date: '2026-10-11' },
++    race: { id: 'r1', name: 'Aquathlon', team_size: 1 },
++    bib: p.bib, team_name: null,
++    members: [{ athlete_id: p.athlete_id, name: p.name, legs: [0] }],
++    legs: [{ leg_index: 0, modality: 'run', label: 'Corrida', distance_m: 5000, athlete_id: p.athlete_id, time_ms: p.final_ms }],
++    category: { sex: p.sex, age: p.age, age_group: p.age_group, level: null },
++    status: 'finished',
++    total_ms: p.final_ms, penalty_ms: 0, final_ms: p.final_ms,
++    positions: { overall: p.overall_pos, sex: p.sex_pos, finishers: 6 },
++    podiums: p.podiums,
++  };
++  return {
++    race_id: 'r1', entry_id: p.entry_id, event_id: 'e1', athlete_ids: [p.athlete_id],
++    status: 'finished', final_ms: p.final_ms, overall_pos: p.overall_pos, data, finalized_at: iso(NOW),
++  };
++}
++
++function buildGroupOrderPayload(finalized: boolean): PubEventPayload {
++  const event = makeEvent({ status: finalized ? 'encerrado' : 'ao_vivo', public_slug: 'evento-teste' });
++  const race = makeRace({
++    legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }],
++    finalized_at: finalized ? iso(NOW) : null,
++    // Cumulative so every athlete can place in both "geral" and "faixa" (each has exactly 3
++    // finishers per sex, so all naturally podium in "geral" too) — this test is about group
++    // ORDER, not the separate non-cumulative "already awarded" exclusion (covered elsewhere).
++    configPatch: { cumulative: true },
++  });
++  const wave = makeWave();
++  const athletes = GROUP_ORDER_PEOPLE.map((p) =>
++    makeAthlete({ id: p.id, name: p.name, sex: p.sex, birth_date: p.birth, public_profile: false }));
++  const entries = GROUP_ORDER_PEOPLE.map((p, i) =>
++    makeEntry({ id: `en${i + 1}`, bib: String(i + 1), members: [{ athlete_id: p.id, position: 0, legs: [0] }] }));
++  const marks = GROUP_ORDER_PEOPLE.map((p, i) =>
++    makeMark({ id: `gm${i + 1}`, entry_id: `en${i + 1}`, leg_index: 0, at: p.at }));
++
++  // Global finish order (ascending): a4(20), a1(21), a5(22), a2(23), a6(24), a3(25).
++  const results: ResultRow[] = finalized
++    ? [
++        makeGroupResultRow({
++          entry_id: 'en4', bib: '4', athlete_id: 'a4', name: 'Bruno Jovem', sex: 'M', age: 18, age_group: 'até 19',
++          final_ms: 20 * MIN, overall_pos: 1, sex_pos: 1,
++          podiums: [
++            { ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Masculino', podium_pos: 1 },
++            { ranking_id: 'faixa', ranking_name: 'Faixa etária', group_label: 'Masculino · até 19', podium_pos: 1 },
++          ],
++        }),
++        makeGroupResultRow({
++          entry_id: 'en1', bib: '1', athlete_id: 'a1', name: 'Ana Jovem', sex: 'F', age: 18, age_group: 'até 19',
++          final_ms: 21 * MIN, overall_pos: 2, sex_pos: 1,
++          podiums: [
++            { ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Feminino', podium_pos: 1 },
++            { ranking_id: 'faixa', ranking_name: 'Faixa etária', group_label: 'Feminino · até 19', podium_pos: 1 },
++          ],
++        }),
++        makeGroupResultRow({
++          entry_id: 'en5', bib: '5', athlete_id: 'a5', name: 'Bruno Adulto', sex: 'M', age: 26, age_group: '20-29',
++          final_ms: 22 * MIN, overall_pos: 3, sex_pos: 2,
++          podiums: [
++            { ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Masculino', podium_pos: 2 },
++            { ranking_id: 'faixa', ranking_name: 'Faixa etária', group_label: 'Masculino · 20-29', podium_pos: 1 },
++          ],
++        }),
++        makeGroupResultRow({
++          entry_id: 'en2', bib: '2', athlete_id: 'a2', name: 'Ana Adulta', sex: 'F', age: 26, age_group: '20-29',
++          final_ms: 23 * MIN, overall_pos: 4, sex_pos: 2,
++          podiums: [
++            { ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Feminino', podium_pos: 2 },
++            { ranking_id: 'faixa', ranking_name: 'Faixa etária', group_label: 'Feminino · 20-29', podium_pos: 1 },
++          ],
++        }),
++        makeGroupResultRow({
++          entry_id: 'en6', bib: '6', athlete_id: 'a6', name: 'Bruno Veterano', sex: 'M', age: 66, age_group: '60+',
++          final_ms: 24 * MIN, overall_pos: 5, sex_pos: 3,
++          podiums: [
++            { ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Masculino', podium_pos: 3 },
++            { ranking_id: 'faixa', ranking_name: 'Faixa etária', group_label: 'Masculino · 60+', podium_pos: 1 },
++          ],
++        }),
++        makeGroupResultRow({
++          entry_id: 'en3', bib: '3', athlete_id: 'a3', name: 'Ana Veterana', sex: 'F', age: 66, age_group: '60+',
++          final_ms: 25 * MIN, overall_pos: 6, sex_pos: 3,
++          podiums: [
++            { ranking_id: 'geral', ranking_name: 'Geral', group_label: 'Feminino', podium_pos: 3 },
++            { ranking_id: 'faixa', ranking_name: 'Faixa etária', group_label: 'Feminino · 60+', podium_pos: 1 },
++          ],
++        }),
++      ]
++    : [];
++
++  return {
++    event, races: [race], waves: [wave], entries, athletes, timekeepers: [makeTimekeeper()],
++    marks: finalized ? [] : marks, resolutions: [], results, version: 1, server_now: iso(NOW),
++  };
++}
++
+ describe('PublicEventPage', () => {
+   it('renders classification rows from the live payload with the "Parcial – ao vivo" badge, linking only public athletes', async () => {
+     const { payload } = buildLivePayload();
+     mocks.event.mockResolvedValue(payload);
+ 
+     renderEventPage();
+ 
+     const table = await screen.findByTestId('classification-table');
+     const rows = within(table).getAllByTestId('classification-row');
+     expect(rows).toHaveLength(2);
+@@ -200,20 +325,38 @@ describe('PublicEventPage', () => {
+ 
+       expect(mocks.live).toHaveBeenCalledTimes(1);
+       expect(mocks.live).toHaveBeenCalledWith('evento-teste', iso(Date.parse(payload.server_now) - 10_000));
+ 
+       const rows = within(screen.getByTestId('classification-table')).getAllByTestId('classification-row');
+       expect(within(rows[0]).getByText('102')).toBeInTheDocument();
+     } finally {
+       vi.useRealTimers();
+     }
+   });
++
++  it('orders a finalized race\'s podium groups per spec §9 (sex M, F; age by min) and matches the live view\'s order for the same data', async () => {
++    const official = renderEventPage.bind(null, 'evento-teste');
++
++    mocks.event.mockResolvedValue(buildGroupOrderPayload(true));
++    const officialRender = official();
++    const officialPodiums = await within(officialRender.container).findByTestId('podiums');
++    const officialLabels = [...officialPodiums.querySelectorAll('p')].map((el) => el.textContent);
++    expect(officialLabels).toEqual(GROUP_ORDER_EXPECTED);
++
++    // Same entries/categories, but not finalized: the live view (computeEventTiming + classifyRace)
++    // must group and order the podiums identically to the frozen, reconstructed official view.
++    mocks.event.mockResolvedValue(buildGroupOrderPayload(false));
++    const liveRender = official();
++    const livePodiums = await within(liveRender.container).findByTestId('podiums');
++    const liveLabels = [...livePodiums.querySelectorAll('p')].map((el) => el.textContent);
++    expect(liveLabels).toEqual(GROUP_ORDER_EXPECTED);
++  });
+ });
+ 
+ // ---------------------------------------------------------------------------
+ 
+ function renderAthletePage(athleteId = 'a1') {
+   return renderWithProviders(<PublicAthletePage />, { route: `/atleta/${athleteId}`, path: '/atleta/:athleteId' });
+ }
+ 
+ describe('PublicAthletePage', () => {
+   it('renders the athlete header and StatsView ("Participações") from pub.athlete', async () => {
