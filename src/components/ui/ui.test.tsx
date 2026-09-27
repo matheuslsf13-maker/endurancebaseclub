@@ -563,6 +563,25 @@ describe('LineChart', () => {
     render(<LineChart title="Evolução" formatValue={(v) => String(v)} points={[]} />);
     expect(screen.getByText('Sem dados para exibir')).toBeInTheDocument();
   });
+
+  it('C-Minor-16: clamps the tooltip so it never overflows a narrow (390 px) container, even centered on the last point', () => {
+    render(
+      <LineChart
+        title="Evolução 5 km corrida"
+        formatValue={(v) => `${Math.round(v / 1000)}s`}
+        points={[
+          { label: '01', value: 100 },
+          { label: '02', value: 200 },
+          { label: '03', value: 300 },
+        ]}
+      />,
+    );
+    const svg = screen.getByRole('img', { name: /Evolução 5 km corrida/ });
+    fireEvent.focus(svg); // keyboard focus lands on the last point by default
+
+    const leftPercent = parseFloat(screen.getByTestId('line-chart-tooltip').style.left);
+    expect(leftPercent).toBeLessThanOrEqual(92);
+  });
 });
 
 describe('LineChart touch interaction', () => {

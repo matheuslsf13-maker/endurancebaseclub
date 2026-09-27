@@ -25,6 +25,10 @@ export default function PublicAthletePage() {
     document.title = query.data ? `${query.data.athlete.name} – EnduranceBaseClub` : 'EnduranceBaseClub';
   }, [query.data]);
 
+  // C-Minor-15: reset on unmount only — otherwise an admin tab reached by following a public
+  // profile link keeps the athlete's name in the title forever.
+  useEffect(() => () => { document.title = 'EnduranceBaseClub'; }, []);
+
   if (query.isLoading) {
     return (
       <PublicShell>

@@ -475,6 +475,20 @@ describe('PublicAthletePage', () => {
     expect(screen.getByText('Participações')).toBeInTheDocument();
   });
 
+  it('C-Minor-15: resets document.title when navigating away', async () => {
+    mocks.athlete.mockResolvedValue({
+      athlete: { id: 'a1', name: 'Ana Souza', sex: 'F', city: null, team_club: null } as AthleteProfile['athlete'],
+      results: [],
+    });
+    const { unmount } = renderAthletePage();
+
+    await screen.findByText('Ana Souza');
+    expect(document.title).toBe('Ana Souza – EnduranceBaseClub');
+
+    unmount();
+    expect(document.title).toBe('EnduranceBaseClub');
+  });
+
   it('shows a friendly message when the athlete is private or missing', async () => {
     mocks.athlete.mockRejectedValue(new Error('Atleta não encontrado'));
 

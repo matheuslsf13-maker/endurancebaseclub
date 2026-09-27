@@ -282,7 +282,11 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
           <div
             data-testid="line-chart-tooltip"
             className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs shadow-lg"
-            style={{ left: `${(active.x / measuredWidth) * 100}%`, top: `${Math.max(0, (active.y / height) * 100 - 4)}%` }}
+            // C-Minor-16: centered on the last point (`-translate-x-1/2`), the tooltip overflows
+            // the right edge at 390 px when that point sits near the end of a narrow chart —
+            // clamped so it always stays inside the container; the dashed guideline (drawn at the
+            // unclamped `active.x`) still marks the exact point.
+            style={{ left: `${Math.min(92, Math.max(8, (active.x / measuredWidth) * 100))}%`, top: `${Math.max(0, (active.y / height) * 100 - 4)}%` }}
           >
             <div className="tabular font-semibold text-fg">{formatValue(active.point.value)}</div>
             <div className="text-muted">
