@@ -307,7 +307,8 @@ describe('marking', () => {
     await renderMain();
     const button = screen.getByTestId('mark-button');
     for (let i = 0; i < 4; i++) {
-      fireEvent.pointerDown(button, { button: 0, pointerType: 'touch' });
+      fireEvent.pointerDown(button, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 600 });
+      fireEvent.pointerUp(button, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 101, clientY: 601 });
       fireEvent.click(button, { detail: 1 }); // the click that follows the touch must not mark again
       await flush(100);
     }
@@ -482,11 +483,12 @@ describe('marking', () => {
   it('a press that slid off MARCAR does not swallow a later screen-reader activation (Ruling 44 M2)', async () => {
     await renderMain();
     const button = screen.getByTestId('mark-button');
-    fireEvent.pointerDown(button, { button: 0, pointerType: 'touch' }); // the finger slides off: no click
-    expect(stored()).toHaveLength(1);
+    fireEvent.pointerDown(button, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 600 });
+    fireEvent.pointerUp(document.body, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 700 }); // slid off: no click
+    expect(stored()).toHaveLength(0);
     await flush(2 * SEC);
     fireEvent.click(button, { detail: 1 }); // VoiceOver/TalkBack activation: a click without a pointerdown
-    expect(stored()).toHaveLength(2);
+    expect(stored()).toHaveLength(1);
   });
 
   it('a long press on MARCAR records one mark', async () => {
@@ -495,6 +497,35 @@ describe('marking', () => {
     fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' });
     await flush(1_500);
     fireEvent.pointerUp(button, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(button, { detail: 1 });
+    expect(stored()).toHaveLength(1);
+    expect(stored()[0].ts).toBe(iso(NOW0 + OFFSET));
+  });
+
+  it('dragging the screen from MARCAR scrolls and never marks', async () => {
+    await renderMain();
+    const button = screen.getByTestId('mark-button');
+    // The button lets the page scroll vertically (touch-none would pin the page under the finger).
+    expect(button).toHaveClass('touch-pan-y');
+    expect(button).not.toHaveClass('touch-none');
+    // The browser takes over the gesture to scroll: the press is cancelled.
+    fireEvent.pointerDown(button, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 600 });
+    expect(stored()).toHaveLength(0);
+    fireEvent.pointerCancel(button, { pointerId: 1, pointerType: 'touch' });
+    // A drag the browser did not cancel: the finger lifts 40 px away, and the click it may still get is ignored.
+    fireEvent.pointerDown(button, { button: 0, pointerId: 2, pointerType: 'touch', clientX: 100, clientY: 600 });
+    fireEvent.pointerUp(button, { button: 0, pointerId: 2, pointerType: 'touch', clientX: 100, clientY: 640 });
+    fireEvent.click(button, { detail: 1 });
+    expect(stored()).toHaveLength(0);
+  });
+
+  it('a tap marks when the finger lifts, at the instant it landed', async () => {
+    await renderMain();
+    const button = screen.getByTestId('mark-button');
+    fireEvent.pointerDown(button, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 600 });
+    await flush(400);
+    expect(stored()).toHaveLength(0);
+    fireEvent.pointerUp(button, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 103, clientY: 604 });
     fireEvent.click(button, { detail: 1 });
     expect(stored()).toHaveLength(1);
     expect(stored()[0].ts).toBe(iso(NOW0 + OFFSET));
@@ -1388,17 +1419,30 @@ describe('final fix wave: the timekeeper app', () => {
     expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Desfazer', 'Trocar perna', 'Fechar']);
     for (const b of buttons) expect(b).toHaveClass('pointer-events-auto');
 
+    // The assignment stays 8 s (time to reach Desfazer), then goes.
+    await flush(7 * SEC);
+    expect(screen.getByTestId('assign-toast')).toBeInTheDocument();
+    await flush(1 * SEC);
+    expect(screen.queryByTestId('assign-toast')).not.toBeInTheDocument();
+
     submitBib(); // an error notice: nothing typed
     const error = screen.getByText('Digite o nº de peito').closest('[role]') as HTMLElement;
     expect(error).toHaveClass('pointer-events-none');
     expect(error.closest('.pointer-events-auto')).toBeNull();
-
-    // The error goes after 5 s; the assignment stays 8 s (time to reach Desfazer), then goes.
     await flush(5 * SEC);
     expect(screen.queryByText('Digite o nº de peito')).not.toBeInTheDocument();
+  });
+
+  it('shows one notice at a time: a new one replaces the previous (they never pile up over the screen)', async () => {
+    await renderMain();
+    typeBib('101');
+    tapMark();
     expect(screen.getByTestId('assign-toast')).toBeInTheDocument();
-    await flush(3 * SEC);
+    submitBib(); // an error: nothing typed
+    expect(screen.getByText('Digite o nº de peito')).toBeInTheDocument();
     expect(screen.queryByTestId('assign-toast')).not.toBeInTheDocument();
+    submitBib();
+    expect(screen.getAllByText('Digite o nº de peito')).toHaveLength(1);
   });
 
   it('two overlapping touches on two "Em prova" rows record both arrivals (B2-m2)', async () => {
