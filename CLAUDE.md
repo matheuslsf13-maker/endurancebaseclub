@@ -57,6 +57,6 @@ A execução segue **subagent-driven-development** (SDD): um implementador novo 
 
 ## Produção
 
-- Supabase: URL `https://wlishmznbhhcqzncdxnq.supabase.co`, chave publicável `sb_publishable_Py0jUHGMNAjCM8C488RvZg_qviJupEk` (pública, já em `.env.production`). Postgres 17 em produção (local é 16). Migrations `0001`–`0008` aplicadas em 28/09/2026; nova migration segue o procedimento de `docs/DEPLOY.md`.
+- Supabase: URL `https://wlishmznbhhcqzncdxnq.supabase.co`, chave publicável `sb_publishable_Py0jUHGMNAjCM8C488RvZg_qviJupEk` (pública, já em `.env.production`). Postgres 17 em produção (local é 16). Migrations `0001`–`0009` aplicadas em 28/09/2026; nova migration segue o procedimento de `docs/DEPLOY.md`.
 - Vercel: time "Matheus Proj" (`team_5RKNbN1EiWlEpXuYzgVp3yy9`, slug `matheus-proj`); projeto `endurance-base-club` (`prj_Bg7J7kdmZFiB1Y58gWzR9IthbWHC`), ligado ao GitHub: a `main` publica em produção (https://endurance-base-club.vercel.app), as outras branches geram pré-visualizações protegidas; Node 22.x.
 - Conta owner: `matheuslsf13@gmail.com`, criada com `bootstrap_owner` em 28/09/2026 (primeiro login força troca de senha). Cadastro público desligado no Supabase Auth.

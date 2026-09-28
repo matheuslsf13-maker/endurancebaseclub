@@ -6,7 +6,9 @@ export type EventStatus = 'planejado' | 'ao_vivo' | 'encerrado';
 export type RankingDim = 'sex' | 'age' | 'level';
 export type AgeRule = 'year_end' | 'event_date';
 export type TeamAgeRule = 'sum' | 'oldest' | 'youngest';
-export type TimeSource = 'median' | 'reference';
+/** 0009: the system method pooling a crossing's candidates; the priority timekeeper
+ * (`RaceConfig.reference_timekeeper_id`) applies on top of either. */
+export type TimeSource = 'median' | 'mean';
 export type ResolutionMode = 'system' | 'mark' | 'manual';
 export type OrganizerRole = 'owner' | 'admin';
 

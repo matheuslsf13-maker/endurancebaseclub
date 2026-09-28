@@ -241,18 +241,19 @@ select tests.assert_raises($$select public.admin_save_race(jsonb_build_object(
 ))$$, 'P0001', 'Não é possível mover a prova para outro evento');
 
 -- A-I1: a duplicated event has no timekeepers, so a copied race must not keep the source event's
--- reference timekeeper (not even a stale one left behind after switching back to the median) --
--- otherwise every later save of the copy, which always sends the full config (Ruling 14), fails.
+-- priority timekeeper -- otherwise every later save of the copy, which always sends the full
+-- config (Ruling 14), fails. 0009: the system method (median/mean) is kept by the copy.
 do $$ declare ev jsonb; reg jsonb; dup uuid; agg jsonb; rc jsonb; rr jsonb; begin
   ev := public.admin_save_event('{"name":"Copa Referência","date":"2026-10-18"}');
+  perform tests.set('ev_ref', ev ->> 'id');
   reg := public.tk_register(ev ->> 'tk_token', 'Ana', 'iPhone');
   perform tests.set('tk_ref', reg ->> 'timekeeper_id');
-  perform public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'A Referência', 'position', 0,
-    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
-    'config', jsonb_build_object('time_source', 'reference', 'reference_timekeeper_id', reg ->> 'timekeeper_id')));
-  perform public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'B Mediana', 'position', 1,
+  perform public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'A Mediana', 'position', 0,
     'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
     'config', jsonb_build_object('time_source', 'median', 'reference_timekeeper_id', reg ->> 'timekeeper_id')));
+  perform public.admin_save_race(jsonb_build_object('event_id', ev ->> 'id', 'name', 'B Média', 'position', 1,
+    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'config', jsonb_build_object('time_source', 'mean', 'reference_timekeeper_id', reg ->> 'timekeeper_id')));
 
   dup := public.admin_duplicate_event((ev ->> 'id')::uuid, 'Copa Referência 2027', '2027-10-17');
   perform tests.set('ev_dup', dup::text);
@@ -261,24 +262,30 @@ do $$ declare ev jsonb; reg jsonb; dup uuid; agg jsonb; rc jsonb; rr jsonb; begi
   for rr in select el from jsonb_array_elements(agg -> 'races') as t(el) loop
     rc := rr -> 'config';
     assert (rc -> 'reference_timekeeper_id') = 'null'::jsonb,
-      'the copy must not keep the source event''s reference timekeeper, got ' || coalesce(rc ->> 'reference_timekeeper_id', '<null>');
-    assert rc ->> 'time_source' = 'median', 'a copied "reference" race falls back to the median, got ' || (rc ->> 'time_source');
+      'the copy must not keep the source event''s priority timekeeper, got ' || coalesce(rc ->> 'reference_timekeeper_id', '<null>');
+    assert rc ->> 'time_source' = case rr ->> 'name' when 'B Média' then 'mean' else 'median' end,
+      'the copy keeps the system method, got ' || (rc ->> 'time_source') || ' for ' || (rr ->> 'name');
     -- the copied race saves again exactly as the race editor sends it (full config).
     perform public.admin_save_race(jsonb_build_object('id', rr ->> 'id', 'event_id', dup, 'name', rr ->> 'name',
       'team_size', (rr ->> 'team_size')::int, 'legs', rr -> 'legs', 'config', rc));
   end loop;
 end $$;
--- the reference timekeeper is validated only when the time source actually uses it.
-do $$ declare r jsonb; begin
-  r := public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_dup'), 'name', 'C Mediana',
-    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
-    'config', jsonb_build_object('time_source', 'median', 'reference_timekeeper_id', tests.get('tk_ref'))));
-  assert r -> 'race' -> 'config' ->> 'time_source' = 'median';
-end $$;
-select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_dup'), 'name', 'D Referência',
+-- 0009: the priority timekeeper applies with either method, so it is always validated: it must be a
+-- timekeeper of the race's event. The legacy "reference" source is gone.
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_dup'), 'name', 'C Mediana',
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'config', jsonb_build_object('time_source', 'median', 'reference_timekeeper_id', tests.get('tk_ref'))))$$,
+  'P0001', 'Cronometrista prioritário inválido');
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_ref'), 'name', 'D Referência',
   'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
   'config', jsonb_build_object('time_source', 'reference', 'reference_timekeeper_id', tests.get('tk_ref'))))$$,
-  'P0001', 'Cronometrista de referência inválido');
+  'P0001', 'Fonte de tempo inválida');
+do $$ declare r jsonb; begin
+  r := public.admin_save_race(jsonb_build_object('event_id', tests.get('ev_ref'), 'name', 'E Média sem prioritário',
+    'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+    'config', jsonb_build_object('time_source', 'mean', 'reference_timekeeper_id', null)));
+  assert r -> 'race' -> 'config' ->> 'time_source' = 'mean' and (r -> 'race' -> 'config' -> 'reference_timekeeper_id') = 'null'::jsonb;
+end $$;
 
 -- B1-I2: entry_members.legs are materialized when an entry is created, so a race's format cannot
 -- silently drift away from them. Individual race: a leg-count change rewrites every entry's lone

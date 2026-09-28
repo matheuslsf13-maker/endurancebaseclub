@@ -52,11 +52,11 @@ function timekeeperName(id: string | null, tkById: Map<string, TimekeeperRow>): 
 
 /**
  * pt-BR description of what decided a crossing's official time (spec §8, "Fonte" column of the
- * Tempos sheet, §11): the system median, the configured reference timekeeper, a specific mark the
+ * Tempos sheet, §11): the system median or mean, the priority timekeeper, a specific mark the
  * organizer chose (by timekeeper name, or "Organização" for an organization mark), a manually
  * typed time, or '' when there is no official time at all.
  *
- * Pass the race's `config` so the reference timekeeper is named from `reference_timekeeper_id`
+ * Pass the race's `config` so the priority timekeeper is named from `reference_timekeeper_id`
  * (T15); without it the candidate with the official time stands in, which names the wrong person
  * when another timekeeper marked the very same instant.
  */
@@ -71,7 +71,7 @@ export function crossingSourceLabel(
   }
   if (c.official_source === 'reference') {
     const referenceId = config?.reference_timekeeper_id ?? c.candidates.find(x => x.ts_ms === c.official_ms)?.timekeeper_id ?? null;
-    return `Cronometrista de referência (${timekeeperName(referenceId, tkById) ?? 'Cronometrista'})`;
+    return `Prioritário (${timekeeperName(referenceId, tkById) ?? 'Cronometrista'})`;
   }
-  return 'Sistema (mediana)'; // official_source === 'median'
+  return c.official_source === 'mean' ? 'Sistema (média)' : 'Sistema (mediana)';
 }

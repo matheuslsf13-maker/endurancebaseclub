@@ -189,6 +189,30 @@ describe('editing an existing race', () => {
   });
 });
 
+describe('0009: time source = system method (median/mean) + optional priority timekeeper', () => {
+  it('both are chosen independently and saved together', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r1', event_id: 'ev1', name: 'Aquathlon', team_size: 1 });
+    renderTab(makeAgg({ races: [race], waves: [makeWave({ id: 'w1', race_id: 'r1' })] }));
+    await user.click(screen.getByTestId('race-edit-r1'));
+
+    expect(screen.getByTestId('race-time-source-median')).toBeChecked();
+    const priority = screen.getByTestId('race-reference-timekeeper');
+    expect(priority).toBeEnabled(); // no longer tied to a "reference" source
+    expect(priority).toHaveValue('');
+    expect(screen.getByText(/Onde o prioritário marcou, vale a marcação dele/)).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('race-time-source-mean'));
+    await user.selectOptions(priority, 'tk1');
+    saveRace.mockResolvedValue({ race, waves: [] });
+    await user.click(screen.getByTestId('race-save'));
+
+    const payload = saveRace.mock.calls[0][0];
+    expect(payload.config.time_source).toBe('mean');
+    expect(payload.config.reference_timekeeper_id).toBe('tk1');
+  });
+});
+
 describe('C-I3 / round 2 item N2: a wave that has started or has entries cannot be removed from the form', () => {
   it('disables "Remover" and explains why for a wave that already started', async () => {
     const user = userEvent.setup();

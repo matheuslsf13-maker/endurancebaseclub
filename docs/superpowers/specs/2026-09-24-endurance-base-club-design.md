@@ -151,8 +151,8 @@ results(race_id → races cascade, entry_id → entries cascade, event_id → ev
   "cumulative": false,               // premiação cumulativa
   "same_crossing_window_s": 30,      // janela para considerar "a mesma passagem"
   "divergence_threshold_s": 3,       // acima disso => pendência de divergência
-  "time_source": "median",           // "median" | "reference"
-  "reference_timekeeper_id": null
+  "time_source": "median",           // "median" | "mean" (0009: método do tempo do sistema)
+  "reference_timekeeper_id": null    // cronometrista prioritário (opcional; vale com qualquer método)
 }
 ```
 
@@ -247,7 +247,7 @@ Para cada inscrição e perna k (`crossing`):
 1. `M` = marcações não descartadas com `entry_id` = inscrição e `leg_index = k`.
 2. Por cronometrista, a **mais antiga** é candidata; as demais viram pendência "duplicada" (fora do cálculo). Marcações da organização (sem cronometrista) contam cada uma como candidata.
 3. `median` = mediana dos instantes candidatos (par → média dos dois centrais, arredondada ao ms); `spread = max − min`.
-4. **Tempo do sistema** = `time_source == 'reference'` e o cronometrista de referência tem candidata ? a dele : a mediana.
+4. **Tempo do sistema** (migration 0009) = se há cronometrista prioritário (`reference_timekeeper_id`) e ele tem candidata, a dele; senão, a **mediana** (`time_source = 'median'`) ou a **média** das candidatas (`'mean'`, arredondada ao ms). A divergência continua medida contra a mediana. A escolha fica na configuração da prova e também no topo da aba Revisão ("Fonte do tempo"), bloqueada em prova finalizada.
 5. **Tempo oficial** = resolução `mark` → instante da marcação escolhida (se descartada: volta ao sistema + pendência); `manual` → `manual_ts`; `system` ou sem resolução → tempo do sistema. Sem candidatas e sem manual → sem passagem.
 6. `divergent = candidatas ≥ 2 e spread > divergence_threshold_s` (pendência só se não houver resolução).
 
@@ -282,7 +282,7 @@ Status: `dns/dnf/dsq` se definido pela master; senão `not_started` (sem largada
 Gerada no navegador (escritor XLSX próprio sobre `fflate`: workbook, estilos mínimos, inline strings, números, fórmulas com valor em cache, formatos de hora/duração, largura de colunas, linha de cabeçalho congelada). Nome: `EBC_<slug-do-evento>_<AAAA-MM-DD>.xlsx`. Abas:
 1. **Resumo** — evento, data, local, gerada em (Brasília); por prova: inscritos, concluintes, em prova, DNF/DNS/DSQ, pendências, finalizada?
 2. **Inscritos** — Nº, Prova, Onda, Equipe, Atleta(s) com perna(s), Sexo, Idade, Faixa, Nível, Status, Penalidade.
-3. **Tempos – <Prova>** (uma por prova) — Nº, Atleta/Equipe, Largada (hora), para cada perna: Passagem (hora), Tempo da perna (**fórmula** = passagem − anterior), Fonte (Sistema/mediana, Cronometrista X, Manual); Total (fórmula), Penalidade, Final (fórmula), Divergência máx. (s), Status.
+3. **Tempos – <Prova>** (uma por prova) — Nº, Atleta/Equipe, Largada (hora), para cada perna: Passagem (hora), Tempo da perna (**fórmula** = passagem − anterior), Fonte (Sistema (mediana), Sistema (média), Prioritário (X), Marcação de X, Manual); Total (fórmula), Penalidade, Final (fórmula), Divergência máx. (s), Status.
 4. **Classificação – <Prova>** — Pos, Nº, Atleta/Equipe, Sexo, Faixa, Nível, Pos. sexo, Tempo final, Dif. p/ 1º, Status.
 5. **Pódios** — prova → ranking → grupo → 1º/2º/3º… com nome e tempo.
 6. **Marcações** — hora (hh:mm:ss.000 Brasília), cronometrista, Nº, atleta/equipe, prova, perna, situação (usada/descartada/duplicada/sem atleta), Δ para o oficial (s), id.
