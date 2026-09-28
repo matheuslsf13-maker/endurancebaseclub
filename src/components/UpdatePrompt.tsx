@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useToast } from './ui';
 
 const EVENT = 'ebc:sw-need-refresh';
@@ -63,19 +63,37 @@ export function buildRegisterSWCallbacks(getUpdate: () => () => void): RegisterS
  */
 export function UpdatePrompt() {
   const toast = useToast();
+  // Which toast (if any) this component currently has open — needed to dismiss it below.
+  const toastIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     function onNeedRefresh(event: Event) {
       const { update } = (event as CustomEvent<NeedRefreshDetail>).detail;
-      toast.show({
+      toastIdRef.current = toast.show({
         message: 'Nova versão disponível',
         durationMs: 0,
         actions: [{ label: 'Atualizar', onClick: update, testid: 'sw-update' }],
         testid: 'sw-update-toast',
       });
     }
+    // Round 2 N3: this toast is mounted once at the app root (outside the router), so it is not
+    // remounted or reconsidered on an in-app navigation — including "Voltar à cronometragem"
+    // (C-Minor-7) carrying it from `#/` straight into `#/c/:token`, where it would sit over the
+    // "Em prova" rows and can swallow a tap meant for one of them (Ruling 26's hazard class: the
+    // timekeeper route must never be interrupted by an update notice). Dismissed the moment the
+    // hash enters that route, whether or not it was ever actionable there in the first place.
+    function onHashChange() {
+      if (toastIdRef.current && !shouldPromptForUpdate(location.hash)) {
+        toast.dismiss(toastIdRef.current);
+        toastIdRef.current = null;
+      }
+    }
     window.addEventListener(EVENT, onNeedRefresh);
-    return () => window.removeEventListener(EVENT, onNeedRefresh);
+    window.addEventListener('hashchange', onHashChange);
+    return () => {
+      window.removeEventListener(EVENT, onNeedRefresh);
+      window.removeEventListener('hashchange', onHashChange);
+    };
   }, [toast]);
 
   return null;
