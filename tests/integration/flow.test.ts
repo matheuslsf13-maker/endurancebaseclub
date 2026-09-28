@@ -343,6 +343,15 @@ describe('full RPC flow through supabase-js', () => {
     expect(anaRow.wins).toBe(1);
   });
 
+  it('9b. pub_stats (anon) carries the public athletes and the finalized result, never private fields', async () => {
+    const { data, error } = await anon().rpc('pub_stats');
+    expect(error).toBeNull();
+    const ids = data.athletes.map((a: { id: string }) => a.id);
+    expect(ids).toEqual(expect.arrayContaining([anaId, betoId]));
+    for (const a of data.athletes) expect(Object.keys(a).sort()).toEqual(['city', 'id', 'name', 'sex', 'team_club']);
+    expect(data.results.map((r: { entry_id: string }) => r.entry_id)).toContain(teamEntryId);
+  });
+
   it('10. anon cannot execute admin_* RPCs', async () => {
     const { error, status } = await anon().rpc('admin_list_events');
     expect(error).not.toBeNull();
