@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../../test/renderWithProviders';
 import { Modal } from '../../components/ui';
 import type { AthleteRow, ImportResult, ResultRow, ResultSnapshot } from '../../lib/types';
+import { makeResult } from '../../domain/testing/results';
 
 const mocks = vi.hoisted(() => ({
   listAthletes: vi.fn(),
@@ -460,5 +461,19 @@ describe('AthleteProfilePage', () => {
     await user.click(screen.getByTestId('confirm-ok'));
 
     expect(await screen.findByText('Atleta possui inscrições')).toBeInTheDocument();
+  });
+
+  it('has the same year filter as the public profile (spec §3.6)', async () => {
+    athleteProfile.mockResolvedValue({
+      athlete: makeAthlete({ id: 'a1', name: 'Ana Souza' }),
+      results: [
+        makeResult({ race_id: 'r1', entry_id: 'e1', date: '2025-10-05', members: [{ athlete_id: 'a1', name: 'Ana Souza' }], final_ms: 1_500_000, overall_pos: 1 }),
+        makeResult({ race_id: 'r2', entry_id: 'e2', date: '2026-03-10', members: [{ athlete_id: 'a1', name: 'Ana Souza' }], final_ms: 1_450_000, overall_pos: 2 }),
+      ],
+    });
+    renderWithProviders(<AthleteProfilePage />, { route: '/atletas/a1?ano=2025', path: '/atletas/:athleteId' });
+    await screen.findByRole('heading', { name: 'Ana Souza' });
+    expect(screen.getByTestId('year-filter')).toHaveValue('2025');
+    expect(screen.getByText('Participações').nextElementSibling).toHaveTextContent('1');
   });
 });

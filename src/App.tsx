@@ -36,6 +36,7 @@ const TimekeeperPage = lazy(() => import('./features/timekeeper/TimekeeperPage')
 const PublicHome = lazy(() => import('./features/public/PublicHome'));
 const PublicEventPage = lazy(() => import('./features/public/PublicEventPage'));
 const PublicAthletePage = lazy(() => import('./features/public/PublicAthletePage'));
+const PublicAthletesPage = lazy(() => import('./features/public/PublicAthletesPage'));
 const NotFound = lazy(() => import('./features/NotFound'));
 
 function PageFallback() {
@@ -256,6 +257,15 @@ export const routes: RouteObject[] = [
     element: (
       <Lazy>
         <PublicEventPage />
+      </Lazy>
+    ),
+    errorElement: <RouteErrorBoundary />,
+  },
+  {
+    path: '/perfis',
+    element: (
+      <Lazy>
+        <PublicAthletesPage />
       </Lazy>
     ),
     errorElement: <RouteErrorBoundary />,

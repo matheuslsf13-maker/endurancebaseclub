@@ -10,7 +10,8 @@ import { formatDateBR } from '../../lib/format';
 import { Badge, Button, Card, EmptyState, Select, Spinner } from '../../components/ui';
 import { ClassificationTable } from '../results/ClassificationTable';
 import { PodiumView } from '../results/PodiumView';
-import { EVENT_STATUS_LABEL, PublicShell } from './PublicHome';
+import { EVENT_STATUS_LABEL } from './PublicHome';
+import { PublicShell } from './PublicShell';
 import type { PubEventPayload } from '../../lib/types';
 
 /** Cadence for `pub_live` while the tab is visible (spec §12, Global Constraints "público 10 s");

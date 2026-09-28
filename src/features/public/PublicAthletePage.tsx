@@ -1,82 +1,106 @@
-import { useEffect } from 'react';
-import { Link, useParams } from 'react-router';
-import { useQuery } from '@tanstack/react-query';
-import { api } from '../../lib/api';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router';
+import { Button, Card } from '../../components/ui';
+import { YearSelect } from '../../components/YearSelect';
 import { sexLabel } from '../../domain/categories';
-import { Card, Spinner } from '../../components/ui';
+import { filterResultsByYear, resultYears } from '../../domain/stats';
+import { useYearParam } from '../../lib/useYearParam';
 import { StatsView } from '../athletes/StatsView';
-import { PublicShell } from './PublicHome';
+import { AthletePicker } from './AthletePicker';
+import { PublicShell } from './PublicShell';
+import { PublicStatsFallback } from './PublicStatsFallback';
+import { usePublicStats } from './usePublicStats';
 
 /**
- * Public athlete profile (spec §6/§12): `pub_athlete` only returns an athlete when
- * `public_profile` is true, and only `{id,name,sex,city,team_club}` — no birth date, no
- * `public_profile` flag itself (Controller note), so this page never reads either. `StatsView` is
- * reused as-is in `publicMode` (Task 20): it only needs the athlete's id and the results.
+ * Public athlete profile (spec §6/§12; 2026-09-28 §3.3). Built on the pub_stats bundle, so it only
+ * ever sees `{id,name,sex,city,team_club}` of public athletes (pub_athlete stays in the database
+ * for older app builds, Ruling 26). Year filter in `?ano`, team partners with a public profile link
+ * to "Nós dois", and "Comparar com…" picks anyone else.
  */
 export default function PublicAthletePage() {
   const { athleteId } = useParams<{ athleteId: string }>();
-  const query = useQuery({
-    queryKey: ['pub-athlete', athleteId],
-    queryFn: () => api.pub.athlete(athleteId as string),
-    enabled: athleteId !== undefined,
-  });
+  const navigate = useNavigate();
+  const query = usePublicStats();
+  const [picking, setPicking] = useState(false);
+  const athlete = query.data?.athletes.find((a) => a.id === athleteId);
+  const mine = useMemo(
+    () => (athlete && query.data ? query.data.results.filter((r) => r.athlete_ids.includes(athlete.id)) : []),
+    [athlete, query.data],
+  );
+  const years = useMemo(() => resultYears(mine), [mine]);
+  const [year, setYear] = useYearParam(years);
+  const shown = useMemo(() => filterResultsByYear(mine, year), [mine, year]);
+  const publicIds = useMemo(() => new Set((query.data?.athletes ?? []).map((a) => a.id)), [query.data]);
 
   useEffect(() => {
-    document.title = query.data ? `${query.data.athlete.name} – EnduranceBaseClub` : 'EnduranceBaseClub';
-  }, [query.data]);
-
-  // C-Minor-15: reset on unmount only — otherwise an admin tab reached by following a public
-  // profile link keeps the athlete's name in the title forever.
+    document.title = athlete ? `${athlete.name} – EnduranceBaseClub` : 'EnduranceBaseClub';
+  }, [athlete]);
+  // C-Minor-15: reset on unmount only.
   useEffect(() => () => { document.title = 'EnduranceBaseClub'; }, []);
 
-  if (query.isLoading) {
+  if (!query.data) {
     return (
       <PublicShell>
-        <div data-testid="public-athlete" className="flex justify-center px-4 py-16">
-          <Spinner size={32} />
-        </div>
+        <PublicStatsFallback query={query} testId="public-athlete" />
       </PublicShell>
     );
   }
 
-  if (query.error || !query.data) {
+  if (!athlete) {
     return (
       <PublicShell>
         <div data-testid="public-athlete" className="mx-auto w-full max-w-md px-4 py-12">
           <Card className="flex flex-col gap-4">
-            <p role="alert" className="text-sm text-danger-text">
-              {query.error instanceof Error ? query.error.message : 'Atleta não encontrado ou perfil privado'}
-            </p>
-            <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
-              Voltar aos eventos públicos
-            </Link>
+            <p role="alert" className="text-sm text-danger-text">Atleta não encontrado ou perfil privado</p>
+            <Link to="/perfis" className="text-sm text-muted underline underline-offset-2 hover:text-fg">Ver todos os atletas</Link>
           </Card>
         </div>
       </PublicShell>
     );
   }
 
-  const { athlete, results } = query.data;
+  const search = year ? `?ano=${year}` : '';
+  const compareHref = (otherId: string) => `/comparar/${athlete.id}/${otherId}${search}`;
 
   return (
     <PublicShell>
       <div data-testid="public-athlete" className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
-        <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
-          ← Eventos públicos
-        </Link>
+        <Link to="/perfis" className="text-sm text-muted underline underline-offset-2 hover:text-fg">← Atletas</Link>
 
-        <Card className="mt-4 flex flex-col gap-1">
-          <h1 className="brand-title text-xl font-semibold">{athlete.name}</h1>
-          <p className="text-sm text-muted">
-            {sexLabel(athlete.sex)}
-            {athlete.city ? ` · ${athlete.city}` : ''}
-            {athlete.team_club ? ` · ${athlete.team_club}` : ''}
-          </p>
+        <Card className="mt-4 flex flex-wrap items-start justify-between gap-3">
+          <div className="flex flex-col gap-1">
+            <h1 className="brand-title text-xl font-semibold">{athlete.name}</h1>
+            <p className="text-sm text-muted">
+              {sexLabel(athlete.sex)}
+              {athlete.city ? ` · ${athlete.city}` : ''}
+              {athlete.team_club ? ` · ${athlete.team_club}` : ''}
+            </p>
+          </div>
+          <Button variant="secondary" data-testid="compare-with" onClick={() => setPicking(true)}>
+            Comparar com…
+          </Button>
         </Card>
 
-        <div className="mt-6">
-          <StatsView athlete={athlete} results={results} publicMode />
+        <div className="mt-4">
+          <YearSelect years={years} value={year} onChange={setYear} />
         </div>
+
+        <div className="mt-6">
+          <StatsView
+            athlete={athlete}
+            results={shown}
+            publicMode
+            partnerLink={(id) => (publicIds.has(id) ? compareHref(id) : null)}
+          />
+        </div>
+
+        <AthletePicker
+          open={picking}
+          athletes={query.data.athletes}
+          excludeId={athlete.id}
+          onClose={() => setPicking(false)}
+          onPick={(id) => navigate(compareHref(id))}
+        />
       </div>
     </PublicShell>
   );

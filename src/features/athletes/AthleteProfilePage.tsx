@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api';
@@ -6,6 +6,9 @@ import { sexLabel } from '../../domain/categories';
 import { Badge, Button, Card, Modal, Spinner, useConfirm, useToast } from '../../components/ui';
 import { AthleteForm } from './AthleteForm';
 import { StatsView } from './StatsView';
+import { YearSelect } from '../../components/YearSelect';
+import { useYearParam } from '../../lib/useYearParam';
+import { filterResultsByYear, resultYears } from '../../domain/stats';
 import { ageToday } from './athleteHelpers';
 
 export default function AthleteProfilePage() {
@@ -21,6 +24,8 @@ export default function AthleteProfilePage() {
     queryFn: () => api.admin.athleteProfile(athleteId as string),
     enabled: athleteId !== undefined,
   });
+  const years = useMemo(() => resultYears(query.data?.results ?? []), [query.data]);
+  const [year, setYear] = useYearParam(years);
 
   async function handleDelete() {
     if (!query.data) return;
@@ -113,8 +118,9 @@ export default function AthleteProfilePage() {
         </div>
       </Card>
 
-      <div className="mt-6">
-        <StatsView athlete={athlete} results={results} />
+      <div className="mt-6 flex flex-col gap-4">
+        <YearSelect years={years} value={year} onChange={setYear} />
+        <StatsView athlete={athlete} results={filterResultsByYear(results, year)} />
       </div>
 
       <Modal open={editing} onClose={() => setEditing(false)} title="Editar atleta" size="lg" closeOnBackdrop={false}>
