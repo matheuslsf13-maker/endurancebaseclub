@@ -60,10 +60,13 @@ describe('PublicRankingPage (#/ranking)', () => {
     expect(lines('Vitórias gerais')).toEqual(['1º Ana Souza 2', '2º Bia Lima 1']);
   });
 
-  it('?ano=2025 shows only that year', async () => {
+  it('?ano=2025 shows only that year, and its profile links keep the year', async () => {
     renderRanking('/ranking?ano=2025');
     await screen.findByRole('heading', { name: 'Vitórias gerais' });
     expect(lines('Vitórias gerais')).toEqual(['1º Bia Lima 1']);
+    expect(within(board('Vitórias gerais')).getByRole('link', { name: 'Bia Lima' })).toHaveAttribute('href', '/atleta/bi?ano=2025');
+    const run = screen.getByRole('heading', { name: 'Corrida 5 km' }).closest('section')!;
+    expect(within(run).getByRole('link', { name: 'Bia Lima' })).toHaveAttribute('href', '/atleta/bi?ano=2025');
   });
 
   it('lists the club records per modality and distance with the 3 best athletes', async () => {
@@ -97,7 +100,8 @@ describe('PublicRankingPage (#/ranking)', () => {
       makeResult({ race_id: race, entry_id: `${race}-${a.id}`, date: '2026-09-01', members: [m(a)], final_ms: t, overall_pos: 1, legs: [{ athlete_id: a.id, distance_m: d, time_ms: t }] });
     mocks.stats.mockResolvedValue({ athletes: [ana, bia], results: [long(ana, 'h1', 21_097, 5_400_000), long(bia, 'h2', 21_100, 5_500_000)] });
     renderRanking();
-    expect(await screen.findAllByRole('heading', { name: 'Corrida 21,1 km' })).toHaveLength(2);
+    expect(await screen.findByRole('heading', { name: 'Corrida 21,097 km' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Corrida 21,1 km' })).toBeInTheDocument();
     expect(errors.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
     errors.mockRestore();
   });

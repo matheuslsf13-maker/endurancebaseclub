@@ -148,6 +148,10 @@ describe('PublicAthletePage (#/atleta/:id)', () => {
     await user.click(screen.getByTestId('compare-with'));
     const picker = screen.getByTestId('compare-picker');
     expect(within(picker).queryByRole('button', { name: /Ana Souza/ })).not.toBeInTheDocument();
+    // keyboard focus is visible on the rows, like every other control
+    for (const row of within(picker).getAllByRole('button').filter((b) => b.textContent !== '×')) {
+      expect(row).toHaveClass('focus-visible:outline-2');
+    }
     await user.type(within(picker).getByLabelText('Buscar atleta'), 'bia');
     await user.click(within(picker).getByRole('button', { name: /Bia Lima/ }));
     expect(router.state.location.pathname).toBe('/comparar/an/bi');

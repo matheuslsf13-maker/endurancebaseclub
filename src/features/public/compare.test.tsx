@@ -119,7 +119,8 @@ describe('PublicComparePage (#/comparar/:a/:b)', () => {
     mocks.stats.mockResolvedValue({ athletes: [ana, beto, caio], results: [long(A, 'h1', 21_097, 5_400_000), long(B, 'h2', 21_100, 5_500_000)] });
     renderCompare('/comparar/an/be');
     await screen.findByTestId('compare-side-by-side');
-    expect(screen.getAllByRole('rowheader', { name: 'Recorde · Corrida 21,1 km' })).toHaveLength(2);
+    expect(screen.getByRole('rowheader', { name: 'Recorde · Corrida 21,097 km' })).toBeInTheDocument();
+    expect(screen.getByRole('rowheader', { name: 'Recorde · Corrida 21,1 km' })).toBeInTheDocument();
     expect(errors.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
     errors.mockRestore();
   });

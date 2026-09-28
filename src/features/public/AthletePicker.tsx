@@ -27,7 +27,7 @@ export function AthletePicker({ open, athletes, excludeId, onPick, onClose }: At
               <li key={a.id}>
                 <button
                   type="button"
-                  className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm hover:bg-surface-2"
+                  className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   onClick={() => onPick(a.id)}
                 >
                   {a.name}

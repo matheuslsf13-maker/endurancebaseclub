@@ -95,11 +95,12 @@ export function parseDateInput(text: string): string | null {
   return `${y}-${pad(m)}-${pad(d)}`;
 }
 
-/** A leg distance for display: "750 m", "5 km", "21,1 km" (pt-BR decimals, at most 2). */
+/** A leg distance for display: "750 m", "5 km", "21,097 km" (pt-BR decimals, down to the meter, so
+ * two different distances never read the same). */
 export function formatDistance(m: number): string {
   if (m >= 1000) {
     const km = m / 1000;
-    const value = Number.isInteger(km) ? String(km) : km.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+    const value = Number.isInteger(km) ? String(km) : km.toLocaleString('pt-BR', { maximumFractionDigits: 3 });
     return `${value} km`;
   }
   return `${m} m`;
