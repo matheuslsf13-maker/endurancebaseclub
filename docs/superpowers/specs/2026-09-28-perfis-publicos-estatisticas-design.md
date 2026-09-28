@@ -103,7 +103,7 @@ Estes somam-se aos da spec principal:
 
 ### 4.1 Função `pub_stats()`
 
-A função entra na migration `supabase/migrations/0009_pub_stats.sql` e é aplicada em produção como `ebc_0009_pub_stats`. Ela é `language plpgsql stable security definer set search_path = public, extensions, pg_temp` e não recebe parâmetros. Retorna:
+A função entra na migration `supabase/migrations/0010_pub_stats.sql` e é aplicada em produção como `ebc_0010_pub_stats`. Ela é `language plpgsql stable security definer set search_path = public, extensions, pg_temp` e não recebe parâmetros. Retorna:
 
 ```json
 {
@@ -186,7 +186,7 @@ Todas as regras são funções puras em TypeScript, em `src/domain/`, sobre `Res
 
 | Unidade | O que faz | Depende de |
 |---|---|---|
-| `supabase/migrations/0009_pub_stats.sql` | função `pub_stats()` e bloco de permissões | tabelas `athletes`, `events`, `results` |
+| `supabase/migrations/0010_pub_stats.sql` | função `pub_stats()` e bloco de permissões | tabelas `athletes`, `events`, `results` |
 | `supabase/tests/70_pub_stats.sql` | regra de privacidade e exclusões | `00_helpers.sql` |
 | `supabase/tests/60_security.sql` | inclui `pub_stats` na lista de funções de `anon` | — |
 | `src/lib/text.ts` | `foldAccents` | — |
@@ -244,9 +244,9 @@ Todas as regras são funções puras em TypeScript, em `src/domain/`, sobre `Res
 ## 8. Entrega
 
 - **Código:** na branch `feat/public-stats`, criada a partir da `main`, com PR para a `main`. O merge publica em produção (Vercel).
-- **Banco:** antes do merge, aplicar `ebc_0009_pub_stats` em produção e rodar em produção o `70_pub_stats.sql` e o `60_security.sql`, cada um numa transação desfeita, como em DEPLOY.md.
+- **Banco:** antes do merge, aplicar `ebc_0010_pub_stats` em produção e rodar em produção o `70_pub_stats.sql` e o `60_security.sql`, cada um numa transação desfeita, como em DEPLOY.md.
   - A função nova só é chamada pela versão nova do app, então aplicá-la antes do merge não afeta quem usa a versão atual.
-- **Documentação:** o `DEPLOY.md` passa a listar as migrations até a `0009`, e o `README.md` inclui as páginas novas.
+- **Documentação:** o `DEPLOY.md` passa a listar as migrations até a `0010`, e o `README.md` inclui as páginas novas.
 
 ## 9. Decisões registradas
 
