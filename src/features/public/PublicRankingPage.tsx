@@ -95,7 +95,7 @@ export default function PublicRankingPage() {
                 <p className="text-sm text-muted">Sem recordes neste período</p>
               ) : (
                 records.map((g) => (
-                  <section key={g.title} className="rounded-xl border border-border p-4">
+                  <section key={`${g.modality}|${g.distance_m}`} className="rounded-xl border border-border p-4">
                     <h3 className="brand-title mb-2 text-sm font-semibold">{g.title}</h3>
                     <Table>
                       <thead>

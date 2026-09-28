@@ -111,4 +111,16 @@ describe('PublicComparePage (#/comparar/:a/:b)', () => {
     unmount();
     expect(document.title).toBe('EnduranceBaseClub');
   });
+
+  it('two record distances that read the same do not clash (row keys by modality and distance)', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const long = (who: { athlete_id: string; name: string }, race: string, d: number, t: number) =>
+      makeResult({ race_id: race, entry_id: `${race}-${who.athlete_id}`, date: '2026-09-01', members: [who], final_ms: t, overall_pos: 1, legs: [{ athlete_id: who.athlete_id, distance_m: d, time_ms: t }] });
+    mocks.stats.mockResolvedValue({ athletes: [ana, beto, caio], results: [long(A, 'h1', 21_097, 5_400_000), long(B, 'h2', 21_100, 5_500_000)] });
+    renderCompare('/comparar/an/be');
+    await screen.findByTestId('compare-side-by-side');
+    expect(screen.getAllByRole('rowheader', { name: 'Recorde · Corrida 21,1 km' })).toHaveLength(2);
+    expect(errors.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
+    errors.mockRestore();
+  });
 });

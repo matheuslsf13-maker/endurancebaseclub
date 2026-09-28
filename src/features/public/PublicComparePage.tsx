@@ -21,20 +21,20 @@ const PACE_ORDER: Modality[] = ['run', 'swim', 'bike']; // Ruling 20: no pace fo
 
 /** Side-by-side rows (spec 2026-09-28 §3.4): the profile tiles, then pace per modality and personal
  * records per (modality, distance) that at least one of the two has ("—" on the other side). */
-function sideBySideRows(sa: AthleteStats, sb: AthleteStats): { label: string; a: string; b: string }[] {
+function sideBySideRows(sa: AthleteStats, sb: AthleteStats): { key: string; label: string; a: string; b: string }[] {
   const rows = [
-    { label: 'Participações', a: String(sa.participations), b: String(sb.participations) },
-    { label: 'Conclusões', a: String(sa.finishes), b: String(sb.finishes) },
-    { label: 'Vitórias gerais', a: String(sa.wins_overall), b: String(sb.wins_overall) },
-    { label: 'Vitórias na categoria', a: String(sa.wins_category), b: String(sb.wins_category) },
-    { label: 'Pódios', a: String(sa.podiums), b: String(sb.podiums) },
-    { label: 'Melhor colocação', a: ordinal(sa.best_overall_pos), b: ordinal(sb.best_overall_pos) },
-    { label: 'Top X% médio', a: percent(sa.avg_percentile), b: percent(sb.avg_percentile) },
+    { key: 'Participações', label: 'Participações', a: String(sa.participations), b: String(sb.participations) },
+    { key: 'Conclusões', label: 'Conclusões', a: String(sa.finishes), b: String(sb.finishes) },
+    { key: 'Vitórias gerais', label: 'Vitórias gerais', a: String(sa.wins_overall), b: String(sb.wins_overall) },
+    { key: 'Vitórias na categoria', label: 'Vitórias na categoria', a: String(sa.wins_category), b: String(sb.wins_category) },
+    { key: 'Pódios', label: 'Pódios', a: String(sa.podiums), b: String(sb.podiums) },
+    { key: 'Melhor colocação', label: 'Melhor colocação', a: ordinal(sa.best_overall_pos), b: ordinal(sb.best_overall_pos) },
+    { key: 'Top X% médio', label: 'Top X% médio', a: percent(sa.avg_percentile), b: percent(sb.avg_percentile) },
   ];
   for (const m of PACE_ORDER) {
     const pa = sa.pace_by_modality.find((p) => p.modality === m);
     const pb = sb.pace_by_modality.find((p) => p.modality === m);
-    if (pa || pb) rows.push({ label: `Ritmo · ${MODALITY_LABEL[m]}`, a: pa?.pace || '—', b: pb?.pace || '—' });
+    if (pa || pb) rows.push({ key: `pace|${m}`, label: `Ritmo · ${MODALITY_LABEL[m]}`, a: pa?.pace || '—', b: pb?.pace || '—' });
   }
   const keys = new Map<string, { modality: Modality; distance_m: number }>();
   for (const r of [...sa.records, ...sb.records]) keys.set(`${r.modality}|${r.distance_m}`, { modality: r.modality, distance_m: r.distance_m });
@@ -43,6 +43,7 @@ function sideBySideRows(sa: AthleteStats, sb: AthleteStats): { label: string; a:
     const ra = sa.records.find((r) => r.modality === k.modality && r.distance_m === k.distance_m);
     const rb = sb.records.find((r) => r.modality === k.modality && r.distance_m === k.distance_m);
     rows.push({
+      key: `record|${k.modality}|${k.distance_m}`,
       label: `Recorde · ${MODALITY_LABEL[k.modality]} ${formatDistance(k.distance_m)}`,
       a: ra ? formatDuration(ra.time_ms) : '—',
       b: rb ? formatDuration(rb.time_ms) : '—',
@@ -230,7 +231,7 @@ export default function PublicComparePage() {
             </thead>
             <tbody>
               {sideBySideRows(view.sa, view.sb).map((r) => (
-                <tr key={r.label} className="border-t border-border">
+                <tr key={r.key} className="border-t border-border">
                   <th scope="row" className="px-3 py-2 text-left font-normal text-muted">{r.label}</th>
                   <td className="whitespace-nowrap px-3 py-2 tabular">{r.a}</td>
                   <td className="whitespace-nowrap px-3 py-2 tabular">{r.b}</td>

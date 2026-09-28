@@ -90,4 +90,15 @@ describe('PublicRankingPage (#/ranking)', () => {
     unmount();
     expect(document.title).toBe('EnduranceBaseClub');
   });
+
+  it('two distances that read the same (21 097 m and 21 100 m) stay separate groups without clashing keys', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const long = (a: PublicAthleteRow, race: string, d: number, t: number) =>
+      makeResult({ race_id: race, entry_id: `${race}-${a.id}`, date: '2026-09-01', members: [m(a)], final_ms: t, overall_pos: 1, legs: [{ athlete_id: a.id, distance_m: d, time_ms: t }] });
+    mocks.stats.mockResolvedValue({ athletes: [ana, bia], results: [long(ana, 'h1', 21_097, 5_400_000), long(bia, 'h2', 21_100, 5_500_000)] });
+    renderRanking();
+    expect(await screen.findAllByRole('heading', { name: 'Corrida 21,1 km' })).toHaveLength(2);
+    expect(errors.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
+    errors.mockRestore();
+  });
 });
