@@ -111,8 +111,14 @@ describe('creating a race from a preset', () => {
     await user.selectOptions(screen.getByTestId('race-preset'), 'Revezamento em dupla (natação + corrida)');
 
     expect(screen.getByTestId('race-team-size')).toHaveValue('2');
-    // Team default config has a single "Geral" podium (Nível checkbox present but disabled: no event levels).
-    expect(screen.getByRole('checkbox', { name: 'Nível' })).toBeDisabled();
+    // 0008 team defaults: "Geral" (no division, the overall podium) then "Geral por sexo"; the Nível
+    // checkboxes are present but disabled (no event levels).
+    expect(screen.getByTestId('ranking-name-0')).toHaveValue('Geral');
+    expect(screen.getByTestId('ranking-overall-0')).toHaveTextContent('Pódio geral: todos juntos, sem divisão');
+    expect(screen.getByTestId('ranking-name-1')).toHaveValue('Geral por sexo');
+    expect(screen.getByTestId('ranking-dim-sex-1')).toBeChecked();
+    expect(screen.queryByTestId('ranking-overall-1')).toBeNull();
+    for (const box of screen.getAllByRole('checkbox', { name: 'Nível' })) expect(box).toBeDisabled();
 
     // legs start as [swim, run]; move the second one (run) up so it becomes [run, swim].
     await user.click(screen.getByTestId('leg-move-up-1'));

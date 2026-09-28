@@ -383,5 +383,27 @@ select tests.as_user(tests.get('owner')::uuid);
 select tests.assert_raises($$select public.admin_delete_organizer(tests.get('owner')::uuid)$$, 'P0001');
 -- bonus: unknown event id
 select tests.assert_raises($$select public.admin_get_event(gen_random_uuid())$$, 'P0001');
+
+-- 0008: a podium with no division ("dims": []) is the overall podium (spec §9) and must save;
+-- a missing, non-array, unknown or repeated dimension is still refused.
+do $$ declare r jsonb; begin
+  r := public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'Corrida geral', 'team_size', 1,
+        'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+        'config', jsonb_build_object('rankings', '[{"id":"geral","name":"Geral","dims":[],"size":3}]'::jsonb)));
+  assert (r -> 'race' -> 'config' -> 'rankings') = '[{"id":"geral","name":"Geral","dims":[],"size":3}]'::jsonb,
+    'the overall podium must be stored as sent, got ' || (r -> 'race' -> 'config' ->> 'rankings');
+end $$;
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'team_size', 1,
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'config', jsonb_build_object('rankings', '[{"id":"g","name":"G","size":3}]'::jsonb)))$$, 'P0001', 'Dimensões de ranking inválidas');
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'team_size', 1,
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'config', jsonb_build_object('rankings', '[{"id":"g","name":"G","dims":"sex","size":3}]'::jsonb)))$$, 'P0001', 'Dimensões de ranking inválidas');
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'team_size', 1,
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'config', jsonb_build_object('rankings', '[{"id":"g","name":"G","dims":["cor"],"size":3}]'::jsonb)))$$, 'P0001', 'Dimensão de ranking inválida');
+select tests.assert_raises($$select public.admin_save_race(jsonb_build_object('event_id', tests.get('ev'), 'name', 'X', 'team_size', 1,
+  'legs', '[{"modality":"run","label":"Corrida","distance_m":5000}]'::jsonb,
+  'config', jsonb_build_object('rankings', '[{"id":"g","name":"G","dims":["sex","sex"],"size":3}]'::jsonb)))$$, 'P0001', 'Dimensões de ranking repetidas');
 reset role;
 rollback;

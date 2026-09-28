@@ -19,7 +19,11 @@ do $$ begin
   assert length(public.random_token(24)) = 24 and public.random_token(24) ~ '^[A-Za-z0-9]{24}$';
   assert public.slugify('Triathlon Águas Claras 2026!') = 'triathlon-aguas-claras-2026';
   assert public.server_time() between (extract(epoch from now()) * 1000)::bigint - 60000 and (extract(epoch from now()) * 1000)::bigint + 60000;
-  assert (public.default_race_config(1) -> 'rankings' -> 1 ->> 'id') = 'faixa';
+  -- 0008: new races come with the overall podium (no division), then by sex, then age group (solo).
+  assert (public.default_race_config(1) -> 'rankings') = '[{"id":"geral","name":"Geral","dims":[],"size":3},{"id":"geral-sexo","name":"Geral por sexo","dims":["sex"],"size":3},{"id":"faixa","name":"Faixa etária","dims":["sex","age"],"size":3}]'::jsonb,
+    'solo default rankings, got ' || (public.default_race_config(1) ->> 'rankings');
+  assert (public.default_race_config(2) -> 'rankings') = '[{"id":"geral","name":"Geral","dims":[],"size":3},{"id":"geral-sexo","name":"Geral por sexo","dims":["sex"],"size":3}]'::jsonb,
+    'team default rankings, got ' || (public.default_race_config(2) ->> 'rankings');
   assert jsonb_array_length(public.default_race_config(2) -> 'age_groups') = 0;
 end $$;
 -- events: token default, version bump through child tables, updated_at
