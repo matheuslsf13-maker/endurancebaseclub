@@ -25,7 +25,9 @@ Site para organizar e cronometrar eventos multiesporte do **EnduranceBaseClub**:
   - planilha de conferência em XLSX.
 - **Páginas públicas**:
   - resultados ao vivo e oficiais;
-  - perfis de atletas com histórico e estatísticas, para quem aceitou ter perfil público.
+  - lista e busca de atletas (`#/perfis`) e perfis com histórico e estatísticas, filtráveis por ano, para quem aceitou ter perfil público;
+  - "Nós dois" (`#/comparar/…`): dois atletas lado a lado, o desempenho juntos em dupla ou equipe e o confronto direto;
+  - rankings e recordes do clube (`#/ranking`), por ano e por sexo.
 
 ## Documentação
 

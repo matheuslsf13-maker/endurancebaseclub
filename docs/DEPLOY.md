@@ -34,7 +34,7 @@ O app fala com o banco **somente por funções** (RPC). As tabelas têm RLS liga
 
 ### Migrations
 
-Os arquivos ficam em `supabase/migrations/`. Em produção foram aplicados de `ebc_0001_schema` a `ebc_0007_fk_indexes` em 28/09/2026, `ebc_0008_podium_overall` (pódio geral sem divisão) e `ebc_0009_time_source_priority` (fonte do tempo: mediana ou média + cronometrista prioritário) em seguida. Para uma mudança nova:
+Os arquivos ficam em `supabase/migrations/`. Em produção foram aplicados de `ebc_0001_schema` a `ebc_0007_fk_indexes` em 28/09/2026, `ebc_0008_podium_overall` (pódio geral sem divisão) `ebc_0009_time_source_priority` (fonte do tempo: mediana ou média + cronometrista prioritário) e `ebc_0010_pub_stats` (perfis públicos e estatísticas do clube) em seguida. Para uma mudança nova:
 
 1. Crie `supabase/migrations/<próximo número>_<nome>.sql`. Se ela criar funções novas, repita no fim o bloco de permissões da `0006`.
 2. Rode localmente, no WSL: `bash scripts/test-sql.sh` e `npm run test:integration`.

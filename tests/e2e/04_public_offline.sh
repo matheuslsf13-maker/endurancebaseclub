@@ -50,6 +50,28 @@ assert '1990' not in text, "Ana's birth year is visible on the public athlete pa
 assert '15/06' not in text, "Ana's birth date is visible on the public athlete page"
 PY
 
+step "athletes directory → search → profile → partner → Nós dois"
+ab pub open "$APP/#/perfis" >/dev/null
+wait_tid pub public-athletes
+set_value pub "$(tid athlete-search)" "ana"
+wait_text pub "$(tid public-athletes)" "Ana"
+click_with_text pub "$(tid athlete-row)" "Ana"
+wait_tid pub public-athlete
+wait_text pub "$(tid public-athlete)" "Participações"
+click_with_text pub "$(tid public-athlete) a[href*=\"#/comparar/\"]" "Beto"
+wait_tid pub public-compare
+wait_text pub "$(tid compare-together)" "Tubarões"
+expect_text pub "$(tid compare-side-by-side)" "Participações"
+COMPARE_URL=$(ab pub get url)
+snap pub 04-public-compare
+
+step "club rankings"
+ab pub open "$APP/#/ranking" >/dev/null
+wait_tid pub public-ranking
+wait_text pub "$(tid public-ranking)" "Vitórias gerais"
+expect_text pub "$(tid public-ranking)" "Caio"
+snap pub 04-public-ranking
+
 step "pub_event RPC payload never leaks e-mail, phone or birth date (round 2 item 22)"
 # Belt-and-suspenders beyond the rendered-page checks above: fetches the raw RPC responses the
 # page itself consumed (same shim, same anonymous role — no Authorization header) and asserts the
@@ -83,6 +105,18 @@ assert phone not in raw, f'{phone!r} is present in the pub_athlete RPC payload'
 assert 'birth_date' not in raw, "'birth_date' key is present in the pub_athlete RPC payload"
 PY
 
+PUB_STATS_JSON=$(curl -sS -X POST "http://127.0.0.1:$SHIM_PORT/rest/v1/rpc/pub_stats" \
+  -H 'Content-Type: application/json' -H 'apikey: sb_publishable_local_dev' -d '{}')
+python3 - "$PUB_STATS_JSON" "$ANA_EMAIL" "$ANA_PHONE" <<'PY' || fail pub "pub_stats RPC payload leaks private athlete data or is malformed"
+import json, sys
+raw, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
+data = json.loads(raw)
+assert email not in raw and phone not in raw, 'pub_stats carries an athlete e-mail or phone'
+assert 'birth_date' not in raw and 'public_profile' not in raw, 'pub_stats carries birth_date or public_profile'
+assert all(set(a) == {'id', 'name', 'sex', 'city', 'team_club'} for a in data['athletes']), 'unexpected athlete fields'
+assert data['results'], 'pub_stats returned no result although scenario 03 finalized the races'
+PY
+
 step "public pages at 390×844"
 ab pub set viewport 390 844 >/dev/null
 ab pub open "$APP/#/p/$SLUG" >/dev/null
@@ -93,6 +127,18 @@ ab pub open "$APP/#/" >/dev/null
 wait_tid pub public-events
 wait_text pub "$(tid public-events)" "Desafio EBC E2E"
 snap pub 04-public-home-mobile
+ab pub open "$APP/#/perfis" >/dev/null
+wait_tid pub public-athletes
+no_hscroll pub "public athletes"
+snap pub 04-public-athletes-mobile
+ab pub open "$COMPARE_URL" >/dev/null
+wait_tid pub public-compare
+no_hscroll pub "public compare"
+snap_pages pub 04-public-compare-mobile
+ab pub open "$APP/#/ranking" >/dev/null
+wait_tid pub public-ranking
+no_hscroll pub "public ranking"
+snap_pages pub 04-public-ranking-mobile
 
 step "timekeeper reloads the link offline (service worker)"
 [[ "$(js tk1 "navigator.serviceWorker.ready.then(r => r.active !== null)")" == true ]] || fail tk1 "no active service worker"
