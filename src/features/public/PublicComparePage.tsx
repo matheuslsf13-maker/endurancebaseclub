@@ -218,7 +218,9 @@ export default function PublicComparePage() {
 
         <section data-testid="compare-side-by-side" className="flex flex-col gap-2">
           <h2 className="brand-title text-sm font-semibold">Lado a lado</h2>
-          <Table>
+          {/* min-w-0!: the kit's tables keep max-content width and scroll inside their box; here
+              both athletes' columns must stay on a 390 px screen, so the labels wrap instead. */}
+          <Table className="min-w-0!">
             <thead>
               <tr>
                 <th className="px-3 py-2" scope="col"><span className="sr-only">Estatística</span></th>
