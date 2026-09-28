@@ -26,6 +26,7 @@ export default function AthleteProfilePage() {
   });
   const years = useMemo(() => resultYears(query.data?.results ?? []), [query.data]);
   const [year, setYear] = useYearParam(years);
+  const shownResults = useMemo(() => filterResultsByYear(query.data?.results ?? [], year), [query.data, year]);
 
   async function handleDelete() {
     if (!query.data) return;
@@ -120,7 +121,7 @@ export default function AthleteProfilePage() {
 
       <div className="mt-6 flex flex-col gap-4">
         <YearSelect years={years} value={year} onChange={setYear} />
-        <StatsView athlete={athlete} results={filterResultsByYear(results, year)} />
+        <StatsView athlete={athlete} results={shownResults} />
       </div>
 
       <Modal open={editing} onClose={() => setEditing(false)} title="Editar atleta" size="lg" closeOnBackdrop={false}>

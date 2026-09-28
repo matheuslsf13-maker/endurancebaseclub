@@ -12,7 +12,7 @@ import { PublicStatsFallback } from './PublicStatsFallback';
 import { SexFilterButtons } from './SexFilterButtons';
 import { usePublicStats } from './usePublicStats';
 
-function Board({ title, rows, format }: { title: string; rows: LeaderRow[]; format(value: number): string }) {
+function Board({ title, rows, format, search }: { title: string; rows: LeaderRow[]; format(value: number): string; search: string }) {
   return (
     <section className="rounded-xl border border-border p-4">
       <h3 className="brand-title mb-2 text-sm font-semibold">{title}</h3>
@@ -23,7 +23,7 @@ function Board({ title, rows, format }: { title: string; rows: LeaderRow[]; form
           {rows.map((r) => (
             <li key={r.athlete_id} className="flex items-center gap-2 text-sm">
               <span className="w-8 tabular text-muted">{r.pos}º</span>{' '}
-              <Link to={`/atleta/${r.athlete_id}`} className="underline-offset-2 hover:underline">{r.name}</Link>{' '}
+              <Link to={`/atleta/${r.athlete_id}${search}`} className="underline-offset-2 hover:underline">{r.name}</Link>{' '}
               <span className="ml-auto tabular font-medium">{format(r.value)}</span>
             </li>
           ))}
@@ -64,6 +64,8 @@ export default function PublicRankingPage() {
     );
   }
 
+  // Profile links keep the chosen year, like the profile and compare pages do (spec §3.3).
+  const search = year ? `?ano=${year}` : '';
   const empty = leaders.wins.length + leaders.podiums.length + leaders.finishes.length + leaders.km.length === 0 && records.length === 0;
 
   return (
@@ -82,10 +84,10 @@ export default function PublicRankingPage() {
             <section className="flex flex-col gap-3">
               <h2 className="brand-title text-lg font-semibold">Líderes</h2>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Board title="Vitórias gerais" rows={leaders.wins} format={String} />
-                <Board title="Pódios" rows={leaders.podiums} format={String} />
-                <Board title="Provas concluídas" rows={leaders.finishes} format={String} />
-                <Board title="Km em prova" rows={leaders.km} format={formatKm} />
+                <Board title="Vitórias gerais" rows={leaders.wins} format={String} search={search} />
+                <Board title="Pódios" rows={leaders.podiums} format={String} search={search} />
+                <Board title="Provas concluídas" rows={leaders.finishes} format={String} search={search} />
+                <Board title="Km em prova" rows={leaders.km} format={formatKm} search={search} />
               </div>
             </section>
 
@@ -111,7 +113,7 @@ export default function PublicRankingPage() {
                         {g.entries.map((e, i) => (
                           <tr key={e.athlete_id} className="border-t border-border">
                             <td className="px-3 py-2 tabular">{i + 1}º</td>
-                            <td className="px-3 py-2"><Link to={`/atleta/${e.athlete_id}`} className="hover:underline">{e.name}</Link></td>
+                            <td className="px-3 py-2"><Link to={`/atleta/${e.athlete_id}${search}`} className="hover:underline">{e.name}</Link></td>
                             <td className="px-3 py-2 tabular">{formatDuration(e.time_ms)}</td>
                             <td className="px-3 py-2 tabular">{e.pace || '—'}</td>
                             <td className="px-3 py-2">{e.event_name} · {formatDateBR(e.event_date)}</td>

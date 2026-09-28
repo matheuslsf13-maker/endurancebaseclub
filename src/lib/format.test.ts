@@ -72,7 +72,8 @@ describe('distances (moved from StatsView for the public pages)', () => {
   it('formats meters and km in pt-BR', () => {
     expect(formatDistance(750)).toBe('750 m');
     expect(formatDistance(5000)).toBe('5 km');
-    expect(formatDistance(21097)).toBe('21,1 km');
+    expect(formatDistance(21097)).toBe('21,097 km');
+    expect(formatDistance(21100)).toBe('21,1 km');
     expect(formatKm(10.75)).toBe('10,75 km');
     expect(formatKm(6)).toBe('6 km');
   });
