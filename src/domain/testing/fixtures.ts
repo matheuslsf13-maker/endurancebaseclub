@@ -1,4 +1,4 @@
-import type { AthleteRow, EntryRow, EventRow, MarkRow, RaceConfig, RaceRow, ResolutionRow, TimekeeperRow, WaveRow } from '../../lib/types';
+import type { AthleteRow, EntryRow, EventRow, MarkRow, RaceConfig, RaceRow, RankingDef, ResolutionRow, TimekeeperRow, WaveRow } from '../../lib/types';
 import { defaultRaceConfig } from '../presets';
 
 export const T0 = Date.parse('2026-10-11T11:00:00.000Z'); // 08:00:00 in Brasília
@@ -11,13 +11,21 @@ export const nextId = (p: string) => `${p}${++seq}`;
 export function makeEvent(p: Partial<EventRow> = {}): EventRow {
   return { id: 'e1', name: 'Evento Teste', date: '2026-10-11', location: 'Vila Velha', description: '', levels: [], status: 'ao_vivo', is_public: true, public_slug: 'evento-teste', version: 1, ...p };
 }
+/** The rankings the domain tests were written against (the pre-0008 product defaults: by sex, plus
+ * sex + age group for solo races). Fixtures pin them so a change of the product defaults in
+ * presets.ts never silently changes what those tests exercise; a test wanting other rankings
+ * passes `configPatch.rankings`. */
+function fixtureRankings(teamSize: number): RankingDef[] {
+  const geral: RankingDef = { id: 'geral', name: 'Geral', dims: ['sex'], size: 3 };
+  return teamSize > 1 ? [geral] : [geral, { id: 'faixa', name: 'Faixa etária', dims: ['sex', 'age'], size: 3 }];
+}
 export function makeRace(p: Partial<RaceRow> & { configPatch?: Partial<RaceConfig> } = {}): RaceRow {
   const { configPatch, ...rest } = p;
   const team_size = rest.team_size ?? 1;
   return {
     id: 'r1', event_id: 'e1', name: 'Aquathlon', position: 0, team_size,
     legs: [{ modality: 'swim', label: 'Natação', distance_m: 750 }, { modality: 'run', label: 'Corrida', distance_m: 5000 }],
-    config: { ...defaultRaceConfig(team_size), ...(configPatch ?? {}) }, finalized_at: null, ...rest,
+    config: { ...defaultRaceConfig(team_size), rankings: fixtureRankings(team_size), ...(configPatch ?? {}) }, finalized_at: null, ...rest,
   };
 }
 export function makeWave(p: Partial<WaveRow> = {}): WaveRow {
