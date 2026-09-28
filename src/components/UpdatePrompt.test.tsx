@@ -1,9 +1,9 @@
 import { act } from '@testing-library/react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from './ui';
-import { shouldPromptForUpdate, UpdatePrompt } from './UpdatePrompt';
+import { buildRegisterSWCallbacks, shouldPromptForUpdate, UpdatePrompt } from './UpdatePrompt';
 
 // Ruling 26: main.tsx dispatches this event (never on the timekeeper route) with an `update`
 // callback that wraps the service worker's own `updateSW(true)`; UpdatePrompt only wires it to
@@ -38,12 +38,56 @@ describe('UpdatePrompt', () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores the event when rendered without a ToastProvider (nothing to crash)', () => {
+  it('throws immediately when rendered without a ToastProvider, instead of silently doing nothing', () => {
     // UpdatePrompt is mounted once, inside the providers; this only guards against a future
-    // refactor moving it outside them without anyone noticing at review time.
+    // refactor moving it outside them without anyone noticing at review time — failing loudly
+    // here beats a silently-missing update prompt in production.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(() => render(<UpdatePrompt />)).toThrow('useToast must be used within a ToastProvider');
     spy.mockRestore();
+  });
+
+  it('round 2 N3: dismisses its own toast the moment the hash enters the timekeeper route', async () => {
+    const originalHash = window.location.hash;
+    render(
+      <ToastProvider>
+        <UpdatePrompt />
+      </ToastProvider>,
+    );
+
+    act(() => dispatchNeedRefresh(vi.fn()));
+    expect(await screen.findByText('Nova versão disponível')).toBeInTheDocument();
+
+    // "Voltar à cronometragem" (C-Minor-7) can carry this toast from `#/` straight into
+    // `#/c/:token`, where it would sit over the "Em prova" rows — dismiss it there, same as
+    // Ruling 26 already keeps it from ever being shown while starting on that route.
+    act(() => {
+      window.location.hash = '#/c/abc123';
+      window.dispatchEvent(new Event('hashchange'));
+    });
+
+    expect(screen.queryByText('Nova versão disponível')).not.toBeInTheDocument();
+    window.location.hash = originalHash;
+  });
+
+  it('round 2 N3: leaves the toast alone on a hash change that stays off the timekeeper route', async () => {
+    const originalHash = window.location.hash;
+    render(
+      <ToastProvider>
+        <UpdatePrompt />
+      </ToastProvider>,
+    );
+
+    act(() => dispatchNeedRefresh(vi.fn()));
+    expect(await screen.findByText('Nova versão disponível')).toBeInTheDocument();
+
+    act(() => {
+      window.location.hash = '#/eventos';
+      window.dispatchEvent(new Event('hashchange'));
+    });
+
+    expect(screen.getByText('Nova versão disponível')).toBeInTheDocument();
+    window.location.hash = originalHash;
   });
 });
 
@@ -58,5 +102,69 @@ describe('shouldPromptForUpdate', () => {
     expect(shouldPromptForUpdate('#/eventos')).toBe(true);
     expect(shouldPromptForUpdate('#/')).toBe(true);
     expect(shouldPromptForUpdate('')).toBe(true);
+  });
+});
+
+describe('buildRegisterSWCallbacks', () => {
+  const originalLocation = window.location;
+
+  // jsdom's `window.location.reload` is not a configurable property, so `vi.spyOn` cannot stub it
+  // directly — the whole `location` object is swapped out instead (and restored after each test).
+  function mockLocation(hash: string): ReturnType<typeof vi.fn> {
+    const reload = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { ...originalLocation, hash, reload },
+      writable: true,
+      configurable: true,
+    });
+    return reload;
+  }
+
+  afterEach(() => {
+    Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+  });
+
+  it('onNeedReload never reloads the timekeeper route (Ruling 26: same-device reload hazard)', () => {
+    const reload = mockLocation('#/c/abc123');
+    const { onNeedReload } = buildRegisterSWCallbacks(() => vi.fn());
+
+    onNeedReload();
+
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('onNeedReload reloads on every other route', () => {
+    const reload = mockLocation('#/eventos');
+    const { onNeedReload } = buildRegisterSWCallbacks(() => vi.fn());
+
+    onNeedReload();
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('onNeedRefresh dispatches the toast event only once even when called twice (vite-plugin-pwa fires it from both listeners on a long-open tab)', () => {
+    window.location.hash = '#/eventos';
+    const update = vi.fn();
+    const { onNeedRefresh } = buildRegisterSWCallbacks(() => update);
+    const handler = vi.fn();
+    window.addEventListener('ebc:sw-need-refresh', handler);
+
+    onNeedRefresh();
+    onNeedRefresh();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    window.removeEventListener('ebc:sw-need-refresh', handler);
+  });
+
+  it('onNeedRefresh never dispatches on the timekeeper route', () => {
+    window.location.hash = '#/c/abc123';
+    const handler = vi.fn();
+    window.addEventListener('ebc:sw-need-refresh', handler);
+    const { onNeedRefresh } = buildRegisterSWCallbacks(() => vi.fn());
+
+    onNeedRefresh();
+
+    expect(handler).not.toHaveBeenCalled();
+    window.removeEventListener('ebc:sw-need-refresh', handler);
   });
 });

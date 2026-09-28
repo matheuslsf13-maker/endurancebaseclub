@@ -13,6 +13,10 @@ import type { ImportResult } from '../../lib/types';
 
 export interface ImportDialogProps {
   open: boolean;
+  /** C-Minor-3: preselects this event in the "Inscrever na prova..." select on open (the Entries
+   * tab's import shortcut carries `?evento=<id>`) — without it the shortcut arrived on "Nenhum",
+   * so the Prova column was silently ignored and nobody got enrolled. */
+  initialEventId?: string;
   onClose(): void;
   /** Called once `admin_import_athletes` succeeds, so the caller can refresh its athlete list. */
   onImported(): void;
@@ -34,11 +38,11 @@ async function readTable(file: File): Promise<string[][]> {
   return parseCsv(text);
 }
 
-export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
+export function ImportDialog({ open, initialEventId = '', onClose, onImported }: ImportDialogProps) {
   const [fileName, setFileName] = useState<string | null>(null);
   const [mapped, setMapped] = useState<MappedImport | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
-  const [eventId, setEventId] = useState('');
+  const [eventId, setEventId] = useState(initialEventId);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -46,15 +50,17 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
   const eventsQuery = useQuery({ queryKey: ['events', 'summary'], queryFn: () => api.admin.listEvents(), enabled: open });
 
   // Start clean every time the dialog opens, so a previous import's preview/result never bleeds
-  // into the next one.
+  // into the next one. `eventId` seeds from `initialEventId` (C-Minor-3) rather than always
+  // resetting to "Nenhum", so the Entries tab's `?evento=<id>` shortcut is actually honoured.
   useEffect(() => {
     if (!open) return;
     setFileName(null);
     setMapped(null);
     setReadError(null);
-    setEventId('');
+    setEventId(initialEventId);
     setResult(null);
     setImportError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only reset when the dialog opens
   }, [open]);
 
   async function handleFile(e: ChangeEvent<HTMLInputElement>) {
@@ -100,6 +106,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
       onClose={onClose}
       title="Importar atletas"
       size="xl"
+      closeOnBackdrop={false}
       footer={
         result ? (
           <Button onClick={onClose}>Fechar</Button>
@@ -157,7 +164,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
         )}
 
         {readError && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {readError}
           </p>
         )}
@@ -168,7 +175,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
               {result.inserted} novos, {result.updated} atualizados, {result.entries_created} inscrições
             </p>
             {result.errors.length > 0 && (
-              <ul className="flex flex-col gap-1 text-sm text-danger">
+              <ul className="flex flex-col gap-1 text-sm text-danger-text">
                 {result.errors.map((e, i) => (
                   <li key={i}>
                     Linha {e.row}: {e.message}
@@ -181,10 +188,11 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
           mapped && (
             <div className="flex flex-col gap-3">
               <p className="text-sm text-fg">
-                {fileName} — {mapped.rows.length} atleta(s) válido(s), {mapped.errors.length} erro(s)
+                {fileName} — {mapped.rows.length} {mapped.rows.length === 1 ? 'atleta válido' : 'atletas válidos'},{' '}
+                {mapped.errors.length} {mapped.errors.length === 1 ? 'erro' : 'erros'}
               </p>
               {mapped.errors.length > 0 && (
-                <ul className="flex flex-col gap-1 text-sm text-danger">
+                <ul className="flex flex-col gap-1 text-sm text-danger-text">
                   {mapped.errors.map((e, i) => (
                     <li key={i}>
                       Linha {e.row}: {e.message}
@@ -229,7 +237,7 @@ export function ImportDialog({ open, onClose, onImported }: ImportDialogProps) {
         )}
 
         {importError && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {importError}
           </p>
         )}

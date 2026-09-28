@@ -35,13 +35,18 @@ export default function AthletesPage() {
   // lazily, from the URL the page was reached with (never re-triggers itself while the page stays
   // mounted, e.g. after the organizer manually closes the dialog).
   const [importOpen, setImportOpen] = useState(() => searchParams.get('import') === '1');
+  // C-Minor-3: the same shortcut carries `evento=<id>` so the dialog preselects that event's row
+  // in the "Inscrever na prova..." select instead of arriving on "Nenhum" and importing 0 entries.
+  const [importEventId] = useState(() => searchParams.get('evento') ?? '');
 
-  // Strips the one-shot `?import=1` from the URL right after consuming it (via `replace`, so it
-  // doesn't add a back-button entry), so reloading or navigating back never force-reopens it.
+  // Strips the one-shot `?import=1`/`evento=` from the URL right after consuming them (via
+  // `replace`, so it doesn't add a back-button entry), so reloading or navigating back never
+  // force-reopens the dialog or re-applies a stale preselection.
   useEffect(() => {
-    if (!searchParams.has('import')) return;
+    if (!searchParams.has('import') && !searchParams.has('evento')) return;
     const next = new URLSearchParams(searchParams);
     next.delete('import');
+    next.delete('evento');
     setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once, right after mount
   }, []);
@@ -76,7 +81,7 @@ export default function AthletesPage() {
     if (!ok) return;
     try {
       await api.admin.deleteAthlete(a.id);
-      toast.show({ message: 'Atleta excluído.', tone: 'success' });
+      toast.show({ message: 'Atleta excluído', tone: 'success' });
       void refreshList();
     } catch (err) {
       toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
@@ -115,7 +120,7 @@ export default function AthletesPage() {
           </div>
         ) : query.error ? (
           <Card>
-            <p role="alert" className="text-sm text-danger">
+            <p role="alert" className="text-sm text-danger-text">
               {query.error instanceof Error ? query.error.message : 'Erro inesperado'}
             </p>
           </Card>
@@ -168,13 +173,18 @@ export default function AthletesPage() {
         )}
       </div>
 
-      <Modal open={modal !== null} onClose={() => setModal(null)} title={modal === 'new' ? 'Novo atleta' : 'Editar atleta'} size="lg">
+      <Modal open={modal !== null} onClose={() => setModal(null)} title={modal === 'new' ? 'Novo atleta' : 'Editar atleta'} size="lg" closeOnBackdrop={false}>
         {modal !== null && (
           <AthleteForm initial={modal === 'new' ? undefined : modal} onSaved={handleSaved} onCancel={() => setModal(null)} />
         )}
       </Modal>
 
-      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={() => void refreshList()} />
+      <ImportDialog
+        open={importOpen}
+        initialEventId={importEventId}
+        onClose={() => setImportOpen(false)}
+        onImported={() => void refreshList()}
+      />
     </div>
   );
 }

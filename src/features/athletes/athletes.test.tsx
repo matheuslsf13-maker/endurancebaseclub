@@ -302,9 +302,13 @@ describe('StatsView', () => {
     expect(screen.getByText('Sem resultados oficiais ainda')).toBeInTheDocument();
   });
 
-  it('routes partner links to the public athlete page in public mode', () => {
+  // C-Minor-16: a finalized snapshot only carries a teammate's id/name/legs, never whether their
+  // profile is public — public mode can't tell which partners it would be safe to link to, so it
+  // shows plain text instead of a link that could dead-end on a private profile.
+  it('shows partner names as plain text (no dead-end link) in public mode', () => {
     renderWithProviders(<StatsView athlete={athlete} results={STATS_FIXTURE_RESULTS} publicMode />);
-    expect(screen.getByRole('link', { name: 'Bia' })).toHaveAttribute('href', '/atleta/a2');
+    expect(screen.getByText('Bia')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Bia' })).not.toBeInTheDocument();
   });
 
   it('routes partner links to the organizer profile outside public mode', () => {
@@ -393,6 +397,17 @@ describe('AthletesPage', () => {
     await screen.findByText('Ana Souza');
 
     expect(screen.getByTestId('import-file')).toBeInTheDocument();
+  });
+
+  // C-Minor-3: the shortcut also carries `evento=<id>` so the dialog preselects that event.
+  it('preselects the event named in ?evento=<id> (C-Minor-3)', async () => {
+    listEvents.mockResolvedValue([
+      { id: 'ev1', name: 'Copa EBC', date: '2026-10-11', location: '', description: '', levels: [], status: 'planejado', is_public: false, public_slug: null, version: 1, races_count: 1, entries_count: 0 },
+    ]);
+    renderWithProviders(<AthletesPage />, { route: '/atletas?import=1&evento=ev1' });
+    await screen.findByText('Ana Souza');
+
+    expect(await screen.findByLabelText(/Inscrever na prova/)).toHaveValue('ev1');
   });
 });
 

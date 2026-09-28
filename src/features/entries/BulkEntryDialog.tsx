@@ -61,7 +61,7 @@ export function BulkEntryDialog({ open, onClose, onCreated }: BulkEntryDialogPro
     try {
       const created = await api.admin.bulkCreateEntries(raceId, Array.from(selected));
       await refresh();
-      toast.show({ message: `${created.length} inscrição(ões) criada(s).`, tone: 'success' });
+      toast.show({ message: `${created.length} ${created.length === 1 ? 'inscrição criada' : 'inscrições criadas'}`, tone: 'success' });
       onCreated(created);
       onClose();
     } catch (err) {
@@ -77,6 +77,7 @@ export function BulkEntryDialog({ open, onClose, onCreated }: BulkEntryDialogPro
       onClose={onClose}
       title="Inscrever vários atletas"
       size="lg"
+      closeOnBackdrop={false}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>
@@ -111,12 +112,18 @@ export function BulkEntryDialog({ open, onClose, onCreated }: BulkEntryDialogPro
             />
             <Input label="Buscar atleta" placeholder="Nome" value={search} onChange={(e) => setSearch(e.target.value)} />
             {error && (
-              <p role="alert" className="text-sm text-danger">
+              <p role="alert" className="text-sm text-danger-text">
                 {error}
               </p>
             )}
             <div className="max-h-72 overflow-y-auto rounded-xl border border-border">
-              {candidates.length === 0 ? (
+              {athletesQuery.isLoading ? (
+                <p className="p-3 text-sm text-muted">Carregando atletas…</p>
+              ) : athletesQuery.isError ? (
+                <p role="alert" className="p-3 text-sm text-danger-text">
+                  Não foi possível carregar os atletas.
+                </p>
+              ) : candidates.length === 0 ? (
                 <p className="p-3 text-sm text-muted">Nenhum atleta disponível.</p>
               ) : (
                 candidates.map((a) => (

@@ -40,7 +40,8 @@ export default function EventsPage() {
   async function handleDelete(ev: EventSummary) {
     const ok = await confirm({
       title: `Excluir "${ev.name}"?`,
-      message: 'Provas, inscrições e marcações desse evento serão apagadas. Essa ação não pode ser desfeita.',
+      message:
+        'Provas, inscrições, marcações e resultados finalizados desse evento serão apagados, inclusive nas estatísticas dos atletas. Essa ação não pode ser desfeita.',
       confirmLabel: 'Excluir',
       danger: true,
     });
@@ -70,7 +71,7 @@ export default function EventsPage() {
           </div>
         )}
         {error && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {errorMessage(error, 'Não foi possível carregar os eventos')}
           </p>
         )}
@@ -183,6 +184,11 @@ function CreateEventModal({
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    // C-Minor-2: `noValidate` (below) drops the native `required` check.
+    if (!date.trim()) {
+      setError('Informe a data do evento');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -210,6 +216,7 @@ function CreateEventModal({
       open={open}
       onClose={handleClose}
       title="Novo evento"
+      closeOnBackdrop={false}
       footer={
         <>
           <Button variant="secondary" onClick={handleClose} disabled={busy}>
@@ -251,7 +258,7 @@ function CreateEventModal({
           data-testid="event-levels"
         />
         {error && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {error}
           </p>
         )}
@@ -276,6 +283,10 @@ function DuplicateEventModal({
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (!date.trim()) {
+      setError('Informe a data do evento');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -292,6 +303,7 @@ function DuplicateEventModal({
       open
       onClose={onClose}
       title={`Duplicar "${event.name}"`}
+      closeOnBackdrop={false}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={busy}>
@@ -320,7 +332,7 @@ function DuplicateEventModal({
           data-testid="duplicate-date"
         />
         {error && (
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {error}
           </p>
         )}

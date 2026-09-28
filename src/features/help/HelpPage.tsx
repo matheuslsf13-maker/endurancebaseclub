@@ -15,8 +15,8 @@ export default function HelpPage() {
       <Card className="flex flex-col gap-3">
         <h2 className="font-semibold">Antes do evento</h2>
         <ol className="list-decimal space-y-1 pl-5 text-sm">
-          <li>Crie o evento (nome, data, local).</li>
-          <li>Configure as provas: pernas (modalidade, rótulo, distância), ondas e, se precisar, níveis.</li>
+          <li>Crie o evento (nome, data, local e, se precisar, níveis, na aba Geral).</li>
+          <li>Configure as provas: pernas (modalidade, rótulo, distância) e ondas.</li>
           <li>Cadastre os atletas, um a um ou importando uma planilha.</li>
           <li>Faça as inscrições nas provas, atribuindo cada perna a um atleta.</li>
           <li>

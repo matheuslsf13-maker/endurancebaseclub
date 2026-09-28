@@ -1,11 +1,10 @@
 {
   "name": "endurance-base-club",
   "version": "1.0.0",
-  "description": "",
   "private": true,
   "type": "module",
-  "directories": {
-    "doc": "docs"
+  "engines": {
+    "node": "22.x"
   },
   "scripts": {
     "dev": "vite",
@@ -21,9 +20,7 @@
     "dev:stack": "bash scripts/dev-stack.sh",
     "e2e": "bash tests/e2e/run.sh"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "UNLICENSED",
   "dependencies": {
     "@supabase/supabase-js": "2.117.1",
     "@tanstack/react-query": "5.103.2",

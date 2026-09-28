@@ -11,6 +11,11 @@ export interface ModalProps {
   children: ReactNode;
   footer?: ReactNode;
   size?: ModalSize;
+  /** false disables click-outside-to-close on the backdrop; Escape and any explicit close control
+   * (the "×" button, a form's own Cancelar) still work. Defaults to true. Data-entry forms set this
+   * to false so a stray tap outside the dialog — easy to trigger on a phone — never silently
+   * discards what the organizer typed. */
+  closeOnBackdrop?: boolean;
 }
 
 const SIZE_CLASSES: Record<ModalSize, string> = {
@@ -29,21 +34,47 @@ function getFocusable(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
 }
 
-export function Modal({ open, onClose, title, children, footer, size = 'md' }: ModalProps) {
+// A module-level stack of every currently-open Modal's dialog element, top of stack last. Every
+// open Modal adds its own `document` keydown listener (needed so each dialog keeps working
+// independently of render order), but with two dialogs open — today only "+ Novo atleta" nested
+// inside "Nova/Editar inscrição" (spec §12) — *both* listeners used to react to the same keydown:
+// Escape closed both dialogs at once (losing whatever the organizer had typed in the outer form),
+// and the two focus traps fought over Tab. Consulting this stack lets a listener act only when its
+// own dialog is the top-most one, so Escape closes just the inner dialog and Tab stays inside it.
+const openStack: HTMLDivElement[] = [];
+
+export function Modal({ open, onClose, title, children, footer, size = 'md', closeOnBackdrop = true }: ModalProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Escape closes; Tab/Shift+Tab is trapped inside the dialog while it's open.
+  // Registers this dialog on the shared stack for as long as it's open, topmost last.
+  useEffect(() => {
+    if (!open) return;
+    const container = dialogRef.current;
+    if (!container) return;
+    openStack.push(container);
+    return () => {
+      const i = openStack.indexOf(container);
+      if (i !== -1) openStack.splice(i, 1);
+    };
+  }, [open]);
+
+  // Escape closes; Tab/Shift+Tab is trapped inside the dialog while it's open. Only the top-most
+  // open dialog's listener acts on a given keydown — see `openStack` above.
   useEffect(() => {
     if (!open) return;
     function onKeyDown(e: KeyboardEvent) {
+      const container = dialogRef.current;
+      if (!container || openStack[openStack.length - 1] !== container) return;
       if (e.key === 'Escape') {
+        // A widget nested inside the dialog (e.g. EntryForm's athlete combobox) that already
+        // called `preventDefault()` on its own Escape handling — to close just its popup — has
+        // claimed this keystroke; the dialog itself must not also close on it.
+        if (e.defaultPrevented) return;
         onClose();
         return;
       }
       if (e.key !== 'Tab') return;
-      const container = dialogRef.current;
-      if (!container) return;
       const focusables = getFocusable(container);
       if (focusables.length === 0) {
         e.preventDefault();
@@ -93,7 +124,7 @@ export function Modal({ open, onClose, title, children, footer, size = 'md' }: M
         data-testid="modal-backdrop"
         aria-hidden="true"
         className="absolute inset-0 bg-black/60"
-        onClick={onClose}
+        onClick={closeOnBackdrop ? onClose : undefined}
       />
       <div
         ref={dialogRef}

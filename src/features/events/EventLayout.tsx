@@ -110,7 +110,7 @@ function LoadError({ message, onRetry }: { message: string; onRetry(): Promise<v
       <Card className="flex flex-col gap-4">
         <div>
           <p className="font-medium">Não foi possível carregar o evento</p>
-          <p role="alert" className="mt-1 text-sm text-danger">
+          <p role="alert" className="mt-1 text-sm text-danger-text">
             {message}
           </p>
         </div>

@@ -36,9 +36,20 @@ function useLightThemeByDefault() {
       const t = safeLocalStorage().getItem('ebc.theme');
       return t === 'light' || t === 'dark';
     };
-    if (!saved()) document.documentElement.dataset.theme = 'light';
+    // Round 2 N4 (grant): index.html's bootstrap script only runs on a full page load, so an
+    // in-app navigation into #/c/:token (e.g. "Voltar à cronometragem", C-Minor-7) never re-syncs
+    // the theme-color meta tag on its own — without this it can stay on the previous screen's
+    // colour while the page itself already switched to light.
+    const setThemeColor = (color: string) => document.querySelector('meta[name="theme-color"]')?.setAttribute('content', color);
+    if (!saved()) {
+      document.documentElement.dataset.theme = 'light';
+      setThemeColor('#F4F1EC');
+    }
     return () => {
-      if (!saved()) document.documentElement.dataset.theme = 'dark';
+      if (!saved()) {
+        document.documentElement.dataset.theme = 'dark';
+        setThemeColor('#191513');
+      }
     };
   }, []);
 }

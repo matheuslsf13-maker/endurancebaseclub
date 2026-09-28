@@ -47,11 +47,14 @@ wait_text $M "$(tid classification-table)" "Caio"
 expect_text $M "$(tid classification-table)" "Duda"
 ROWS=$(js_str $M "JSON.stringify([...document.querySelectorAll('[data-testid=classification-row]')].map(r => r.cells[0].innerText.trim() + ' ' + r.innerText.replace(/\s+/g, ' ')))")
 echo "classification: $ROWS"
-python3 - "$ROWS" <<'PY' || fail $M "Caio and Duda are not both ranked (1º/2º)"
+python3 - "$ROWS" <<'PY' || fail $M "classification order is wrong: Caio finished before Duda (4.5s+ divergence, marked later) so Caio must be 1o and Duda 2o"
 import json, sys
 rows = json.loads(sys.argv[1])
-ranked = {name: r.split(' ', 1)[0] for r in rows for name in ('Caio', 'Duda') if name in r}
-assert sorted(ranked.values()) == ['1', '2'], ranked
+pos = {name: r.split(' ', 1)[0] for r in rows for name in ('Caio', 'Duda') if name in r}
+# C-Minor-18: assert the actual ORDER, not just that {Caio, Duda} occupy {1, 2} in some order —
+# Caio's finish mark (02_timing.sh) is taken well before Duda's (a 4.5s+ divergence on top),
+# so Caio must rank 1o and Duda 2o; an inverted table used to pass this check.
+assert pos.get('Caio') == '1' and pos.get('Duda') == '2', pos
 PY
 ab $M wait "$(tid podiums)" >/dev/null || fail $M "no podiums"
 [[ "$(ab $M is visible "$(tid podiums)")" == true ]] || fail $M "podiums not visible"
@@ -88,13 +91,16 @@ for ws in tempos:
         if fmt:
             for row in range(2, ws.max_row + 1):
                 expect(ws.cell(row, col), fmt, f'{ws.title} [{h}]')
-for ws in wb.worksheets:
-    if ws.title.startswith('Classificação'):
-        headers = [c.value or '' for c in ws[1]]
-        for col, h in enumerate(headers, start=1):
-            if h in ('Tempo final', 'Dif. p/ 1º'):
-                for row in range(2, ws.max_row + 1):
-                    expect(ws.cell(row, col), DURATION, f'{ws.title} [{h}]')
+classificacao_sheets = [ws for ws in wb.worksheets if ws.title.startswith('Class')]
+# Fixer 1 renamed the sheets "Class. - <prova>" (was "Classificacao - ..."); match the new
+# prefix and require at least one, so a rename or a missing sheet can never pass vacuously.
+assert classificacao_sheets, [ws.title for ws in wb.worksheets]
+for ws in classificacao_sheets:
+    headers = [c.value or '' for c in ws[1]]
+    for col, h in enumerate(headers, start=1):
+        if h in ('Tempo final', 'Dif. p/ 1º'):
+            for row in range(2, ws.max_row + 1):
+                expect(ws.cell(row, col), DURATION, f'{ws.title} [{h}]')
 assert checked[CLOCK] >= 6 and checked[DURATION] >= 6, checked
 print('number formats OK', checked)
 PY

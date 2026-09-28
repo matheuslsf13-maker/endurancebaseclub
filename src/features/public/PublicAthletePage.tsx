@@ -25,6 +25,10 @@ export default function PublicAthletePage() {
     document.title = query.data ? `${query.data.athlete.name} – EnduranceBaseClub` : 'EnduranceBaseClub';
   }, [query.data]);
 
+  // C-Minor-15: reset on unmount only — otherwise an admin tab reached by following a public
+  // profile link keeps the athlete's name in the title forever.
+  useEffect(() => () => { document.title = 'EnduranceBaseClub'; }, []);
+
   if (query.isLoading) {
     return (
       <PublicShell>
@@ -40,7 +44,7 @@ export default function PublicAthletePage() {
       <PublicShell>
         <div data-testid="public-athlete" className="mx-auto w-full max-w-md px-4 py-12">
           <Card className="flex flex-col gap-4">
-            <p role="alert" className="text-sm text-danger">
+            <p role="alert" className="text-sm text-danger-text">
               {query.error instanceof Error ? query.error.message : 'Atleta não encontrado ou perfil privado'}
             </p>
             <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">

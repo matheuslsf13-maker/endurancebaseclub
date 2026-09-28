@@ -82,7 +82,7 @@ export function AgeGroupsEditor({ groups, onChange }: AgeGroupsEditorProps) {
       {errors.length > 0 && (
         <ul className="flex flex-col gap-1">
           {errors.map((e) => (
-            <li key={e} role="alert" className="text-sm text-danger">
+            <li key={e} role="alert" className="text-sm text-danger-text">
               {e}
             </li>
           ))}

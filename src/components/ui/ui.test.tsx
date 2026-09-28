@@ -122,6 +122,75 @@ describe('Modal', () => {
     );
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+
+  it('closeOnBackdrop={false} keeps a data-entry form open on a backdrop click', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <Modal open onClose={onClose} title="Nova inscrição" closeOnBackdrop={false}>
+        <p>Conteúdo</p>
+      </Modal>,
+    );
+    await user.click(screen.getByTestId('modal-backdrop'));
+    expect(onClose).not.toHaveBeenCalled();
+    // Escape still works — only the accidental-outside-tap path is disabled.
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Modal stacking (nested dialogs)', () => {
+  // Mirrors EntryForm's "+ Novo atleta" opening inside EntriesTab's "Nova/Editar inscrição"
+  // (the only nested-dialog case in the app, spec §12).
+  function NestedHarness() {
+    const [outerOpen, setOuterOpen] = useState(true);
+    const [innerOpen, setInnerOpen] = useState(false);
+    return (
+      <div>
+        <Modal open={outerOpen} onClose={() => setOuterOpen(false)} title="Editar inscrição">
+          <button onClick={() => setInnerOpen(true)}>+ Novo atleta</button>
+          <input aria-label="Nome da equipe" />
+          <Modal open={innerOpen} onClose={() => setInnerOpen(false)} title="Novo atleta">
+            <input aria-label="Nome" />
+            <button>Salvar atleta</button>
+          </Modal>
+        </Modal>
+      </div>
+    );
+  }
+
+  it('Escape closes only the inner dialog, keeping the outer form (and its typed input) open', async () => {
+    const user = userEvent.setup();
+    render(<NestedHarness />);
+    await user.click(screen.getByText('+ Novo atleta'));
+    expect(screen.getAllByRole('dialog')).toHaveLength(2);
+
+    await user.type(screen.getByLabelText('Nome'), 'Ana');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Editar inscrição' })).toBeInTheDocument();
+  });
+
+  it('Tab stays inside the inner dialog while it is open', async () => {
+    const user = userEvent.setup();
+    render(<NestedHarness />);
+    await user.click(screen.getByText('+ Novo atleta'));
+
+    const nameField = screen.getByLabelText('Nome');
+    const saveBtn = screen.getByText('Salvar atleta');
+    const closeInner = within(screen.getByRole('dialog', { name: 'Novo atleta' })).getByLabelText('Fechar');
+
+    expect(closeInner).toHaveFocus();
+    await user.tab();
+    expect(nameField).toHaveFocus();
+    await user.tab();
+    expect(saveBtn).toHaveFocus();
+    await user.tab();
+    expect(closeInner).toHaveFocus(); // wraps inside the inner dialog only — never reaches the outer one
+  });
 });
 
 describe('Modal focus management', () => {
@@ -222,6 +291,28 @@ describe('Tabs', () => {
     expect(geral).toHaveAttribute('aria-current', 'page');
     expect(screen.getByTestId('tab-revisao')).toBeInTheDocument();
     expect(screen.getByText('2')).toBeInTheDocument();
+  });
+
+  it('C-Minor-8: scrolls the active tab into view (a strip wider than the viewport has no other affordance at 390 px)', () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+
+    renderWithProviders(
+      <Tabs
+        items={[
+          { id: 'geral', label: 'Geral', to: '/eventos/1/geral' },
+          { id: 'provas', label: 'Provas', to: '/eventos/1/provas' },
+          { id: 'resultados', label: 'Resultados', to: '/eventos/1/resultados' },
+        ]}
+      />,
+      { route: '/eventos/1/resultados' },
+    );
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(scrollIntoView.mock.instances[0]).toBe(screen.getByTestId('tab-resultados'));
+
+    Element.prototype.scrollIntoView = original;
   });
 });
 
@@ -420,6 +511,29 @@ describe('ThemeToggle', () => {
     expect(window.localStorage.getItem('ebc.theme')).toBe('dark');
   });
 
+  it('C-Minor-19: keeps the theme-color meta tag in sync with the active theme', async () => {
+    const user = userEvent.setup();
+    const meta = document.createElement('meta');
+    meta.setAttribute('name', 'theme-color');
+    meta.setAttribute('content', '#191513');
+    document.head.appendChild(meta);
+
+    render(<ThemeToggle />);
+    await user.click(screen.getByRole('button'));
+    expect(meta.getAttribute('content')).toBe('#F4F1EC');
+
+    await user.click(screen.getByRole('button'));
+    expect(meta.getAttribute('content')).toBe('#191513');
+
+    meta.remove();
+  });
+
+  it('C-Minor-17: the label names the action, not the current mode (no ambiguous aria-pressed)', () => {
+    render(<ThemeToggle />);
+    // dark is active (beforeEach) — the action is "switch to day mode".
+    expect(screen.getByRole('button', { name: 'Modo sol' })).not.toHaveAttribute('aria-pressed');
+  });
+
   it('each theme declares its color-scheme, so native controls follow it (Task 28 E2E)', () => {
     // Without it the dark theme kept light native widgets: white scrollbars and a dark calendar
     // icon on the dark date field. jsdom does not apply stylesheets, so the rule is read from
@@ -471,6 +585,45 @@ describe('LineChart', () => {
   it('shows an empty state when there are no points', () => {
     render(<LineChart title="Evolução" formatValue={(v) => String(v)} points={[]} />);
     expect(screen.getByText('Sem dados para exibir')).toBeInTheDocument();
+  });
+
+  it('round 2 item 20: keeps a wide (~180 px) tooltip fully inside the chart at either edge, using its real measured width', () => {
+    // A percentage-based clamp can't account for the tooltip's actual rendered width — a wide
+    // label centered near an edge still overflowed. jsdom never lays out real geometry, so
+    // `offsetWidth` is mocked to a realistic tooltip width (the review's "~140-200 px" example).
+    const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, value: 180 });
+    try {
+      render(
+        <LineChart
+          title="Evolução 5 km corrida"
+          formatValue={(v) => `${Math.round(v / 1000)}s`}
+          points={[
+            { label: '01', value: 100 },
+            { label: '02', value: 200 },
+            { label: '03', value: 300 },
+          ]}
+        />,
+      );
+      const svg = screen.getByRole('img', { name: /Evolução 5 km corrida/ });
+      const FALLBACK_VIEW_W = 640; // jsdom has no ResizeObserver, so measuredWidth never moves off it.
+      const TOOLTIP_WIDTH = 180;
+
+      const assertInBounds = () => {
+        const left = parseFloat(screen.getByTestId('line-chart-tooltip').style.left);
+        expect(left).toBeGreaterThanOrEqual(0);
+        expect(left + TOOLTIP_WIDTH).toBeLessThanOrEqual(FALLBACK_VIEW_W);
+      };
+
+      fireEvent.focus(svg); // keyboard focus lands on the last point (right edge) by default
+      assertInBounds();
+
+      fireEvent.keyDown(svg, { key: 'ArrowLeft' });
+      fireEvent.keyDown(svg, { key: 'ArrowLeft' }); // now on the first point (left edge)
+      assertInBounds();
+    } finally {
+      if (originalDescriptor) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalDescriptor);
+    }
   });
 });
 

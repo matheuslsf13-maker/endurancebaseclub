@@ -1,8 +1,9 @@
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import type { RouteObject } from 'react-router';
 
 import { ConfirmProvider, ToastProvider } from '../../components/ui';
@@ -186,16 +187,43 @@ describe('EventsPage', () => {
     expect(router.state.location.pathname).toBe('/eventos/copy1');
   });
 
-  it('deletes an event after the danger confirmation', async () => {
+  it('deletes an event after the danger confirmation, naming that finalized results are erased too (C-Minor-4)', async () => {
     const user = userEvent.setup();
     mocks.listEvents.mockResolvedValue([makeSummary({ id: 'e1', name: 'Copa EBC' })]);
     mocks.deleteEvent.mockResolvedValue(undefined);
     renderRoutes('/eventos', ROUTES);
 
     await user.click(await screen.findByRole('button', { name: 'Excluir' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('resultados finalizados');
     await user.click(screen.getByTestId('confirm-ok'));
 
     await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
+  });
+
+  it('C-Minor-2: rejects creating an event with an empty date, client-side', async () => {
+    const user = userEvent.setup();
+    mocks.listEvents.mockResolvedValue([]);
+    renderRoutes('/eventos', ROUTES);
+
+    await user.click(await screen.findByTestId('new-event'));
+    await user.type(screen.getByTestId('event-name'), 'Aquathlon de Verão');
+    await user.click(screen.getByTestId('event-create-submit'));
+
+    expect(await screen.findByText('Informe a data do evento')).toBeInTheDocument();
+    expect(mocks.saveEvent).not.toHaveBeenCalled();
+  });
+
+  it('C-Minor-2: rejects duplicating an event with an empty date, client-side', async () => {
+    const user = userEvent.setup();
+    mocks.listEvents.mockResolvedValue([makeSummary({ id: 'e1', name: 'Copa EBC', date: '2026-10-11' })]);
+    renderRoutes('/eventos', ROUTES);
+
+    await user.click(await screen.findByRole('button', { name: 'Duplicar' }));
+    await user.clear(screen.getByTestId('duplicate-date'));
+    await user.click(screen.getByTestId('event-duplicate-submit'));
+
+    expect(await screen.findByText('Informe a data do evento')).toBeInTheDocument();
+    expect(mocks.duplicateEvent).not.toHaveBeenCalled();
   });
 });
 
@@ -208,28 +236,45 @@ describe('EventGeneralTab', () => {
     return renderRoutes(`/eventos/${ctx.eventId}/geral`, routes);
   }
 
-  // A stable `MemoryRouter` (unlike swapping `createMemoryRouter` instances) lets `rerender` feed
-  // a new context value while keeping `EventGeneralTab`'s own component instance — and therefore
-  // its `useState` — exactly as a real `agg` update from EventProvider would.
+  // A stable router (unlike swapping `createMemoryRouter` instances, or RTL's `rerender`, which
+  // would remount the tree) lets `rerenderWithContext` feed a new context value into the *same*
+  // `EventGeneralTab` instance — and therefore its `useState` — exactly as a real `agg` update
+  // from EventProvider would. `useBlocker` (C-Minor-6) needs a data router, hence `createMemoryRouter`
+  // rather than the plain `<MemoryRouter>` this used before; the `Harness` below carries the
+  // context in its own state so it can be updated without recreating the router.
   function renderTabDirect(ctx: EventContextValue) {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    const tree = (c: EventContextValue) => (
-      <SessionContext.Provider value={fakeSession(OWNER)}>
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <ConfirmProvider>
-              <MemoryRouter initialEntries={[`/eventos/${c.eventId}/geral`]}>
-                <EventContext.Provider value={c}>
-                  <EventGeneralTab />
-                </EventContext.Provider>
-              </MemoryRouter>
-            </ConfirmProvider>
-          </ToastProvider>
-        </QueryClientProvider>
-      </SessionContext.Provider>
+    let setCtx!: (c: EventContextValue) => void;
+    function Harness({ initial }: { initial: EventContextValue }) {
+      const [c, setC] = useState(initial);
+      setCtx = setC;
+      return (
+        <EventContext.Provider value={c}>
+          <EventGeneralTab />
+        </EventContext.Provider>
+      );
+    }
+    const router = createMemoryRouter(
+      [
+        {
+          path: '/eventos/:id/geral',
+          element: (
+            <SessionContext.Provider value={fakeSession(OWNER)}>
+              <QueryClientProvider client={queryClient}>
+                <ToastProvider>
+                  <ConfirmProvider>
+                    <Harness initial={ctx} />
+                  </ConfirmProvider>
+                </ToastProvider>
+              </QueryClientProvider>
+            </SessionContext.Provider>
+          ),
+        },
+      ],
+      { initialEntries: [`/eventos/${ctx.eventId}/geral`] },
     );
-    const result = render(tree(ctx));
-    return { ...result, rerenderWithContext: (next: EventContextValue) => result.rerender(tree(next)) };
+    const result = render(<RouterProvider router={router} />);
+    return { ...result, rerenderWithContext: (next: EventContextValue) => act(() => setCtx(next)) };
   }
 
   it("shows the event's current data, including the public link preview", () => {
@@ -284,11 +329,83 @@ describe('EventGeneralTab', () => {
     const { router } = renderTab(fakeContext(agg));
 
     await user.click(screen.getByRole('button', { name: 'Excluir evento' }));
+    // C-Minor-4: the confirm names that finalized results/athlete stats are erased too, not just
+    // provas/inscrições/marcações.
+    expect(screen.getByRole('dialog')).toHaveTextContent('resultados finalizados');
+    expect(screen.getByRole('dialog')).toHaveTextContent('estatísticas dos atletas');
     await user.click(screen.getByTestId('confirm-ok'));
 
     await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
     expect(await screen.findByText('Lista de eventos')).toBeInTheDocument();
     expect(router.state.location.pathname).toBe('/eventos');
+  });
+
+  it('round 2 item N1: deleting a dirty form navigates away without a spurious "unsaved changes" prompt', async () => {
+    const user = userEvent.setup();
+    mocks.deleteEvent.mockResolvedValue(undefined);
+    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+    const { router } = renderTab(fakeContext(agg));
+
+    // Make the form dirty first — the event is deleted anyway, so this must not leave the
+    // useBlocker(dirty) guard armed for the navigation the delete itself performs.
+    await user.type(screen.getByTestId('event-name'), ' extra');
+    await user.click(screen.getByRole('button', { name: 'Excluir evento' }));
+    await user.click(screen.getByTestId('confirm-ok'));
+
+    await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
+    expect(await screen.findByText('Lista de eventos')).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/eventos');
+    // Only the delete confirm's own dialog should have appeared — no second "Sair sem salvar?".
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('C-Minor-13: invalidates the events list and drops the deleted event from the cache', async () => {
+    const user = userEvent.setup();
+    mocks.deleteEvent.mockResolvedValue(undefined);
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    const removeSpy = vi.spyOn(QueryClient.prototype, 'removeQueries');
+    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+    renderTab(fakeContext(agg));
+
+    await user.click(screen.getByRole('button', { name: 'Excluir evento' }));
+    await user.click(screen.getByTestId('confirm-ok'));
+
+    await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
+    expect(invalidateSpy).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['events'] }));
+    expect(removeSpy).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['event', 'e1'] }));
+    invalidateSpy.mockRestore();
+    removeSpy.mockRestore();
+  });
+
+  it('C-Minor-2: rejects an empty date client-side with a pt-BR message instead of a raw server error', async () => {
+    const user = userEvent.setup();
+    const agg = makeAgg({ event: makeEvent({ id: 'e1' }) });
+    renderTab(fakeContext(agg));
+
+    await user.clear(screen.getByTestId('event-date'));
+    await user.click(screen.getByTestId('event-save'));
+
+    expect(await screen.findByText('Informe a data do evento')).toBeInTheDocument();
+    expect(mocks.saveEvent).not.toHaveBeenCalled();
+  });
+
+  it('C-Minor-6: blocks an in-app navigation away from a dirty form until confirmed', async () => {
+    const user = userEvent.setup();
+    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+    const { router } = renderTab(fakeContext(agg));
+
+    await user.type(screen.getByTestId('event-name'), ' extra');
+    void router.navigate('/eventos');
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent(/alterações não salvas/);
+    await user.click(screen.getByTestId('confirm-cancel'));
+    expect(screen.queryByText('Lista de eventos')).not.toBeInTheDocument();
+    expect(screen.getByTestId('event-name')).toHaveValue('Copa EBC extra');
+
+    void router.navigate('/eventos');
+    await screen.findByRole('dialog');
+    await user.click(screen.getByTestId('confirm-ok'));
+    expect(await screen.findByText('Lista de eventos')).toBeInTheDocument();
   });
 
   it('keeps unsaved edits when the event changes elsewhere, and offers to reload (Ruling 40)', async () => {
