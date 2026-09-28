@@ -5,7 +5,8 @@ import { MODALITY_LABEL } from '../../domain/presets';
 import { formatDateBR, formatDistance, formatDuration, formatKm } from '../../lib/format';
 import { LineChart } from '../../components/LineChart';
 import { Badge, Card, EmptyState, Table } from '../../components/ui';
-import type { AthleteRow, Modality, ResultRow, SnapshotStatus } from '../../lib/types';
+import type { AthleteRow, Modality, ResultRow } from '../../lib/types';
+import { STATUS_LABEL, STATUS_TONE, ordinal, percent } from './statsFormat';
 
 export interface StatsViewProps {
   athlete: Pick<AthleteRow, 'id'>;
@@ -19,22 +20,8 @@ export interface StatsViewProps {
   partnerLink?: (athleteId: string) => string | null;
 }
 
-const STATUS_LABEL: Record<SnapshotStatus, string> = {
-  finished: 'Concluído', on_course: 'Em prova', not_started: 'Não iniciado', dnf: 'DNF', dns: 'DNS', dsq: 'DSQ',
-};
-const STATUS_TONE: Record<SnapshotStatus, 'success' | 'danger' | 'neutral'> = {
-  finished: 'success', dnf: 'danger', dsq: 'danger', on_course: 'neutral', not_started: 'neutral', dns: 'neutral',
-};
 /** Ruling 20: pace_by_modality never carries 'other'; this fixes the display order for the ones it does. */
 const PACE_MODALITY_ORDER: Modality[] = ['run', 'swim', 'bike'];
-
-function ordinal(pos: number | null): string {
-  return pos === null ? '—' : `${pos}º`;
-}
-
-function percent(v: number | null): string {
-  return v === null ? '—' : `${Math.round(v * 100)}%`;
-}
 
 export function StatsView({ athlete, results, publicMode = false, partnerLink }: StatsViewProps) {
   const stats = useMemo(() => computeAthleteStats(athlete.id, results), [athlete.id, results]);
