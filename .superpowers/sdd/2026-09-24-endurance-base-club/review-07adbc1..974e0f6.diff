@@ -1,0 +1,279 @@
+# Review package: 07adbc1..974e0f6 (package-lock.json and binary files excluded from the diff body)
+
+## Commits
+974e0f6 fix(api): pt-BR text for Postgres's own permission errors
+c011b27 fix(workbook): Resumo "Pendências" counts warnings and errors only
+bce7a5a fix(clock): a slow asymmetric sample no longer evicts good samples
+
+## Files changed
+ src/domain/workbook.test.ts | 22 ++++++++++++++++++++++
+ src/domain/workbook.ts      |  5 +++--
+ src/lib/api.test.ts         | 11 +++++++++++
+ src/lib/api.ts              |  9 ++++++++-
+ src/lib/clock.test.ts       | 11 +++++++++++
+ src/lib/clock.ts            | 12 ++++++++----
+ 6 files changed, 63 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/src/domain/workbook.test.ts b/src/domain/workbook.test.ts
+index 4621a7a..fb4de70 100644
+--- a/src/domain/workbook.test.ts
++++ b/src/domain/workbook.test.ts
+@@ -181,20 +181,42 @@ describe('buildEventWorkbook', () => {
+ describe('buildEventWorkbook edge cases', () => {
+   it('handles an event with no races without crashing', () => {
+     const empty: EventAggregate = {
+       event, races: [], waves: [], entries: [], athletes: [], timekeepers: [],
+       marks: [], resolutions: [], results: [], version: 1, server_now: iso(T0),
+     };
+     const emptyTiming = computeEventTiming(empty, T0);
+     const emptyModel = buildEventWorkbook(empty, emptyTiming, [], T0);
+     expect(emptyModel.sheets.map(s => s.name)).toEqual(['Resumo', 'Inscritos', 'Pódios', 'Marcações', 'Pendências', 'Súmula manual']);
+   });
++
++  it('Resumo "Pendências" counts warnings and errors only, like the app\'s counters (info issues are not pending)', () => {
++    // A DSQ that finished (info: status with crossings) whose timekeeper also tapped twice (info:
++    // duplicate), and an entry with a 14 s divergence (warning).
++    const dsq = makeEntry({ id: 'en1', race_id: 'r1', wave_id: 'w1', bib: '101', status: 'dsq', members: [{ athlete_id: 'a1', position: 0, legs: [0] }] });
++    const div = makeEntry({ id: 'en2', race_id: 'r1', wave_id: 'w1', bib: '102', members: [{ athlete_id: 'a2', position: 0, legs: [0] }] });
++    const agg2: EventAggregate = {
++      ...agg, races: [raceRun], waves: [waveRun], entries: [dsq, div], athletes: [a1, a2],
++      marks: [
++        makeMark({ at: T0 + 25 * MIN, entry_id: 'en1', leg_index: 0, timekeeper_id: 'tk1' }),
++        makeMark({ at: T0 + 25 * MIN + 500, entry_id: 'en1', leg_index: 0, timekeeper_id: 'tk1' }),
++        makeMark({ at: T0 + 27 * MIN, entry_id: 'en2', leg_index: 0, timekeeper_id: 'tk1' }),
++        makeMark({ at: T0 + 27 * MIN + 14 * SEC, entry_id: 'en2', leg_index: 0, timekeeper_id: 'tk2' }),
++      ],
++      resolutions: [],
++    };
++    const t2 = computeEventTiming(agg2, nowMs);
++    expect(t2.issues.filter(i => i.race_id === 'r1').map(i => i.severity).sort()).toEqual(['info', 'info', 'warning']);
++    const cls2 = classifyRace(raceRun, [dsq, div], t2.byEntry, athletesById, event);
++    const resumo = buildEventWorkbook(agg2, t2, [cls2], nowMs).sheets.find(s => s.name === 'Resumo')!;
++    expect(resumo.rows.find(r => r[0] === 'Corrida 5K')?.[8]).toBe(1);
++  });
+ });
+ 
+ describe('workbookFileName', () => {
+   it('slugifies the event name when there is no public slug', () => {
+     const noSlug = makeEvent({ name: 'Corrida & Cia — Edição 2027!', public_slug: null, date: '2027-05-01' });
+     expect(workbookFileName(noSlug)).toBe('EBC_corrida-cia-edicao-2027_2027-05-01.xlsx');
+   });
+ });
+ 
+ // ---------------------------------------------------------------------------------------------
+diff --git a/src/domain/workbook.ts b/src/domain/workbook.ts
+index d2ddd75..75c9674 100644
+--- a/src/domain/workbook.ts
++++ b/src/domain/workbook.ts
+@@ -115,21 +115,21 @@ export function buildEventWorkbook(
+   sheets.push(
+     buildPodiumsSheet(races, officialByRaceId, idx),
+     buildMarcacoesSheet(agg.marks, idx, timing),
+     buildPendenciasSheet(timing.issues),
+     buildSumulaManualSheet(races, idx),
+   );
+   return { sheets };
+ }
+ 
+ /** Resumo (spec §11): headerless — title, Evento/Data/Local/Gerada em, a blank row, then a bold
+- * header and one row per race with entry/status counts, open pendências and finalized state. The
++ * header and one row per race with entry/status counts, open pendências (warnings and errors) and finalized state. The
+  * counts come from the same classification the Classificação sheet shows (T15): "Concluintes" are
+  * its ranked finishers, and a finish without a usable time (no start, or not after the start —
+  * Ruling 9) is counted apart in "Chegada sem tempo". */
+ function buildResumoSheet(
+   event: EventRow, races: RaceRow[], entries: EntryRow[], clsByRaceId: Map<string, RaceClassification>,
+   driftByRaceId: Map<string, number>, timing: EventTiming, generatedAtMs: number,
+ ): SheetModel {
+   const columns: ColumnDef[] = [
+     { header: '', width: 16 }, { header: '', width: 36 },
+     ...Array.from({ length: 8 }, (): ColumnDef => ({ header: '' })),
+@@ -154,21 +154,22 @@ function buildResumoSheet(
+     for (const r of classified) {
+       switch (r.timing.status) {
+         case 'finished': if (r.overall_pos === null) semTempo++; break;
+         case 'on_course': emProva++; break;
+         case 'dnf': dnf++; break;
+         case 'dns': dns++; break;
+         case 'dsq': dsq++; break;
+       }
+     }
+     const inscritos = cls ? classified.length : entries.filter(e => e.race_id === race.id).length;
+-    const pendencias = timing.issues.filter(i => i.race_id === race.id).length;
++    // Pending = warnings and errors, like every counter in the app; info issues are not pending.
++    const pendencias = timing.issues.filter(i => i.race_id === race.id && i.severity !== 'info').length;
+     const drift = driftByRaceId.get(race.id) ?? 0;
+     const finalizada = race.finalized_at
+       ? `Sim (${formatDateTimeBR(Date.parse(race.finalized_at))})${drift > 0 ? ` — difere do ao vivo (${plural(drift, 'inscrição', 'inscrições')})` : ''}`
+       : 'Não';
+     rows.push([race.name, inscritos, cls?.finishers ?? 0, semTempo, emProva, dnf, dns, dsq, pendencias, finalizada]);
+   }
+ 
+   return { name: 'Resumo', columns, rows, headerless: true };
+ }
+ 
+diff --git a/src/lib/api.test.ts b/src/lib/api.test.ts
+index eb5f04f..9896bf3 100644
+--- a/src/lib/api.test.ts
++++ b/src/lib/api.test.ts
+@@ -95,20 +95,31 @@ describe('api', () => {
+   });
+ 
+   // A-M2: only P0001 (our own pt-BR validation messages) and 42501 (our own pt-BR permission
+   // messages) reach the screen verbatim; every other Postgres/PostgREST error is English.
+   it('keeps the pt-BR message of a permission error (42501) verbatim', async () => {
+     answer.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
+     const err = await api.admin.listEvents().catch((e: unknown) => e);
+     expect(err).toMatchObject({ message: 'Acesso restrito à organização', code: '42501', status: 403 });
+   });
+ 
++  it.each([
++    'permission denied for function admin_list_events',
++    'permission denied for table events',
++    'must be owner of function tk_event',
++  ])('turns a 42501 raised by Postgres itself ("%s") into pt-BR', async (original) => {
++    answer.mockResolvedValue({ data: null, error: { message: original, code: '42501' }, status: 403 });
++    const err = await api.admin.listEvents().catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ApiError);
++    expect(err).toMatchObject({ message: 'Sem permissão para esta ação.', code: '42501', status: 403 });
++  });
++
+   it.each<[string, string, number, string, string]>([
+     ['statement timeout', '57014', 500, 'canceling statement due to statement timeout', 'O servidor demorou demais para responder. Tente de novo.'],
+     ['unique violation', '23505', 409, 'duplicate key value violates unique constraint "entries_event_id_bib_key"',
+       'Este registro já existe (valor repetido). Atualize a página e tente de novo.'],
+     ['foreign key violation', '23503', 409, 'insert or update on table "entry_members" violates foreign key constraint',
+       'Um registro ligado a este não existe mais ou ainda está em uso. Atualize a página e tente de novo.'],
+     ['invalid text representation', '22P02', 400, 'invalid input syntax for type uuid: "x"', 'Valor em formato inválido. Confira os campos e tente de novo.'],
+     ['invalid datetime', '22007', 400, 'invalid input syntax for type date: ""', 'Valor em formato inválido. Confira os campos e tente de novo.'],
+     ['not null violation', '23502', 400, 'null value in column "name" violates not-null constraint', 'Um campo obrigatório ficou vazio.'],
+     ['unknown function', 'PGRST202', 404, 'Could not find the function public.admin_x without parameters in the schema cache',
+diff --git a/src/lib/api.ts b/src/lib/api.ts
+index 03c6991..49ea9b0 100644
+--- a/src/lib/api.ts
++++ b/src/lib/api.ts
+@@ -58,21 +58,28 @@ const SERVER_ERRORS: Record<string, { message: string; network?: boolean }> = {
+   '40001': { message: 'O servidor estava ocupado com outra alteração. Tente de novo.' }, // serialization failure
+   PGRST202: { message: 'Esta versão do app não corresponde à do servidor. Recarregue a página.' }, // unknown function
+   PGRST002: { message: SERVER_DOWN_MESSAGE, network: true }, // schema cache still loading
+   PGRST301: { message: 'Sua sessão expirou. Entre novamente.' }, // JWT expired/invalid
+   PGRST303: { message: 'Sua sessão expirou. Entre novamente.' }, // JWT claims rejected
+ };
+ 
+ /** The error the app shows for a failed RPC answer (`status` = its HTTP status). */
+ function serverError(error: { message?: string; code?: string | null }, status: number | null): ApiError {
+   const code = error.code || null;
+-  if (code === 'P0001' || code === '42501') return new ApiError(error.message || 'Erro inesperado', code, status);
++  if (code === 'P0001') return new ApiError(error.message || 'Erro inesperado', code, status);
++  if (code === '42501') {
++    // Our own checks raise pt-BR texts ("Acesso restrito à organização"); Postgres's grant checks
++    // raise English ones ("permission denied for function …", "must be owner of …").
++    const message = error.message ?? '';
++    const english = message === '' || /^(permission denied|must be owner)/i.test(message);
++    return new ApiError(english ? 'Sem permissão para esta ação.' : message, code, status);
++  }
+   const known = code ? SERVER_ERRORS[code] : undefined;
+   if (known) return new ApiError(known.message, known.network ? 'network' : code, status);
+   // A gateway/5xx body (HTML or English text) says only that the server is not answering.
+   if (status !== null && status >= 500) return new ApiError(SERVER_DOWN_MESSAGE, 'network', status);
+   return new ApiError(code ? `Não foi possível concluir a operação (erro ${code}).` : GENERIC_MESSAGE, code, status);
+ }
+ 
+ function thrownToApiError(e: unknown): ApiError {
+   if (e instanceof ApiError) return e;
+   const name = typeof e === 'object' && e !== null ? (e as { name?: unknown }).name : undefined;
+diff --git a/src/lib/clock.test.ts b/src/lib/clock.test.ts
+index 1096516..6b1a790 100644
+--- a/src/lib/clock.test.ts
++++ b/src/lib/clock.test.ts
+@@ -40,20 +40,31 @@ describe('ClockSync', () => {
+     expect(c.offsetMs).toBe(5000);
+     // The OS stepped the device clock 3 s forward: from now on its offset is ~2000. The old
+     // minimum-RTT sample would otherwise keep winning (and shift every mark by 3 s) for ~200 s.
+     c.addSample({ t0: 10_000, t1: 10_400, server: 12_200 }); // rtt 400 -> offset 2000
+     expect(c.offsetMs).toBe(2000);
+     expect(c.rttMs).toBe(400);
+     // Samples within 1 s of the newest are kept and still compete on RTT.
+     c.addSample({ t0: 11_000, t1: 11_050, server: 13_425 }); // rtt 50 -> offset 2400
+     expect(c.offsetMs).toBe(2400);
+   });
++  it('keeps the good low-RTT samples when one slow, asymmetric sample arrives (not a clock step)', () => {
++    const c = new ClockSync({ now: () => 0 });
++    c.addSample({ t0: 1000, t1: 1100, server: 6050 }); // rtt 100 -> offset 5000 (true offset)
++    c.addSample({ t0: 2000, t1: 2200, server: 7100 }); // rtt 200 -> offset 5000
++    // Request 2.9 s, response 0.1 s on a congested link: rtt 3000, offset 6400 — its error (up to
++    // rtt/2 = 1.5 s) explains the 1.4 s gap, so its interval overlaps the good samples'.
++    c.addSample({ t0: 10_000, t1: 13_000, server: 17_900 });
++    expect(c.offsetMs).toBe(5000);
++    expect(c.rttMs).toBe(100);
++    expect(c.state()).toEqual({ offset_ms: 5000, rtt_ms: 100, synced_at: 0 });
++  });
+   it('treats a restored state older than maxInitialAgeMs as not synchronized, but still applies its offset (B2-m4)', () => {
+     const H = 3_600_000;
+     const stale = new ClockSync({ now: () => 13 * H, initial: { offset_ms: 700, rtt_ms: 80, synced_at: 0 }, maxInitialAgeMs: 12 * H });
+     expect(stale.synced).toBe(false);
+     expect(stale.offsetMs).toBe(700);
+     expect(stale.now()).toBe(13 * H + 700);
+     const fresh = new ClockSync({ now: () => 11 * H, initial: { offset_ms: 700, rtt_ms: 80, synced_at: 0 }, maxInitialAgeMs: 12 * H });
+     expect(fresh.synced).toBe(true);
+     // A real sample makes it synchronized again.
+     stale.addSample({ t0: 13 * H, t1: 13 * H + 100, server: 13 * H + 750 });
+diff --git a/src/lib/clock.ts b/src/lib/clock.ts
+index 495d2c1..267cd40 100644
+--- a/src/lib/clock.ts
++++ b/src/lib/clock.ts
+@@ -14,22 +14,23 @@ export interface ClockState {
+   rtt_ms: number;
+   synced_at: number;
+ }
+ 
+ interface EffectiveSample {
+   offset: number;
+   rtt: number;
+   addedAt: number;
+ }
+ 
+-/** A sample whose offset differs from the newest one by more than this is from before a device
+- * clock step (an OS/NTP/NITZ correction), not network jitter: it is dropped (B1-M11). */
++/** A sample whose offset differs from the newest one by more than this — beyond what both samples'
++ * round-trip uncertainty (rtt/2 each) can explain — is from before a device clock step (an
++ * OS/NTP/NITZ correction), not network jitter: it is dropped (B1-M11). */
+ const CLOCK_STEP_MS = 1_000;
+ 
+ export class ClockSync {
+   private readonly maxSamples: number;
+   private readonly nowFn: () => number;
+   private readonly initial: ClockState | null;
+   private readonly maxInitialAgeMs: number;
+   private samples: EffectiveSample[] = [];
+ 
+   /**
+@@ -42,22 +43,25 @@ export class ClockSync {
+     this.nowFn = opts?.now ?? Date.now;
+     this.initial = opts?.initial ?? null;
+     this.maxInitialAgeMs = opts?.maxInitialAgeMs ?? Infinity;
+   }
+ 
+   addSample(s: ClockSample): void {
+     const rtt = s.t1 - s.t0;
+     if (rtt < 0) return;
+     const offset = Math.round(s.server - (s.t0 + s.t1) / 2);
+     // After a device clock step every earlier sample is off by the size of the step; keeping them
+-    // would let a pre-step minimum-RTT sample win for up to `maxSamples` more samples.
+-    this.samples = this.samples.filter(x => Math.abs(x.offset - offset) <= CLOCK_STEP_MS);
++    // would let a pre-step minimum-RTT sample win for up to `maxSamples` more samples. A sample's
++    // offset is only known within ±rtt/2 (asymmetric request/response), so an earlier sample counts
++    // as pre-step only when the two offset intervals cannot overlap even with 1 s of slack — one
++    // slow, lopsided sample must never evict the good low-RTT ones.
++    this.samples = this.samples.filter(x => Math.abs(x.offset - offset) <= CLOCK_STEP_MS + (x.rtt + rtt) / 2);
+     this.samples.push({ offset, rtt, addedAt: this.nowFn() });
+     if (this.samples.length > this.maxSamples) this.samples.shift();
+   }
+ 
+   private effective(): EffectiveSample | null {
+     if (this.samples.length === 0) {
+       if (!this.initial) return null;
+       return { offset: this.initial.offset_ms, rtt: this.initial.rtt_ms, addedAt: this.initial.synced_at };
+     }
+     return this.samples.reduce((min, s) => (s.rtt < min.rtt ? s : min));

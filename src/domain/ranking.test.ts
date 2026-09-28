@@ -86,6 +86,23 @@ describe('classifyRace', () => {
     expect(ghostRow.sex_pos).toBeNull();
     expect(withGhost.finishers).toBe(9);
   });
+  it('B1-M4: a finish whose total is zero or negative (start typed after the finish) is not ranked, let alone 1st', () => {
+    const negAthlete = makeAthlete({ id: 'neg', sex: 'M', birth_date: null, name: 'NEG' });
+    const zeroAthlete = makeAthlete({ id: 'zero', sex: 'M', birth_date: null, name: 'ZERO' });
+    const negEntry = makeEntry({ id: 'e-neg', bib: '92', members: [{ athlete_id: 'neg', position: 0, legs: [0] }] });
+    const zeroEntry = makeEntry({ id: 'e-zero', bib: '93', members: [{ athlete_id: 'zero', position: 0, legs: [0] }] });
+    const extraAthletes = new Map(athletes).set('neg', negAthlete).set('zero', zeroAthlete);
+    const extraTimings = new Map(timings)
+      .set('e-neg', timing('e-neg', -5 * MIN, 'finished'))
+      .set('e-zero', timing('e-zero', 0, 'finished'));
+
+    const c = classifyRace(race, [...entries, negEntry, zeroEntry], extraTimings, extraAthletes, ev);
+
+    expect(c.rows.map(idOf)).toEqual(['m1', 'm2', 'm3', 'f1', 'f2', 'f3', 'f4', 'f5', 'm4', 'neg', 'zero', 'm5', 'f6']);
+    expect(c.rows.find(r => idOf(r) === 'neg')!.overall_pos).toBeNull();
+    expect(c.finishers).toBe(9);
+    expect(c.podiums.flatMap(g => g.places.map(p => idOf(p.ranked)))).not.toContain('neg');
+  });
 });
 
 describe('compareGroupOrder (exported for reuse by public.PublicEventPage\'s finalized-race podium reconstruction)', () => {

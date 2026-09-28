@@ -1,4 +1,4 @@
-import type { EntryStatus, MarkRow, TimekeeperRow } from '../lib/types';
+import type { EntryStatus, MarkRow, RaceConfig, TimekeeperRow } from '../lib/types';
 import type { Crossing, Issue, IssueType, TimingStatus } from './consolidation';
 
 /**
@@ -42,6 +42,7 @@ export const ISSUE_LABEL: Record<IssueType, string> = {
   unassigned: 'Sem atleta',
   chosen_mark_discarded: 'Escolha descartada',
   not_finished: 'Em prova',
+  status_with_crossings: 'Status com passagens',
 };
 
 /** The name of the timekeeper `id` resolves to, or undefined for `null`/an unknown id. */
@@ -54,8 +55,14 @@ function timekeeperName(id: string | null, tkById: Map<string, TimekeeperRow>): 
  * Tempos sheet, §11): the system median, the configured reference timekeeper, a specific mark the
  * organizer chose (by timekeeper name, or "Organização" for an organization mark), a manually
  * typed time, or '' when there is no official time at all.
+ *
+ * Pass the race's `config` so the reference timekeeper is named from `reference_timekeeper_id`
+ * (T15); without it the candidate with the official time stands in, which names the wrong person
+ * when another timekeeper marked the very same instant.
  */
-export function crossingSourceLabel(c: Crossing, tkById: Map<string, TimekeeperRow>, marks: MarkRow[]): string {
+export function crossingSourceLabel(
+  c: Crossing, tkById: Map<string, TimekeeperRow>, marks: MarkRow[], config?: Pick<RaceConfig, 'reference_timekeeper_id'>,
+): string {
   if (c.official_source === null) return '';
   if (c.official_source === 'manual') return 'Manual';
   if (c.official_source === 'mark') {
@@ -63,8 +70,8 @@ export function crossingSourceLabel(c: Crossing, tkById: Map<string, TimekeeperR
     return `Marcação de ${timekeeperName(mark?.timekeeper_id ?? null, tkById) ?? 'Organização'}`;
   }
   if (c.official_source === 'reference') {
-    const candidate = c.candidates.find(x => x.ts_ms === c.official_ms);
-    return `Cronometrista de referência (${timekeeperName(candidate?.timekeeper_id ?? null, tkById) ?? 'Cronometrista'})`;
+    const referenceId = config?.reference_timekeeper_id ?? c.candidates.find(x => x.ts_ms === c.official_ms)?.timekeeper_id ?? null;
+    return `Cronometrista de referência (${timekeeperName(referenceId, tkById) ?? 'Cronometrista'})`;
   }
   return 'Sistema (mediana)'; // official_source === 'median'
 }

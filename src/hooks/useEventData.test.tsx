@@ -331,3 +331,56 @@ describe('useEventData', () => {
     expect(live).not.toHaveBeenCalled();
   });
 });
+
+describe('useEventData: stale data on live tabs (B2-m8)', () => {
+  it('reports when the data it shows is more than 10 s old because the polls fail, and clears once one succeeds', async () => {
+    getEvent.mockResolvedValue(makeAgg());
+    live.mockRejectedValue(new Error('Sem conexão com o servidor'));
+    const { result } = renderEventData(true);
+    await settle();
+    const loadedAt = Date.now() - 5;
+    expect(result.current.staleSince).toBeNull();
+
+    await advance(9_000);
+    expect(result.current.staleSince).toBeNull();
+    await advance(3_000);
+    expect(result.current.staleSince).not.toBeNull();
+    expect(Math.abs((result.current.staleSince as number) - loadedAt)).toBeLessThanOrEqual(5);
+
+    live.mockResolvedValue(delta());
+    await advance(2_000);
+    await settle();
+    expect(result.current.staleSince).toBeNull();
+  });
+
+  it('keeps quiet while the polls succeed, and on idle tabs', async () => {
+    getEvent.mockResolvedValue(makeAgg());
+    live.mockResolvedValue(delta());
+    const { result, rerender } = renderEventData(true);
+    await settle();
+    await advance(30_000);
+    expect(result.current.staleSince).toBeNull();
+
+    live.mockRejectedValue(new Error('Sem conexão com o servidor'));
+    rerender({ isLive: false });
+    await advance(60_000);
+    expect(result.current.staleSince).toBeNull();
+  });
+
+  it('gives the polls a moment after the page becomes visible again before warning', async () => {
+    getEvent.mockResolvedValue(makeAgg());
+    live.mockResolvedValue(delta());
+    const { result } = renderEventData(true);
+    await settle();
+    hidden = true;
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    await advance(60_000);
+    hidden = false;
+    live.mockImplementation(() => new Promise<LiveDelta>(() => {})); // slow network: no answer yet
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    await advance(2_000);
+    expect(result.current.staleSince).toBeNull();
+    await advance(10_000);
+    expect(result.current.staleSince).not.toBeNull();
+  });
+});

@@ -72,7 +72,11 @@ export function excelDuration(ms: number): number { return ms / 86_400_000; }
 const nf1 = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 export function formatPace(timeMs: number, distanceM: number, modality: Modality): string {
   if (!distanceM || distanceM <= 0 || !timeMs || timeMs <= 0) return '';
-  const minSec = (sec: number) => `${Math.floor(sec / 60)}:${pad(Math.round(sec % 60) === 60 ? 59 : Math.round(sec % 60))}`;
+  // Rounded to the nearest whole second first, so 4:59.6 carries into 5:00 (B1-M9).
+  const minSec = (sec: number) => {
+    const t = Math.round(sec);
+    return `${Math.floor(t / 60)}:${pad(t % 60)}`;
+  };
   if (modality === 'run') return `${minSec(timeMs / 1000 / (distanceM / 1000))} /km`;
   if (modality === 'swim') return `${minSec(timeMs / 1000 / (distanceM / 100))} /100m`;
   if (modality === 'bike') return `${nf1.format(distanceM / 1000 / (timeMs / 3_600_000))} km/h`;

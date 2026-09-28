@@ -14,15 +14,18 @@ export interface AthleteStats {
 }
 
 /** One leg the athlete personally ran, with a known time and distance (a "qualifying" leg for
- * records/pace/km/evolution purposes), carrying along the event it happened at. */
+ * records/pace/km/evolution purposes), carrying along the event it happened at. A disqualified
+ * result never qualifies, nor does a leg time that is zero or negative (a finalized `order` error)
+ * — B1-M3. */
 interface OwnLeg { modality: Modality; distance_m: number; time_ms: number; label: string; date: string; event_name: string }
 
 function ownLegs(athleteId: string, results: ResultRow[]): OwnLeg[] {
   const legs: OwnLeg[] = [];
   for (const r of results) {
+    if (r.status === 'dsq') continue;
     for (const leg of r.data.legs) {
       if (leg.athlete_id !== athleteId) continue;
-      if (leg.time_ms == null || leg.distance_m == null) continue;
+      if (leg.time_ms == null || leg.time_ms <= 0 || leg.distance_m == null) continue;
       legs.push({ modality: leg.modality, distance_m: leg.distance_m, time_ms: leg.time_ms, label: leg.label, date: r.data.event.date, event_name: r.data.event.name });
     }
   }

@@ -47,7 +47,9 @@ export function suggestLeg(args: { entry: EntryRow; race: RaceRow; marks: MarkRo
   }
   if (closest !== null) return suggest(closest, 'same_crossing');
 
-  const memberLegs = athleteId ? (entry.members.find(m => m.athlete_id === athleteId)?.legs ?? []) : [];
+  // Only legs the race still has: stored member legs can be stale after a format change (B1-I2).
+  const memberLegs = (athleteId ? (entry.members.find(m => m.athlete_id === athleteId)?.legs ?? []) : [])
+    .filter(k => k >= 0 && k < race.legs.length);
   const candidateLegs = memberLegs.length > 0 ? [...memberLegs].sort((a, b) => a - b) : allLegs;
   let last = -1;
   for (const [k, at] of crossingAt) if (at < tsMs - windowMs && k > last) last = k;

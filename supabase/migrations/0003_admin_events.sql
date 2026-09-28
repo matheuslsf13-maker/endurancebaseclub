@@ -14,19 +14,29 @@ language sql stable security definer set search_path = public, extensions, pg_te
 $$;
 
 -- 2. next_unique_public_slug: p_base with -2, -3, ... appended until no other event has it.
+--    A-M5: every candidate stays within the 80 characters a public address may have (the base is
+--    trimmed to make room for the suffix, never leaving a trailing '-').
 create or replace function public.next_unique_public_slug(p_base text, p_exclude_id uuid default null) returns text
 language plpgsql stable security definer set search_path = public, extensions, pg_temp as $$
-declare v_candidate text := p_base; v_n int := 1;
+declare v_base text := rtrim(left(p_base, 80), '-'); v_candidate text := rtrim(left(p_base, 80), '-'); v_n int := 1;
 begin
   while exists (
     select 1 from public.events e
     where e.public_slug = v_candidate and (p_exclude_id is null or e.id <> p_exclude_id)
   ) loop
     v_n := v_n + 1;
-    v_candidate := p_base || '-' || v_n;
+    v_candidate := rtrim(left(v_base, 80 - length(v_n::text) - 1), '-') || '-' || v_n;
   end loop;
   return v_candidate;
 end $$;
+
+-- 2a. event_slug: the public address generated for an event -- the slugified name, capped at 60
+--     characters (A-M5: a long name must never make creation fail on an address the organizer
+--     never typed), followed by the date; just the date when the name has no letters or digits.
+create or replace function public.event_slug(p_name text, p_date date) returns text
+language sql stable set search_path = public, extensions, pg_temp as $$
+  select concat_ws('-', nullif(rtrim(left(public.slugify(p_name), 60), '-'), ''), to_char(p_date, 'YYYY-MM-DD'))
+$$;
 
 -- 3. validate_race_config: raises P0001 on the first invalid field of an already-merged RaceConfig.
 create or replace function public.validate_race_config(p_config jsonb, p_event_id uuid) returns void
@@ -107,7 +117,9 @@ begin
     v_first := false;
   end loop;
 
-  if (p_config ? 'reference_timekeeper_id') and (p_config->>'reference_timekeeper_id') is not null then
+  -- A-I1: the reference timekeeper only matters (and is only validated) when the time source uses
+  -- it; a stale id left behind after switching back to the median never blocks a save.
+  if (p_config->>'time_source') = 'reference' and (p_config->>'reference_timekeeper_id') is not null then
     v_ref_tk := (p_config->>'reference_timekeeper_id')::uuid;
     if not exists (select 1 from public.timekeepers t where t.id = v_ref_tk and t.event_id = p_event_id) then
       raise exception 'Cronometrista de referência inválido' using errcode = 'P0001';
@@ -216,8 +228,9 @@ begin
       join public.entries en on en.id = m.entry_id
       where en.event_id = ev.id
     ), '[]'::jsonb),
+    -- A-M3: the secret never leaves the server after tk_register (not even to organizers).
     'timekeepers', coalesce((
-      select jsonb_agg(to_jsonb(t) || jsonb_build_object(
+      select jsonb_agg((to_jsonb(t) - 'secret') || jsonb_build_object(
         'marks_count', (select count(*) from public.marks mk where mk.timekeeper_id = t.id and mk.event_id = ev.id)
       ))
       from public.timekeepers t where t.event_id = ev.id
@@ -274,7 +287,13 @@ begin
   end if;
 
   if p_event ? 'date' then
-    v_date := (p_event->>'date')::date;
+    -- C-Minor-2: an empty or malformed date is the same pt-BR validation error as a missing one,
+    -- never a raw cast error ("invalid input syntax for type date").
+    begin
+      v_date := nullif(btrim(p_event->>'date'), '')::date;
+    exception when others then
+      v_date := null;
+    end;
   elsif not is_insert then
     v_date := v_existing.date;
   end if;
@@ -343,7 +362,7 @@ begin
   end if;
 
   if is_insert then
-    v_slug := public.next_unique_public_slug(public.slugify(v_name || '-' || v_date::text));
+    v_slug := public.next_unique_public_slug(public.event_slug(v_name, v_date));
   else
     if p_event ? 'public_slug' then
       v_slug := nullif(btrim(p_event->>'public_slug'), '');
@@ -351,7 +370,7 @@ begin
       v_slug := v_existing.public_slug;
     end if;
     if v_slug is null and v_is_public then
-      v_slug := public.next_unique_public_slug(public.slugify(v_name || '-' || v_date::text), v_id);
+      v_slug := public.next_unique_public_slug(public.event_slug(v_name, v_date), v_id);
     end if;
   end if;
 
@@ -421,8 +440,14 @@ begin
   returning id into v_new_id;
 
   for r in select * from public.races where event_id = p_event_id order by position, name loop
+    -- A-I1: the copy has no timekeepers, so it must not keep the source event's reference
+    -- timekeeper (a "reference" race falls back to the median until one is chosen again).
     insert into public.races (event_id, name, position, team_size, legs, config, finalized_at)
-    values (v_new_id, r.name, r.position, r.team_size, r.legs, r.config, null)
+    values (v_new_id, r.name, r.position, r.team_size, r.legs,
+            r.config || jsonb_build_object(
+              'reference_timekeeper_id', null,
+              'time_source', coalesce(nullif(r.config->>'time_source', 'reference'), 'median')),
+            null)
     returning id into v_new_race_id;
 
     insert into public.waves (race_id, name, position, start_at)
@@ -466,6 +491,9 @@ declare
   v_wave_id uuid;
   v_keep_ids uuid[] := '{}';
   v_process_waves boolean;
+  v_gone_name text;
+  v_gone_started boolean;
+  v_gone_entries bigint;
 begin
   perform public.assert_organizer();
 
@@ -480,6 +508,10 @@ begin
     v_race_id := (p_race->>'id')::uuid;
     select * into v_existing from public.races where id = v_race_id;
     if not found then raise exception 'Prova não encontrada' using errcode = 'P0001'; end if;
+    -- A-M8: a race never changes event (its entries, marks and results stay in the old one).
+    if v_existing.event_id <> v_event_id then
+      raise exception 'Não é possível mover a prova para outro evento' using errcode = 'P0001';
+    end if;
   end if;
 
   v_name := btrim(p_race->>'name');
@@ -555,6 +587,19 @@ begin
     ) then
       raise exception 'Não é possível alterar pernas ou tamanho da equipe depois que há marcações' using errcode = 'P0001';
     end if;
+
+    -- B1-I2: every entry's members carry the legs they cover (materialized at entry creation).
+    -- With entries, the team size cannot change, nor can a team race's leg count (nobody would
+    -- cover the new legs); an individual race's leg count may change -- its lone members are
+    -- rewritten to cover every leg right after the update below.
+    if exists (select 1 from public.entries en where en.race_id = v_race_id) then
+      if v_team_size <> v_existing.team_size then
+        raise exception 'Não é possível alterar o tamanho da equipe com inscrições' using errcode = 'P0001';
+      end if;
+      if v_team_size > 1 and jsonb_array_length(v_legs) <> jsonb_array_length(v_existing.legs) then
+        raise exception 'Não é possível alterar o número de pernas de uma prova por equipes com inscrições' using errcode = 'P0001';
+      end if;
+    end if;
   end if;
 
   if is_insert then
@@ -567,6 +612,16 @@ begin
       legs = v_legs, config = v_config
     where id = v_race_id
     returning * into ev_race;
+
+    -- B1-I2: an individual race's lone member always covers legs 0..N-1 (only rows that differ
+    -- are touched, so an unchanged save does not bump the event version).
+    if v_team_size = 1 then
+      update public.entry_members m
+         set legs = (select array_agg(g order by g) from generate_series(0, jsonb_array_length(v_legs) - 1) as g)
+        from public.entries en
+       where en.id = m.entry_id and en.race_id = v_race_id
+         and m.legs is distinct from (select array_agg(g order by g) from generate_series(0, jsonb_array_length(v_legs) - 1) as g);
+    end if;
   end if;
 
   -- Ruling 12: on UPDATE, an ABSENT "waves" key -- or an explicit JSON null -- leaves existing
@@ -579,10 +634,15 @@ begin
 
   if v_process_waves then
     -- Ruling 16: admin_save_race never changes start_at of an existing wave -- the upsert sets
-    -- only race_id/name/position, and a newly inserted wave always starts with start_at null.
+    -- only name/position, and a newly inserted wave always starts with start_at null.
     -- Start times change exclusively via admin_set_wave_start.
     for v_wave in select el from jsonb_array_elements(coalesce(p_race->'waves', '[]'::jsonb)) as t(el) loop
       v_wave_id := coalesce(nullif(v_wave->>'id', '')::uuid, gen_random_uuid());
+      -- A-M8: an id belonging to another race's wave is refused -- never re-parented (with its
+      -- start_at) into this race; the conflict update below is also scoped to this race.
+      if exists (select 1 from public.waves w where w.id = v_wave_id and w.race_id <> v_race_id) then
+        raise exception 'Onda inválida' using errcode = 'P0001';
+      end if;
       insert into public.waves (id, race_id, name, position)
       values (
         v_wave_id, v_race_id,
@@ -590,9 +650,29 @@ begin
         coalesce((v_wave->>'position')::int, 0)
       )
       on conflict (id) do update set
-        race_id = excluded.race_id, name = excluded.name, position = excluded.position;
+        name = excluded.name, position = excluded.position
+      where public.waves.race_id = v_race_id;
       v_keep_ids := v_keep_ids || v_wave_id;
     end loop;
+
+    -- C-I3: a wave left out of the list is deleted -- unless it already started or still has
+    -- entries: its recorded start would vanish and its entries would silently move to the first
+    -- wave (every leg-1 time, total and position changing without a word). Refuse, naming it.
+    select w.name, w.start_at is not null, (select count(*) from public.entries en where en.wave_id = w.id)
+      into v_gone_name, v_gone_started, v_gone_entries
+    from public.waves w
+    where w.race_id = v_race_id and not (w.id = any(v_keep_ids))
+      and (w.start_at is not null or exists (select 1 from public.entries en where en.wave_id = w.id))
+    order by w.position, w.name
+    limit 1;
+    if found then
+      if v_gone_started then
+        raise exception 'Não é possível remover a onda "%" porque ela já largou', v_gone_name using errcode = 'P0001';
+      end if;
+      raise exception 'Não é possível remover a onda "%" porque ela tem %', v_gone_name,
+        case when v_gone_entries = 1 then '1 inscrição' else v_gone_entries || ' inscrições' end
+        using errcode = 'P0001';
+    end if;
 
     delete from public.waves where race_id = v_race_id and not (id = any(v_keep_ids));
 

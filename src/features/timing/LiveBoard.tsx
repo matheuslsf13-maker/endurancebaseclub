@@ -5,6 +5,7 @@ import { Badge, Button, Card, EmptyState, Table } from '../../components/ui';
 import { useToast } from '../../components/ui/Toast';
 import { formatClock, formatDuration } from '../../lib/format';
 import { api } from '../../lib/api';
+import { UNASSIGNED_ISSUE_AFTER_MS } from '../../domain/consolidation';
 import { entryDisplayName, legAthleteId } from '../../domain/eventModel';
 import type { EventIndex } from '../../domain/eventModel';
 import { planBibAssignment } from '../../domain/suggestLeg';
@@ -70,8 +71,32 @@ interface UnassignedRowProps {
 
 /** "Sem atleta" inline assignment: types a bib, `planBibAssignment` resolves it and suggests the
  * leg (Ruling 2 — no local `resolveBib`/`suggestLeg` copy); no athleteId is ever passed here
- * (Ruling 10 only applies to the "Em prova" list, but there is none to derive one from anyway). */
+ * (Ruling 10 only applies to the "Em prova" list, but there is none to derive one from anyway).
+ *
+ * B2-I3: a timekeeper's mark younger than the unassigned-issue threshold (60 s, the phone's burst
+ * window) is still being identified on the phone, first in first out — assigning it here would
+ * shift every bib the timekeeper types next onto the wrong mark. It is shown "com o
+ * cronometrista" without the form until it is that old (the same moment it becomes a pendência). */
 function UnassignedRow({ mark }: UnassignedRowProps) {
+  const { index, clock } = useEventContext();
+  const tick = useNow(1_000);
+  const ageMs = Math.max(0, tick + (clock.offsetMs ?? 0) - Date.parse(mark.ts));
+  const withTimekeeper = mark.timekeeper_id !== null && ageMs <= UNASSIGNED_ISSUE_AFTER_MS;
+
+  return (
+    <li data-testid="unassigned-mark" className="flex flex-wrap items-center gap-2 border-t border-border py-2 first:border-t-0">
+      <span className="tabular">{formatClock(Date.parse(mark.ts), { tenths: true })}</span>
+      <span className="text-muted">{timekeeperLabel(mark.timekeeper_id, index)}</span>
+      {withTimekeeper ? (
+        <span className="tabular text-sm text-muted">com o cronometrista · há {Math.floor(ageMs / 1000)} s</span>
+      ) : (
+        <UnassignedAssignForm mark={mark} />
+      )}
+    </li>
+  );
+}
+
+function UnassignedAssignForm({ mark }: UnassignedRowProps) {
   const { agg, index, refresh } = useEventContext();
   const toast = useToast();
   const [error, setError] = useState<string | null>(null);
@@ -112,9 +137,7 @@ function UnassignedRow({ mark }: UnassignedRowProps) {
   }
 
   return (
-    <li className="flex flex-wrap items-center gap-2 border-t border-border py-2 first:border-t-0">
-      <span className="tabular">{formatClock(Date.parse(mark.ts), { tenths: true })}</span>
-      <span className="text-muted">{timekeeperLabel(mark.timekeeper_id, index)}</span>
+    <>
       <form onSubmit={handleSubmit} className="flex items-center gap-2">
         <label className="sr-only" htmlFor={`live-assign-bib-${mark.id}`}>
           Nº de peito
@@ -137,7 +160,7 @@ function UnassignedRow({ mark }: UnassignedRowProps) {
           {error}
         </p>
       )}
-    </li>
+    </>
   );
 }
 

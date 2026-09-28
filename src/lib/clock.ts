@@ -21,22 +21,40 @@ interface EffectiveSample {
   addedAt: number;
 }
 
+/** A sample whose offset differs from the newest one by more than this — beyond what both samples'
+ * round-trip uncertainty (rtt/2 each) can explain — is from before a device clock step (an
+ * OS/NTP/NITZ correction), not network jitter: it is dropped (B1-M11). */
+const CLOCK_STEP_MS = 1_000;
+
 export class ClockSync {
   private readonly maxSamples: number;
   private readonly nowFn: () => number;
   private readonly initial: ClockState | null;
-  private readonly samples: EffectiveSample[] = [];
+  private readonly maxInitialAgeMs: number;
+  private samples: EffectiveSample[] = [];
 
-  constructor(opts?: { maxSamples?: number; now?: () => number; initial?: ClockState | null }) {
+  /**
+   * `initial`: the state saved by an earlier sync, used until the first sample arrives. Once it is
+   * older than `maxInitialAgeMs` its offset is still applied (better than the raw device clock),
+   * but the clock no longer reports itself `synced`.
+   */
+  constructor(opts?: { maxSamples?: number; now?: () => number; initial?: ClockState | null; maxInitialAgeMs?: number }) {
     this.maxSamples = opts?.maxSamples ?? 10;
     this.nowFn = opts?.now ?? Date.now;
     this.initial = opts?.initial ?? null;
+    this.maxInitialAgeMs = opts?.maxInitialAgeMs ?? Infinity;
   }
 
   addSample(s: ClockSample): void {
     const rtt = s.t1 - s.t0;
     if (rtt < 0) return;
     const offset = Math.round(s.server - (s.t0 + s.t1) / 2);
+    // After a device clock step every earlier sample is off by the size of the step; keeping them
+    // would let a pre-step minimum-RTT sample win for up to `maxSamples` more samples. A sample's
+    // offset is only known within ±rtt/2 (asymmetric request/response), so an earlier sample counts
+    // as pre-step only when the two offset intervals cannot overlap even with 1 s of slack — one
+    // slow, lopsided sample must never evict the good low-RTT ones.
+    this.samples = this.samples.filter(x => Math.abs(x.offset - offset) <= CLOCK_STEP_MS + (x.rtt + rtt) / 2);
     this.samples.push({ offset, rtt, addedAt: this.nowFn() });
     if (this.samples.length > this.maxSamples) this.samples.shift();
   }
@@ -58,7 +76,8 @@ export class ClockSync {
   }
 
   get synced(): boolean {
-    return this.effective() !== null;
+    if (this.samples.length > 0) return true;
+    return this.initial !== null && this.nowFn() - this.initial.synced_at <= this.maxInitialAgeMs;
   }
 
   get syncedAt(): number | null {

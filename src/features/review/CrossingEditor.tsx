@@ -1,12 +1,18 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { Badge, Button, Input, Modal, Select, Table, useToast } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import { formatClock, formatDuration, parseClockInput } from '../../lib/format';
 import { computeEntryTiming } from '../../domain/consolidation';
-import type { ResolutionMode, ResolutionRow, MarkRow } from '../../lib/types';
+import type { Leg, ResolutionMode, ResolutionRow, MarkRow } from '../../lib/types';
 import { entryDisplayName, entryWave, legAthleteId } from '../../domain/eventModel';
 import { planBibAssignment } from '../../domain/suggestLeg';
 import { useEventContext } from '../events/EventContext';
+import { formatSignedSecondsBR } from './reviewFormat';
+
+/** `perna 2/2 (Corrida)` — the destination named in the "Mover" toast. */
+function legText(legs: Leg[], k: number): string {
+  return `perna ${k + 1}/${legs.length} (${legs[k]?.label ?? ''})`;
+}
 
 export interface CrossingEditorProps {
   entryId: string;
@@ -96,10 +102,18 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
     }
   }
 
+  /**
+   * "Mover" (B2-m10): with a bib, to that entry — on the leg picked in "Mover para" when the
+   * organizer picked one, else on the leg the crossing times suggest; without a bib, to the picked
+   * leg of this entry. The toast always says where the mark went: the tool that fixes misfiles
+   * must never create a silent one.
+   */
   async function moveMark(mark: MarkRow) {
     const bib = (moveBib[mark.id] ?? '').trim();
+    const chosenLeg = moveLeg[mark.id];
     setBusyMarkId(mark.id);
     try {
+      let destination: string;
       if (bib) {
         const plan = planBibAssignment({
           entries: agg.entries,
@@ -113,13 +127,24 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
           toast.show({ message: plan.error, tone: 'danger' });
           return;
         }
-        await api.admin.updateMark(mark.id, { entry_id: plan.entry.id, leg_index: plan.suggestion.leg_index });
-        if (plan.warning) toast.show({ message: plan.warning, tone: 'warning' });
+        const target = chosenLeg ?? plan.suggestion.leg_index;
+        if (target >= plan.race.legs.length) {
+          toast.show({ message: `A prova do Nº ${plan.entry.bib} não tem a perna ${target + 1}`, tone: 'danger' });
+          return;
+        }
+        await api.admin.updateMark(mark.id, { entry_id: plan.entry.id, leg_index: target });
+        destination = `Nº ${plan.entry.bib} · ${legText(plan.race.legs, target)}`;
+        // The DNS/DSQ warning concerns the entry; the already-finished one only the suggested leg.
+        if (plan.warning && (chosenLeg === undefined || plan.suggestion.warning === null)) {
+          toast.show({ message: plan.warning, tone: 'warning' });
+        }
       } else {
-        const target = moveLeg[mark.id] ?? legIndex;
-        if (target === legIndex) return;
+        const target = chosenLeg ?? legIndex;
+        if (target === legIndex || !entry || !race) return;
         await api.admin.updateMark(mark.id, { leg_index: target });
+        destination = `Nº ${entry.bib} · ${legText(race.legs, target)}`;
       }
+      toast.show({ message: `Marcação movida para ${destination}`, tone: 'success' });
       await refresh();
     } catch (err) {
       toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
@@ -174,7 +199,8 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
 
   const leg = race.legs[legIndex];
   const athleteId = legAthleteId(entry, legIndex);
-  const athleteName = athleteId ? index.athletesById.get(athleteId)?.name : undefined;
+  // An individual entry is named after its athlete already: no "Duda · Duda" (T28 minor).
+  const athleteName = race.team_size > 1 && athleteId ? index.athletesById.get(athleteId)?.name : undefined;
   const systemLabel = crossing.system_source === 'reference' ? 'Tempo do sistema (cronometrista de referência)' : 'Tempo do sistema (mediana)';
   const systemTime = crossing.system_ms !== null ? formatClock(crossing.system_ms, { millis: true }) : '—';
 
@@ -183,7 +209,9 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
       open
       onClose={onClose}
       title={`Nº ${entry.bib} · Perna ${legIndex + 1} (${leg.label})`}
-      size="lg"
+      // The widest dialog, with each mark's actions on a line of their own below it: "Mover para"
+      // is reachable at 1280 px without scrolling the table sideways (T28 minor).
+      size="xl"
       footer={
         <>
           {resolution && (
@@ -210,51 +238,54 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
               <th className="py-1 pr-2">Hora</th>
               <th className="py-1 pr-2">Δ mediana</th>
               <th className="py-1 pr-2">Situação</th>
-              <th className="py-1 pr-2">Ações</th>
             </tr>
           </thead>
           <tbody>
             {legMarks.map((m) => {
               const ts = Date.parse(m.ts);
-              const delta = crossing.median_ms !== null ? (ts - crossing.median_ms) / 1000 : null;
+              const delta = crossing.median_ms !== null ? ts - crossing.median_ms : null;
               const isDuplicate = crossing.duplicates.includes(m.id);
               return (
-                <tr key={m.id} className="border-t border-border align-top">
-                  <td className="py-2 pr-2 whitespace-nowrap">{authorOf(m.timekeeper_id)}</td>
-                  <td className="py-2 pr-2 whitespace-nowrap tabular">{formatClock(ts, { millis: true })}</td>
-                  <td className="py-2 pr-2 whitespace-nowrap tabular">
-                    {delta !== null ? `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} s` : '—'}
-                  </td>
-                  <td className="py-2 pr-2">
-                    <div className="flex flex-wrap gap-1">
-                      {isDuplicate && <Badge tone="info">Duplicada</Badge>}
-                      {m.discarded && <Badge tone="danger">Descartada</Badge>}
-                    </div>
-                  </td>
-                  <td className="py-2 pr-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button size="sm" variant="secondary" loading={busyMarkId === m.id} onClick={() => void toggleDiscard(m)}>
-                        {m.discarded ? 'Restaurar' : 'Descartar'}
-                      </Button>
-                      <Select
-                        label="Mover para"
-                        className="w-auto"
-                        value={String(moveLeg[m.id] ?? legIndex)}
-                        onChange={(e) => setMoveLeg((s) => ({ ...s, [m.id]: Number(e.target.value) }))}
-                        options={race.legs.map((l, i) => ({ value: String(i), label: `Perna ${i + 1} (${l.label})` }))}
-                      />
-                      <Input
-                        label="Nº (opcional)"
-                        className="w-20"
-                        value={moveBib[m.id] ?? ''}
-                        onChange={(e) => setMoveBib((s) => ({ ...s, [m.id]: e.target.value }))}
-                      />
-                      <Button size="sm" variant="secondary" loading={busyMarkId === m.id} onClick={() => void moveMark(m)}>
-                        Mover
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
+                <Fragment key={m.id}>
+                  <tr className="border-t border-border align-top">
+                    <td className="py-2 pr-2 whitespace-nowrap">{authorOf(m.timekeeper_id)}</td>
+                    <td className="py-2 pr-2 whitespace-nowrap tabular">{formatClock(ts, { millis: true })}</td>
+                    <td className="py-2 pr-2 whitespace-nowrap tabular">
+                      {delta !== null ? `${formatSignedSecondsBR(delta)} s` : '—'}
+                    </td>
+                    <td className="py-2 pr-2">
+                      <div className="flex flex-wrap gap-1">
+                        {isDuplicate && <Badge tone="info">Duplicada</Badge>}
+                        {m.discarded && <Badge tone="danger">Descartada</Badge>}
+                      </div>
+                    </td>
+                  </tr>
+                  <tr className="align-top">
+                    <td colSpan={4} className="pb-3 pr-2">
+                      <div className="flex flex-wrap items-end gap-2">
+                        <Button size="sm" variant="secondary" loading={busyMarkId === m.id} onClick={() => void toggleDiscard(m)}>
+                          {m.discarded ? 'Restaurar' : 'Descartar'}
+                        </Button>
+                        <Select
+                          label="Mover para"
+                          className="w-auto"
+                          value={String(moveLeg[m.id] ?? legIndex)}
+                          onChange={(e) => setMoveLeg((s) => ({ ...s, [m.id]: Number(e.target.value) }))}
+                          options={race.legs.map((l, i) => ({ value: String(i), label: `Perna ${i + 1} (${l.label})` }))}
+                        />
+                        <Input
+                          label="Nº (opcional)"
+                          className="w-20"
+                          value={moveBib[m.id] ?? ''}
+                          onChange={(e) => setMoveBib((s) => ({ ...s, [m.id]: e.target.value }))}
+                        />
+                        <Button size="sm" variant="secondary" loading={busyMarkId === m.id} onClick={() => void moveMark(m)}>
+                          Mover
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                </Fragment>
               );
             })}
           </tbody>
@@ -264,7 +295,7 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
           <legend className="text-sm font-medium">Decisão</legend>
           {markMissing && (
             <p className="rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-              A marcação escolhida foi descartada — escolha outra decisão.
+              A marcação escolhida foi descartada ou movida — escolha outra decisão.
             </p>
           )}
           <label className="flex min-h-11 items-center gap-2">

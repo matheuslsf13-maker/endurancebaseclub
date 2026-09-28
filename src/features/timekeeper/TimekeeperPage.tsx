@@ -2,10 +2,10 @@
 // button stamps the synced instant; marks are identified by bib or by tapping the entry in
 // "Em prova". Everything a timekeeper does is kept on the device first (useTimekeeper).
 
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { useParams } from 'react-router';
-import { Button, Input, Modal, Spinner, useToast } from '../../components/ui';
+import { Button, Input, Modal, Spinner } from '../../components/ui';
 import { Logo } from '../../components/Logo';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import type { ClockSync } from '../../lib/clock';
@@ -15,6 +15,7 @@ import type { MarkRow } from '../../lib/types';
 import { legAthleteId } from '../../domain/eventModel';
 import { burstHead, currentBurst, legText, memberName, selectedMarkId, selectionAfterMark, tapTargetId } from './tkStore';
 import type { OnCourseItem, Selection } from './tkStore';
+import { TkNoticeLayer, useTkNotices } from './TkNotices';
 import { useTimekeeper } from './useTimekeeper';
 import type { AssignResult, MyMark, TapStamp, Timekeeper } from './useTimekeeper';
 
@@ -42,37 +43,64 @@ function useLightThemeByDefault() {
   }, []);
 }
 
-/** Keeps the screen on while timing; re-acquired when the page becomes visible again. */
-function useWakeLock(active: boolean) {
+/**
+ * Keeps the screen on while timing; re-acquired when the page becomes visible again, when the
+ * system releases it while the page is visible, and — after a refusal (no user gesture yet,
+ * battery saver) — on the next MARCAR or "Em prova" tap (B2-m3): the returned function, cheap to
+ * call on every tap, asks again only when nothing is held.
+ */
+function useWakeLock(active: boolean): () => void {
+  const ensure = useRef<() => void>(() => {});
   useEffect(() => {
     const wakeLock = (navigator as Navigator & { wakeLock?: WakeLock }).wakeLock;
-    if (!active || !wakeLock) return;
+    if (!active || !wakeLock) {
+      ensure.current = () => {};
+      return;
+    }
     let cancelled = false;
+    let requesting = false;
     let held: WakeLockSentinel | null = null;
     const release = (s: WakeLockSentinel | null) => {
       if (s) s.release().catch(() => {});
     };
     const request = () => {
-      if (document.visibilityState !== 'visible') return;
+      if (cancelled || requesting || document.visibilityState !== 'visible') return;
+      requesting = true;
       wakeLock.request('screen').then(
         s => {
+          requesting = false;
           if (cancelled) return release(s);
-          release(held);
+          if (held !== s) release(held);
           held = s;
+          if (typeof s.addEventListener === 'function') {
+            s.addEventListener('release', () => {
+              if (held !== s) return;
+              held = null;
+              request(); // a refusal now waits for the next tap
+            }, { once: true });
+          }
         },
         () => {
-          // Not allowed (battery saver, no user gesture yet…): the app works without it.
+          // Not allowed (battery saver, no user gesture yet…): the app works without it, and the
+          // next tap asks again.
+          requesting = false;
         },
       );
     };
+    const onVisibility = () => request();
+    ensure.current = () => {
+      if (held === null) request();
+    };
     request();
-    document.addEventListener('visibilitychange', request);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       cancelled = true;
-      document.removeEventListener('visibilitychange', request);
+      ensure.current = () => {};
+      document.removeEventListener('visibilitychange', onVisibility);
       release(held);
     };
   }, [active]);
+  return useCallback(() => ensure.current(), []);
 }
 
 function vibrate() {
@@ -102,7 +130,7 @@ function isClickOfPress(e: MouseEvent<HTMLButtonElement>, lastPointerAt: number)
 function TimekeeperApp({ token }: { token: string }) {
   useLightThemeByDefault();
   const tk = useTimekeeper(token);
-  useWakeLock(tk.phase === 'main');
+  const keepAwake = useWakeLock(tk.phase === 'main');
 
   switch (tk.phase) {
     case 'loading':
@@ -124,6 +152,8 @@ function TimekeeperApp({ token }: { token: string }) {
           <Logo size={64} />
           <h1 className="brand-title text-lg font-semibold">Link inválido</h1>
           <p>Link de cronometragem inválido ou desativado. Peça um novo link à organização.</p>
+          <p className="text-sm text-muted">Se a organização reativar este link, a cronometragem abre sozinha.</p>
+          <Button variant="secondary" onClick={tk.retry}>Tentar novamente</Button>
           {tk.pendingCount > 0 ? (
             <p className="text-sm text-muted">
               Suas marcações continuam guardadas neste aparelho ({tk.pendingCount} ainda não {tk.pendingCount === 1 ? 'enviada' : 'enviadas'}).
@@ -156,7 +186,7 @@ function TimekeeperApp({ token }: { token: string }) {
     case 'register':
       return <RegisterScreen tk={tk} />;
     case 'main':
-      return <MainScreen tk={tk} />;
+      return <MainScreen tk={tk} keepAwake={keepAwake} />;
   }
 }
 
@@ -226,8 +256,9 @@ function RegisterScreen({ tk }: { tk: Timekeeper }) {
 interface RowTap { item: OnCourseItem; stamp: TapStamp; markId: string | null }
 interface RowPress extends RowTap { pointerId: number; x: number; y: number }
 
-function MainScreen({ tk }: { tk: Timekeeper }) {
-  const toast = useToast();
+function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }) {
+  // Not the kit's toasts: these never catch a tap meant for a row or MARCAR (B2-m1).
+  const toast = useTkNotices();
   const [bib, setBib] = useState('');
   // Which "Sem atleta" mark a bib or an "Em prova" tap goes to (tkStore `Selection`, Rulings 53
   // to 55): the oldest of the current burst unless one was picked; `none` = deselected, so
@@ -237,7 +268,8 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
   const [legSheet, setLegSheet] = useState<string | null>(null);
   const assignToastId = useRef<string | null>(null);
   const lastMarkPointer = useRef(Number.NEGATIVE_INFINITY);
-  const rowPress = useRef<RowPress | null>(null);
+  // One press per finger (B2-m2): two thumbs on two arrivals are two taps.
+  const rowPresses = useRef(new Map<number, RowPress>());
   const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
   const bibId = useId();
   const selectedId = selectedMarkId(sel, tk.unassigned, tk.nowMs, tk.aside); // where a typed bib goes
@@ -260,8 +292,8 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       toast.dismiss(id);
       fn();
     };
-    // Neutral tone (opaque) and the actions under the text: the kit's tinted tones are see-through
-    // and its action row leaves the message a narrow column on a phone.
+    // Opaque, with the actions under the text; taps pass through all but its buttons (B2-m1), so
+    // it can stay long enough to reach Desfazer.
     id = toast.show({
       testid: 'assign-toast',
       durationMs: 8_000,
@@ -273,33 +305,30 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
           </p>
           {r.warning && r.warning !== r.message && <p className="text-warning">{r.warning}</p>}
           <p className="tabular text-xs text-muted">Marcação das {clockText(Date.parse(r.ts))}</p>
-          <div className="mt-1 flex flex-wrap gap-2">
-            <Button
-              size="sm" variant="secondary" data-testid="toast-undo"
-              onClick={act(() => {
-                tk.unassign(markId);
-                select(markId, 'user');
-              })}
-            >
-              Desfazer
-            </Button>
-            {r.race.legs.length > 1 && (
-              <Button size="sm" variant="secondary" data-testid="toast-change-leg" onClick={act(() => setLegSheet(markId))}>
-                Trocar perna
-              </Button>
-            )}
-          </div>
         </div>
       ),
+      actions: [
+        {
+          label: 'Desfazer', testid: 'toast-undo',
+          onClick: act(() => {
+            tk.unassign(markId);
+            select(markId, 'user');
+          }),
+        },
+        ...(r.race.legs.length > 1
+          ? [{ label: 'Trocar perna', testid: 'toast-change-leg', onClick: act(() => setLegSheet(markId)) }]
+          : []),
+      ],
     });
     assignToastId.current = id;
   }
 
-  /** Error toast: opaque neutral tone (see showAssigned) announced as an alert by its content. */
+  /** Error notice, announced as an alert. */
   function showError(message: string) {
     toast.show({
+      alert: true,
       message: (
-        <p role="alert" className="font-semibold">
+        <p className="font-semibold">
           <span aria-hidden="true" className="text-danger">⚠ </span>
           {message}
         </p>
@@ -316,6 +345,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     // useTimekeeper reads the synced clock first thing in mark(): nothing here may run before it.
     const { markId, ts, assignment } = tk.mark(bib);
     vibrate();
+    keepAwake();
     if (assignment?.ok) {
       setBib('');
       showAssigned(assignment);
@@ -386,10 +416,12 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     // next athlete as current, and the leg must come from the crossing times.
     if (markId && tk.unassigned.some(m => m.id === markId)) {
       report(tk.assign(markId, item.entry.id));
+      keepAwake();
       return;
     }
     const { markId: newId } = tk.mark(undefined, stamp); // arrival tap: the instant of the press
     vibrate();
+    keepAwake();
     const r = tk.assign(newId, item.entry.id);
     if (!r.ok) select(newId, 'app');
     report(r);
@@ -403,16 +435,17 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     commitLatest.current = commitRowTap;
   });
   useEffect(() => {
+    const presses = rowPresses.current;
     const up = (e: globalThis.PointerEvent) => {
-      const press = rowPress.current;
-      if (!press || e.pointerId !== press.pointerId) return;
-      rowPress.current = null;
+      const press = presses.get(e.pointerId);
+      if (!press) return;
+      presses.delete(e.pointerId);
       lastRowPointer.current = e.timeStamp;
       if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > TAP_SLOP_PX) return;
       commitLatest.current(press);
     };
     const cancel = (e: globalThis.PointerEvent) => {
-      if (rowPress.current?.pointerId === e.pointerId) rowPress.current = null;
+      presses.delete(e.pointerId);
     };
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', cancel);
@@ -426,7 +459,7 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     const stamp = tk.stamp(); // the instant the finger landed
     lastRowPointer.current = e.timeStamp;
-    rowPress.current = { item, stamp, markId: rowTargetId, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+    rowPresses.current.set(e.pointerId, { item, stamp, markId: rowTargetId, pointerId: e.pointerId, x: e.clientX, y: e.clientY });
     // Keeps the focus — and the phone keyboard — in the bib field; the click still fires, and a
     // scroll still starts (it is not a default action of pointerdown).
     e.preventDefault();
@@ -497,7 +530,6 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
               autoComplete="off"
               value={bib}
               onChange={e => setBib(e.target.value)}
-              placeholder="—"
               className="tabular min-h-14 w-full min-w-0 flex-1 rounded-xl border border-border bg-surface px-3 text-center text-3xl font-bold text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             />
             <Button type="submit" size="xl" variant="secondary" data-testid="bib-submit">Atribuir</Button>
@@ -530,16 +562,22 @@ function MainScreen({ tk }: { tk: Timekeeper }) {
       </main>
 
       <LegSheet tk={tk} markId={legSheet} onClose={() => setLegSheet(null)} onPick={onChangeLeg} />
+      <TkNoticeLayer notices={toast.notices} onDismiss={toast.dismiss} />
     </div>
   );
 }
 
 function Header({ tk }: { tk: Timekeeper }) {
   const n = tk.pendingCount;
+  const kept = `${n} ${n === 1 ? 'marcação guardada' : 'marcações guardadas'} no aparelho`;
   let text: string;
   let dot: string;
-  if (!tk.online) {
-    text = `Sem internet · ${n} ${n === 1 ? 'marcação guardada' : 'marcações guardadas'} no aparelho`;
+  if (tk.linkInvalid) {
+    text = `Link inválido · ${kept}`;
+    dot = 'bg-danger';
+  } else if (!tk.online) {
+    // The same retries either way; the server answering with a failure is not a phone problem.
+    text = `${tk.offline === 'server' ? 'Sem conexão com o servidor' : 'Sem internet'} · ${kept}`;
     dot = 'bg-danger';
   } else if (n > 0) {
     text = `Sincronizando ${n}…`;
@@ -565,6 +603,15 @@ function Header({ tk }: { tk: Timekeeper }) {
         </div>
         <ThemeToggle />
       </div>
+      {tk.linkInvalid && (
+        <div data-testid="tk-link-invalid" role="alert" className="mx-auto flex max-w-xl flex-col items-start gap-2 px-4 pb-2 text-xs font-semibold text-danger">
+          <p>
+            ⚠ Link de cronometragem inválido ou desativado. Continue marcando: as marcações ficam guardadas neste aparelho
+            e são enviadas quando o link voltar a funcionar — ou quando você abrir o novo link neste aparelho.
+          </p>
+          <Button size="sm" variant="secondary" onClick={tk.retry}>Tentar novamente</Button>
+        </div>
+      )}
       {tk.rejectedCount > 0 && (
         <p className="mx-auto max-w-xl px-4 pb-2 text-xs font-medium text-warning">
           ⚠ {tk.rejectedCount === 1 ? '1 marcação recusada' : `${tk.rejectedCount} marcações recusadas`} — veja “Minhas marcações”
@@ -784,7 +831,7 @@ function MyMarksList({ tk, onDiscard, onRestore, onReassign, onChangeLeg }: {
         Minhas marcações ({tk.myMarks.length}){tk.rejectedCount > 0 ? ` · ⚠ ${tk.rejectedCount}` : ''}
       </summary>
       <ul className="divide-y divide-border border-t border-border">
-        {tk.myMarks.map(({ mark, state, reason }) => {
+        {tk.myMarks.map(({ mark, state, reason, note }) => {
           const entry = mark.entry_id ? index?.entriesById.get(mark.entry_id) : undefined;
           const race = entry ? index?.racesById.get(entry.race_id) : undefined;
           const time = markTime(mark);
@@ -804,6 +851,7 @@ function MyMarksList({ tk, onDiscard, onRestore, onReassign, onChangeLeg }: {
                 <span className={`ml-auto text-xs ${state === 'rejected' ? 'text-danger' : 'text-muted'}`}>{STATE_LABEL[state]}</span>
               </div>
               {state === 'rejected' && reason && <p className="text-sm text-danger">⚠ {reason}</p>}
+              {note && <p className="text-xs text-muted">Sua alteração foi recusada ({note}) — vale a versão registrada.</p>}
               <div className="flex flex-wrap gap-2">
                 {!mark.discarded && entry && race && race.legs.length > 1 && (
                   <Button size="sm" variant="secondary" aria-label={`Trocar perna da marcação das ${time}`} onClick={() => onChangeLeg(mark.id)}>

@@ -8,7 +8,8 @@ import type {
 
 /** Every `api` failure: the pt-BR message to show plus the Postgres/PostgREST error code
  * (`P0001` validation, `42501` permission, `PGRST301` rejected JWT, …) or `'network'` when the
- * server was unreachable or did not answer in time. `status` is the HTTP status, when there was one. */
+ * server was unreachable, did not answer in time or answered 5xx. `status` is the HTTP status,
+ * when there was one. Only P0001/42501 messages come from the server verbatim (A-M2). */
 export class ApiError extends Error {
   code: string | null;
   status: number | null;
@@ -33,6 +34,52 @@ interface RpcResult {
   status?: number;
 }
 
+const GENERIC_MESSAGE = 'Não foi possível concluir a operação.';
+const SERVER_DOWN_MESSAGE = 'Servidor indisponível no momento. Tente de novo em instantes.';
+const BAD_VALUE_MESSAGE = 'Valor em formato inválido. Confira os campos e tente de novo.';
+
+/**
+ * A-M2: pt-BR text for the Postgres/PostgREST codes that can reach the app besides our own P0001
+ * (validation) and 42501 (permission) errors, whose messages are already pt-BR and pass through.
+ * `network: true` marks a failure worth retrying like a dropped connection (the timekeeper keeps
+ * its marks pending, queries retry).
+ */
+const SERVER_ERRORS: Record<string, { message: string; network?: boolean }> = {
+  '57014': { message: 'O servidor demorou demais para responder. Tente de novo.', network: true }, // statement timeout
+  '23505': { message: 'Este registro já existe (valor repetido). Atualize a página e tente de novo.' },
+  '23503': { message: 'Um registro ligado a este não existe mais ou ainda está em uso. Atualize a página e tente de novo.' },
+  '23502': { message: 'Um campo obrigatório ficou vazio.' },
+  '23514': { message: 'Um valor está fora do permitido. Confira os campos e tente de novo.' },
+  '22P02': { message: BAD_VALUE_MESSAGE }, // invalid text representation (uuid, number, boolean…)
+  '22007': { message: BAD_VALUE_MESSAGE }, // invalid date/time format
+  '22008': { message: BAD_VALUE_MESSAGE }, // date/time field out of range
+  '22003': { message: BAD_VALUE_MESSAGE }, // numeric value out of range
+  '40P01': { message: 'O servidor estava ocupado com outra alteração. Tente de novo.' }, // deadlock
+  '40001': { message: 'O servidor estava ocupado com outra alteração. Tente de novo.' }, // serialization failure
+  PGRST202: { message: 'Esta versão do app não corresponde à do servidor. Recarregue a página.' }, // unknown function
+  PGRST002: { message: SERVER_DOWN_MESSAGE, network: true }, // schema cache still loading
+  PGRST301: { message: 'Sua sessão expirou. Entre novamente.' }, // JWT expired/invalid
+  PGRST303: { message: 'Sua sessão expirou. Entre novamente.' }, // JWT claims rejected
+};
+
+/** The error the app shows for a failed RPC answer (`status` = its HTTP status). */
+function serverError(error: { message?: string; code?: string | null }, status: number | null): ApiError {
+  const code = error.code || null;
+  if (code === 'P0001') return new ApiError(error.message || 'Erro inesperado', code, status);
+  if (code === '42501') {
+    // Our own checks raise pt-BR texts ("Acesso restrito à organização"); Postgres's grant checks
+    // raise English ones ("permission denied for function …", "must be owner of …").
+    const message = error.message ?? '';
+    const english = message === '' || /^(permission denied|must be owner)/i.test(message);
+    return new ApiError(english ? 'Sem permissão para esta ação.' : message, code, status);
+  }
+  const known = code ? SERVER_ERRORS[code] : undefined;
+  if (known) return new ApiError(known.message, known.network ? 'network' : code, status);
+  // A gateway/5xx body (HTML or English text) says only that the server is not answering.
+  if (status !== null && status >= 500) return new ApiError(SERVER_DOWN_MESSAGE, 'network', status);
+  return new ApiError(code ? `Não foi possível concluir a operação (erro ${code}).` : GENERIC_MESSAGE, code, status);
+}
+
 function thrownToApiError(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
   const name = typeof e === 'object' && e !== null ? (e as { name?: unknown }).name : undefined;
@@ -41,7 +88,8 @@ function thrownToApiError(e: unknown): ApiError {
   if (e instanceof TypeError || name === 'FetchError' || name === 'AbortError' || name === 'TimeoutError') {
     return new ApiError(NETWORK_MESSAGE, 'network');
   }
-  return new ApiError(e instanceof Error && e.message ? e.message : 'Erro inesperado');
+  // Anything else (a body that is not JSON, a library bug) has an English message of no use here.
+  return new ApiError(GENERIC_MESSAGE);
 }
 
 async function call<T>(fn: string, args?: Record<string, unknown>, timeoutMs = RPC_TIMEOUT_MS): Promise<T> {
@@ -61,7 +109,7 @@ async function call<T>(fn: string, args?: Record<string, unknown>, timeoutMs = R
   if (res.error) {
     // postgrest-js does not reject on a failed or aborted fetch: it resolves with HTTP status 0.
     if (res.status === 0) throw new ApiError(NETWORK_MESSAGE, 'network');
-    throw new ApiError(res.error.message || 'Erro inesperado', res.error.code || null, res.status ?? null);
+    throw serverError(res.error, res.status ?? null);
   }
   return res.data as T;
 }
