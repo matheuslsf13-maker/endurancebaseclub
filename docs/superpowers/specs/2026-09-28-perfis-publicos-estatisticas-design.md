@@ -128,7 +128,7 @@ Ele aparece **só pelo nome e pelos tempos de perna** dentro do resultado da equ
 ### 4.3 Cliente
 - `api.pub.stats()` chama `pub_stats`. O tipo novo é `PubStatsPayload { athletes: PublicAthleteRow[]; results: ResultRow[] }`, com `PublicAthleteRow = Pick<AthleteRow, 'id'|'name'|'sex'|'city'|'team_club'>`.
 - O hook `usePublicStats()` usa a query key `['pub-stats']`, `staleTime` de 5 minutos e refaz a consulta ao voltar o foco para a página. As quatro telas públicas usam só esse hook, então navegar entre elas não faz requisição nova.
-- **Erro de carga:** "Não foi possível carregar os atletas", com o botão "Tentar de novo". Um erro de rede usa a mensagem padrão da `api` ("Sem conexão com o servidor").
+- **Erro de carga:** "Não foi possível carregar os atletas", com o botão "Tentar novamente" (como na lista de eventos). Um erro de rede usa a mensagem padrão da `api` ("Sem conexão com o servidor").
 
 ### 4.4 Compatibilidade
 A página `#/atleta/:id` deixa de chamar `pub_athlete` e passa a usar `pub_stats`. A função `pub_athlete` **continua no banco**, porque celulares com a versão anterior do app ainda a chamam até reabrir o app (Ruling 26). `api.pub.athlete` continua disponível. A remoção fica para uma limpeza futura.
