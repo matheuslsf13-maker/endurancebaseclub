@@ -369,7 +369,7 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
           </div>
 
           <div>
-            <p className="mb-1.5 text-sm font-medium text-fg">Fonte do tempo</p>
+            <p className="mb-1.5 text-sm font-medium text-fg">Fonte do tempo: tempo do sistema</p>
             <div className="flex flex-wrap gap-4">
               <RadioOption
                 name="time_source"
@@ -381,21 +381,21 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
               />
               <RadioOption
                 name="time_source"
-                value="reference"
-                label="Cronometrista de referência"
-                testId="race-time-source-reference"
-                checked={form.config.time_source === 'reference'}
-                onChange={() => setForm((f) => ({ ...f, config: { ...f.config, time_source: 'reference' as TimeSource } }))}
+                value="mean"
+                label="Média"
+                testId="race-time-source-mean"
+                checked={form.config.time_source === 'mean'}
+                onChange={() => setForm((f) => ({ ...f, config: { ...f.config, time_source: 'mean' as TimeSource } }))}
               />
             </div>
           </div>
 
-          <div className="sm:w-64">
+          <div className="sm:w-80">
             <Select
-              label="Cronometrista de referência"
+              label="Cronometrista prioritário (opcional)"
               data-testid="race-reference-timekeeper"
-              disabled={form.config.time_source !== 'reference'}
-              options={[{ value: '', label: 'Selecione' }, ...agg.timekeepers.map((t) => ({ value: t.id, label: t.name }))]}
+              hint="Onde o prioritário marcou, vale a marcação dele; onde não marcou, vale o tempo do sistema."
+              options={[{ value: '', label: 'Nenhum' }, ...agg.timekeepers.map((t) => ({ value: t.id, label: t.name }))]}
               value={form.config.reference_timekeeper_id ?? ''}
               onChange={(e) => setForm((f) => ({ ...f, config: { ...f.config, reference_timekeeper_id: e.target.value || null } }))}
             />

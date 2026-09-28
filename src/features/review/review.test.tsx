@@ -16,6 +16,7 @@ import {
 } from '../../domain/testing/fixtures';
 import { EventProvider } from '../events/EventContext';
 import ReviewTab from './ReviewTab';
+import { ApiError } from '../../lib/api';
 
 const L0 = T0 + 10 * MIN;
 
@@ -24,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   updateMark: vi.fn(),
   setResolution: vi.fn(),
   clearResolution: vi.fn(),
+  saveRace: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => ({
@@ -36,6 +38,7 @@ vi.mock('../../lib/api', () => ({
       updateMark: mocks.updateMark,
       setResolution: mocks.setResolution,
       clearResolution: mocks.clearResolution,
+      saveRace: mocks.saveRace,
     },
   },
 }));
@@ -343,14 +346,14 @@ describe('ReviewTab: pt-BR numbers and the reference timekeeper (B2-m12, Ruling 
   });
 
   it('names the configured reference timekeeper even when another one marked the same instant', () => {
-    const race = makeRace({ configPatch: { time_source: 'reference', reference_timekeeper_id: 'tk2' } });
+    const race = makeRace({ configPatch: { time_source: 'median', reference_timekeeper_id: 'tk2' } });
     const marks = [
       makeMark({ at: L0, timekeeper_id: 'tk1' }),
       makeMark({ at: L0, timekeeper_id: 'tk2' }),
       makeMark({ at: T0 + 30 * MIN, leg_index: 1, timekeeper_id: 'tk2' }),
     ];
     renderReview(makeAgg({ races: [race], marks }));
-    expect(screen.getAllByTestId('crossing-row')[0]).toHaveTextContent('Cronometrista de referência (Bia)');
+    expect(screen.getAllByTestId('crossing-row')[0]).toHaveTextContent('Prioritário (Bia)');
   });
 });
 
@@ -458,5 +461,47 @@ describe('ReviewTab: finalized races (B2-I2)', () => {
     renderReview({ ...agg, races: [makeRace({ finalized_at: iso(T0 + 40 * MIN) })], results: snapshotOf(agg) });
     expect(screen.getByText(/Aquathlon está finalizada/)).toBeInTheDocument();
     expect(screen.queryByText(/depois da finalização/)).not.toBeInTheDocument();
+  });
+});
+
+describe('0009: time source bar (switch while looking at the times)', () => {
+  it('shows the method and priority of each race, and saves a change to the race config (waves untouched)', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r1', name: 'Corrida 5 km', legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }] });
+    mocks.saveRace.mockResolvedValue({ race, waves: [] });
+    renderReviewLive(makeAgg({ races: [race] }));
+
+    const bar = screen.getByTestId('time-source-r1');
+    expect(within(bar).getByText('Corrida 5 km')).toBeInTheDocument();
+    expect(within(bar).getByTestId('time-source-method-r1')).toHaveValue('median');
+    expect(within(bar).getByTestId('time-source-priority-r1')).toHaveValue('');
+
+    await user.selectOptions(within(bar).getByTestId('time-source-method-r1'), 'mean');
+    expect(mocks.saveRace).toHaveBeenCalledTimes(1);
+    const payload = mocks.saveRace.mock.calls[0][0];
+    expect(payload).toMatchObject({ id: 'r1', event_id: race.event_id, name: 'Corrida 5 km', team_size: 1, legs: race.legs });
+    expect(payload.config).toEqual({ ...race.config, time_source: 'mean' });
+    expect(payload).not.toHaveProperty('waves');
+
+    await user.selectOptions(within(bar).getByTestId('time-source-priority-r1'), 'tk2');
+    expect(mocks.saveRace.mock.calls[1][0].config).toMatchObject({ reference_timekeeper_id: 'tk2' });
+  });
+
+  it('is read-only for a finalized race', () => {
+    const race = makeRace({ id: 'r1', finalized_at: iso(T0 + 60 * MIN) });
+    renderReviewLive(makeAgg({ races: [race] }));
+    expect(screen.getByTestId('time-source-method-r1')).toBeDisabled();
+    expect(screen.getByTestId('time-source-priority-r1')).toBeDisabled();
+    expect(screen.getByTestId('time-source-r1')).toHaveTextContent('para trocar, reabra a prova em Resultados');
+  });
+
+  it('keeps the previous choice and shows the error when saving fails', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r1' });
+    mocks.saveRace.mockRejectedValue(new ApiError('Sem conexão com o servidor'));
+    renderReviewLive(makeAgg({ races: [race] }));
+    await user.selectOptions(screen.getByTestId('time-source-method-r1'), 'mean');
+    expect(await screen.findByText('Sem conexão com o servidor')).toBeInTheDocument();
+    expect(screen.getByTestId('time-source-method-r1')).toHaveValue('median');
   });
 });

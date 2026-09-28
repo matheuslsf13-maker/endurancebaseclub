@@ -9,8 +9,9 @@ export interface Candidate { mark_id: string; timekeeper_id: string | null; ts_m
 export interface Crossing {
   leg_index: number; candidates: Candidate[]; duplicates: string[];
   median_ms: number | null; spread_ms: number | null;
-  system_ms: number | null; system_source: 'median' | 'reference' | null;
-  official_ms: number | null; official_source: 'median' | 'reference' | 'mark' | 'manual' | null;
+  /** 'reference' = the priority timekeeper's mark (0009: it applies with either method). */
+  system_ms: number | null; system_source: 'median' | 'mean' | 'reference' | null;
+  official_ms: number | null; official_source: 'median' | 'mean' | 'reference' | 'mark' | 'manual' | null;
   resolution: ResolutionRow | null; divergent: boolean; chosen_mark_discarded: boolean;
 }
 export type TimingStatus = 'not_started' | 'on_course' | 'finished' | 'dnf' | 'dns' | 'dsq';
@@ -44,12 +45,19 @@ export function median(values: number[]): number | null {
   return sorted.length % 2 === 1 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
 }
 
+/** Mean of `values` rounded to the ms (0009: the "Média" system method). */
+export function mean(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return Math.round(values.reduce((sum, v) => sum + v, 0) / values.length);
+}
+
 /**
  * Consolidates the marks of one leg of one entry (callers pass only that entry's marks):
  * one candidate per timekeeper (the earliest mark; later ones are duplicates) and one per
- * organization mark; the system time is the reference timekeeper's candidate under the
- * 'reference' policy (when present), else the median; the organizer's resolution decides the
- * official time, falling back to the system time when the chosen mark is no longer usable.
+ * organization mark; the system time is the priority timekeeper's candidate when it marked
+ * (0009: with either method), else the median or the mean of the candidates (`time_source`); the
+ * organizer's resolution decides the official time, falling back to the system time when the
+ * chosen mark is no longer usable. Divergence is always judged against the median.
  */
 export function computeCrossing(args: { legIndex: number; marks: MarkRow[]; resolution: ResolutionRow | null; config: RaceConfig }): Crossing {
   const { legIndex, resolution, config } = args;
@@ -75,10 +83,11 @@ export function computeCrossing(args: { legIndex: number; marks: MarkRow[]; reso
   const median_ms = median(times);
   const spread_ms = times.length > 0 ? Math.max(...times) - Math.min(...times) : null;
 
-  const referenceId = config.time_source === 'reference' ? config.reference_timekeeper_id : null;
-  const reference = referenceId !== null ? candidates.find(c => c.timekeeper_id === referenceId) : undefined;
-  const system_ms = reference ? reference.ts_ms : median_ms;
-  const system_source = reference ? 'reference' : median_ms !== null ? 'median' : null;
+  const priorityId = config.reference_timekeeper_id;
+  const priority = priorityId !== null ? candidates.find(c => c.timekeeper_id === priorityId) : undefined;
+  const pooled_ms = config.time_source === 'mean' ? mean(times) : median_ms;
+  const system_ms = priority ? priority.ts_ms : pooled_ms;
+  const system_source: Crossing['system_source'] = priority ? 'reference' : pooled_ms !== null ? config.time_source : null;
 
   let official_ms = system_ms;
   let official_source: Crossing['official_source'] = system_source;

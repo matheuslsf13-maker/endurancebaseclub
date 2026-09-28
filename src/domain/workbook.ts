@@ -333,11 +333,12 @@ function buildPodiumsSheet(races: RaceRow[], clsByRaceId: Map<string, RaceClassi
 }
 
 /** Whether mark `markId` is what the official time of `crossing` comes from (B1-M8): every
- * candidate of a median, the reference timekeeper's candidate, the chosen mark — never a mark
+ * candidate of a median or mean, the priority timekeeper's candidate, the chosen mark — never a mark
  * overruled by another decision or by a manual time. */
 function feedsOfficial(markId: string, crossing: Crossing, race: RaceRow | undefined): boolean {
   switch (crossing.official_source) {
-    case 'median': return crossing.candidates.some(c => c.mark_id === markId);
+    case 'median':
+    case 'mean': return crossing.candidates.some(c => c.mark_id === markId);
     case 'reference': return crossing.candidates.some(c => c.mark_id === markId && c.timekeeper_id === race?.config.reference_timekeeper_id);
     case 'mark': return crossing.resolution?.mark_id === markId;
     default: return false;

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { defaultRaceConfig, generateAgeGroups, RACE_PRESETS, normalizeRaceConfig, MODALITY_LABEL } from './presets';
+import type { RaceConfig } from '../lib/types';
 
 describe('presets', () => {
   it('individual default config', () => {
@@ -36,6 +37,13 @@ describe('presets', () => {
     expect(RACE_PRESETS.find(p => p.id === 'revezamento-dupla-aquathlon')!.team_size).toBe(2);
     expect(RACE_PRESETS.find(p => p.id === 'revezamento-trio-triathlon')!.team_size).toBe(3);
     expect(MODALITY_LABEL.swim).toBe('Natação');
+  });
+  it('0009: time source is the median or the mean; a legacy "reference" becomes the median with that priority timekeeper', () => {
+    expect(normalizeRaceConfig({ time_source: 'mean' }, 1).time_source).toBe('mean');
+    expect(normalizeRaceConfig({ time_source: 'median', reference_timekeeper_id: 'tk9' }, 1)).toMatchObject({ time_source: 'median', reference_timekeeper_id: 'tk9' });
+    const legacy = normalizeRaceConfig({ time_source: 'reference', reference_timekeeper_id: 'tk9' } as unknown as Partial<RaceConfig>, 1);
+    expect(legacy).toMatchObject({ time_source: 'median', reference_timekeeper_id: 'tk9' });
+    expect(normalizeRaceConfig({ time_source: 'moda' } as unknown as Partial<RaceConfig>, 1).time_source).toBe('median');
   });
   it('normalizes partial configs', () => {
     expect(normalizeRaceConfig(null, 2)).toEqual(defaultRaceConfig(2));

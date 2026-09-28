@@ -201,7 +201,10 @@ export function CrossingEditor({ entryId, legIndex, onClose }: CrossingEditorPro
   const athleteId = legAthleteId(entry, legIndex);
   // An individual entry is named after its athlete already: no "Duda · Duda" (T28 minor).
   const athleteName = race.team_size > 1 && athleteId ? index.athletesById.get(athleteId)?.name : undefined;
-  const systemLabel = crossing.system_source === 'reference' ? 'Tempo do sistema (cronometrista de referência)' : 'Tempo do sistema (mediana)';
+  const systemLabel =
+    crossing.system_source === 'reference' ? 'Tempo do sistema (cronometrista prioritário)'
+      : crossing.system_source === 'mean' ? 'Tempo do sistema (média)'
+        : 'Tempo do sistema (mediana)';
   const systemTime = crossing.system_ms !== null ? formatClock(crossing.system_ms, { millis: true }) : '—';
 
   return (

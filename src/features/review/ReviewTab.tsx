@@ -12,6 +12,7 @@ import { planBibAssignment } from '../../domain/suggestLeg';
 import { snapshotDrift } from '../../domain/snapshot';
 import { useEventContext } from '../events/EventContext';
 import { CrossingEditor } from './CrossingEditor';
+import { TimeSourceBar } from './TimeSourceBar';
 import { driftMessage } from '../results/officialResults';
 import { formatSecondsBR } from './reviewFormat';
 
@@ -134,6 +135,7 @@ export default function ReviewTab() {
           )}
         </div>
       )}
+      {agg.races.length > 0 && <TimeSourceBar races={agg.races} timekeepers={agg.timekeepers} onSaved={refresh} />}
       <section className="flex flex-col gap-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <h2 className="brand-title text-lg font-semibold">Pendências</h2>
