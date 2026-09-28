@@ -134,6 +134,11 @@ ab pub open "$APP/#/perfis" >/dev/null
 wait_tid pub public-athletes
 no_hscroll pub "public athletes"
 snap pub 04-public-athletes-mobile
+ab pub open "$APP/#/atleta/$ANA_ID" >/dev/null
+wait_tid pub public-athlete
+wait_text pub "$(tid public-athlete)" "Participações"
+no_hscroll pub "public athlete"
+snap pub 04-public-athlete-mobile
 ab pub open "$COMPARE_URL" >/dev/null
 wait_tid pub public-compare
 no_hscroll pub "public compare"
