@@ -266,6 +266,8 @@ function RegisterScreen({ tk }: { tk: Timekeeper }) {
 /** An "Em prova" tap, fixed when the finger lands: the list may move under it before it lifts. */
 interface RowTap { item: OnCourseItem; stamp: TapStamp; markId: string | null }
 interface RowPress extends RowTap { pointerId: number; x: number; y: number }
+/** A MARCAR press: its instant is fixed when the finger lands, the mark is made when it lifts. */
+interface MarkPress { stamp: TapStamp; pointerId: number; x: number; y: number }
 
 function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }) {
   // Not the kit's toasts: these never catch a tap meant for a row or MARCAR (B2-m1).
@@ -279,6 +281,7 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
   const [legSheet, setLegSheet] = useState<string | null>(null);
   const assignToastId = useRef<string | null>(null);
   const lastMarkPointer = useRef(Number.NEGATIVE_INFINITY);
+  const markPress = useRef<MarkPress | null>(null);
   // One press per finger (B2-m2): two thumbs on two arrivals are two taps.
   const rowPresses = useRef(new Map<number, RowPress>());
   const lastRowPointer = useRef(Number.NEGATIVE_INFINITY);
@@ -308,14 +311,15 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
     id = toast.show({
       testid: 'assign-toast',
       durationMs: 8_000,
+      // One slim line (organizer feedback): the result, then the mark's time; a warning adds a line.
       message: (
-        <div className="flex flex-col gap-1">
-          <p className="font-semibold">
+        <div className="min-w-0">
+          <p className="truncate font-semibold">
             {warned && <span aria-hidden="true" className="text-warning">⚠ </span>}
             {r.message}
+            <span className="ml-2 tabular text-xs font-normal text-muted">{clockText(Date.parse(r.ts))}</span>
           </p>
-          {r.warning && r.warning !== r.message && <p className="text-warning">{r.warning}</p>}
-          <p className="tabular text-xs text-muted">Marcação das {clockText(Date.parse(r.ts))}</p>
+          {r.warning && r.warning !== r.message && <p className="text-xs text-warning">{r.warning}</p>}
         </div>
       ),
       actions: [
@@ -352,9 +356,9 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
     else showError(r.error);
   }
 
-  function doMark() {
+  function doMark(at?: TapStamp) {
     // useTimekeeper reads the synced clock first thing in mark(): nothing here may run before it.
-    const { markId, ts, assignment } = tk.mark(bib);
+    const { markId, ts, assignment } = tk.mark(bib, at);
     vibrate();
     keepAwake();
     if (assignment?.ok) {
@@ -376,19 +380,17 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
     setSel(current => selectionAfterMark(current, tk.unassigned, { id: markId, ts }));
   }
 
-  // Marks on pointerdown — the instant the finger lands, and a tap that turns into a slight drag
-  // still counts. The click of the same press is ignored by its time (a press that slid off the
-  // button has no click, and must not swallow a later one); keyboard presses and screen-reader
-  // activations come without a pointer press and mark on click.
+  // The instant is fixed on pointerdown — when the finger lands — but the mark is made when it
+  // lifts, and only if it barely moved: a drag that starts on the button scrolls the screen (the
+  // browser cancels the press) and never marks. The click of the same press is ignored by its time;
+  // keyboard presses and screen-reader activations come without a pointer press and mark on click.
   function onMarkPointerDown(e: PointerEvent<HTMLButtonElement>) {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    doMark();
+    markPress.current = { stamp: tk.stamp(), pointerId: e.pointerId, x: e.clientX, y: e.clientY };
     lastMarkPointer.current = e.timeStamp;
-    // Keeps the focus — and the phone keyboard — in the bib field; the click still fires.
+    // Keeps the focus — and the phone keyboard — in the bib field; the click still fires, and a
+    // scroll still starts (it is not a default action of pointerdown).
     e.preventDefault();
-  }
-  function onMarkPointerUp(e: PointerEvent<HTMLButtonElement>) {
-    lastMarkPointer.current = e.timeStamp; // a long press: its click comes when the finger lifts
   }
   function onMarkClick(e: MouseEvent<HTMLButtonElement>) {
     if (isClickOfPress(e, lastMarkPointer.current)) return;
@@ -442,12 +444,21 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
   // does — the entry, the mark it identifies, the instant — is fixed on pointerdown and committed
   // on pointerup, wherever the finger is then, if it barely moved (a scroll cancels it).
   const commitLatest = useRef(commitRowTap);
+  const markLatest = useRef(doMark);
   useLayoutEffect(() => {
     commitLatest.current = commitRowTap;
+    markLatest.current = doMark;
   });
   useEffect(() => {
     const presses = rowPresses.current;
     const up = (e: globalThis.PointerEvent) => {
+      const mark = markPress.current;
+      if (mark && mark.pointerId === e.pointerId) {
+        markPress.current = null;
+        lastMarkPointer.current = e.timeStamp; // its click comes now, and must not mark again
+        if (!(Math.hypot(e.clientX - mark.x, e.clientY - mark.y) > TAP_SLOP_PX)) markLatest.current(mark.stamp);
+        return;
+      }
       const press = presses.get(e.pointerId);
       if (!press) return;
       presses.delete(e.pointerId);
@@ -456,6 +467,7 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
       commitLatest.current(press);
     };
     const cancel = (e: globalThis.PointerEvent) => {
+      if (markPress.current?.pointerId === e.pointerId) markPress.current = null; // the screen scrolled
       presses.delete(e.pointerId);
     };
     window.addEventListener('pointerup', up);
@@ -552,12 +564,11 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
           type="button"
           data-testid="mark-button"
           onPointerDown={onMarkPointerDown}
-          onPointerUp={onMarkPointerUp}
           onMouseDown={e => e.preventDefault()}
           onClick={onMarkClick}
           onKeyDown={onMarkKeyDown}
           onContextMenu={e => e.preventDefault()}
-          className="brand-title min-h-[35vh] w-full touch-none select-none rounded-2xl bg-accent text-5xl font-bold text-accent-fg shadow-lg transition-transform active:scale-[0.98] focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          className="brand-title min-h-[35vh] w-full touch-pan-y select-none rounded-2xl bg-accent text-5xl font-bold text-accent-fg shadow-lg transition-transform active:scale-[0.98] focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           Marcar
         </button>

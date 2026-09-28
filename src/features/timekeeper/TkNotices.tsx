@@ -19,8 +19,9 @@ export interface TkNoticeInput {
 interface TkNotice extends TkNoticeInput { id: string }
 
 const DEFAULT_DURATION_MS = 5_000;
-/** At most this many at once, newest last: the notices never pile up over the screen. */
-const MAX_SHOWN = 3;
+/** One at a time: a new notice replaces the previous, so misclicks never pile notices up over the
+ * rows and MARCAR (organizer feedback 2026-09-28). */
+const MAX_SHOWN = 1;
 
 let seq = 0;
 
@@ -52,7 +53,15 @@ export function useTkNotices(): TkNotices {
   const show = useCallback((n: TkNoticeInput) => {
     seq += 1;
     const id = `tk-notice-${seq}`;
-    setNotices(list => [...list, { ...n, id }].slice(-MAX_SHOWN));
+    setNotices(list => {
+      const next = [...list, { ...n, id }];
+      for (const gone of next.slice(0, -MAX_SHOWN)) {
+        const timer = timers.current.get(gone.id);
+        if (timer !== undefined) clearTimeout(timer);
+        timers.current.delete(gone.id);
+      }
+      return next.slice(-MAX_SHOWN);
+    });
     timers.current.set(id, setTimeout(() => dismiss(id), n.durationMs ?? DEFAULT_DURATION_MS));
     return id;
   }, [dismiss]);
@@ -60,39 +69,38 @@ export function useTkNotices(): TkNotices {
   return { notices, show, dismiss };
 }
 
-/** The notices, fixed at the bottom: `pointer-events-none` everywhere but on their buttons. */
+/** The notice, fixed at the bottom as one slim bar (text, then its buttons on the same line):
+ * `pointer-events-none` everywhere but on its buttons. */
 export function TkNoticeLayer({ notices, onDismiss }: { notices: TkNotice[]; onDismiss: (id: string) => void }) {
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-center gap-2 p-4">
+    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-center gap-2 px-3 pb-3">
       {notices.map(n => (
         <div
           key={n.id}
           data-testid={n.testid}
           role={n.alert ? 'alert' : 'status'}
-          className="pointer-events-none flex w-full max-w-sm items-start gap-3 rounded-xl border border-border bg-surface-2 px-4 py-3 text-sm text-fg shadow-lg"
+          className="pointer-events-none flex w-full max-w-md items-center gap-2 rounded-xl border border-border bg-surface-2 py-1 pl-3 pr-1 text-sm text-fg shadow-lg"
         >
-          <div className="min-w-0 flex-1">
-            {n.message}
-            {n.actions && n.actions.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {n.actions.map(a => (
-                  <Button
-                    key={a.label}
-                    size="sm"
-                    variant="secondary"
-                    data-testid={a.testid}
-                    className="pointer-events-auto"
-                    onClick={() => {
-                      onDismiss(n.id);
-                      a.onClick();
-                    }}
-                  >
-                    {a.label}
-                  </Button>
-                ))}
-              </div>
-            )}
-          </div>
+          <div className="min-w-0 flex-1">{n.message}</div>
+          {n.actions && n.actions.length > 0 && (
+            <div className="flex shrink-0 gap-1">
+              {n.actions.map(a => (
+                <Button
+                  key={a.label}
+                  size="sm"
+                  variant="secondary"
+                  data-testid={a.testid}
+                  className="pointer-events-auto"
+                  onClick={() => {
+                    onDismiss(n.id);
+                    a.onClick();
+                  }}
+                >
+                  {a.label}
+                </Button>
+              ))}
+            </div>
+          )}
           <button
             type="button"
             aria-label="Fechar"
