@@ -62,7 +62,7 @@ export function TimeSourceBar({ races, timekeepers, onSaved }: TimeSourceBarProp
               data-testid={`time-source-${race.id}`}
               className="flex flex-col gap-2 rounded-xl border border-border p-3 sm:flex-row sm:items-end sm:gap-4"
             >
-              <p className="font-medium sm:min-w-40 sm:pb-3">{race.name}</p>
+              <p className="font-medium sm:w-64 sm:shrink-0 sm:pb-3">{race.name}</p>
               <div className="sm:w-40">
                 <Select
                   label="Tempo do sistema"
