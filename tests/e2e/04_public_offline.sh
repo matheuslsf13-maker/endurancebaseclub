@@ -68,8 +68,11 @@ snap pub 04-public-compare
 step "club rankings"
 ab pub open "$APP/#/ranking" >/dev/null
 wait_tid pub public-ranking
-wait_text pub "$(tid public-ranking)" "Vitórias gerais"
+# brand-title headings render uppercase (CSS text-transform), and `get text` reads innerText.
+wait_text pub "$(tid public-ranking)" "VITÓRIAS GERAIS"
 expect_text pub "$(tid public-ranking)" "Caio"
+# C-Minor-15 across SPA navigations: the "Nós dois" title must not survive into the next page.
+[[ "$(js_str pub "document.title")" == "Rankings – EnduranceBaseClub" ]] || fail pub "document.title is '$(js_str pub "document.title")' on #/ranking"
 snap pub 04-public-ranking
 
 step "pub_event RPC payload never leaks e-mail, phone or birth date (round 2 item 22)"
