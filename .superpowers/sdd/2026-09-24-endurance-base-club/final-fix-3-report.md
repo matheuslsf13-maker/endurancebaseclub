@@ -497,3 +497,183 @@ same files were touched — see each item's own "Where"/"Fix" for the authoritat
    it does not intercept a hard reload/tab-close. That's a `beforeunload` concern the report didn't
    ask for and was left out to keep the change scoped; browsers' own "leave site?" prompt would
    need a separate `window.onbeforeunload` listener if wanted later.
+
+## Fix round 2
+
+Ruling 61: the scoped re-review of `6244b7e..7642e31` verdicted 18 items ADDRESSED, no
+Critical/Important, but flagged items 9, 12, 18, 20, 22, 1 (test title) as NOT ADDRESSED, plus four
+new Minors (N1-N4) and a Badge success-tone contrast gap. First step: merged `feat/ebc-app`
+(Fixers 1 and 2, now on that branch) into `fix/final-3` so this round's E2E and test-sql run
+against the combined code.
+
+### Merge
+
+`git merge feat/ebc-app --no-edit` — clean, no conflicts requiring manual resolution beyond what
+git's `ort` strategy auto-merged (`EventLayout.tsx`, `PublicEventPage.tsx`, as the controller's
+dry-run had predicted). `package-lock.json`/`package.json` unchanged by the merge, so `npm ci` was
+not re-run (per the instructions, only needed if the lockfile changed). Merge commit: `1c0edd5`.
+
+### Items
+
+**1 — UpdatePrompt.test.tsx:41, contradictory test title**
+- Where: `src/components/UpdatePrompt.test.tsx:41-47`.
+- The test asserted the component **throws** when rendered outside a `ToastProvider`, but was
+  titled "ignores the event ... (nothing to crash)" — the opposite of what it checks.
+- Fix: retitled to `'throws immediately when rendered without a ToastProvider, instead of
+  silently doing nothing'`; behaviour/assertions unchanged.
+- Test: the same test, now correctly named.
+
+**9 — RacesTab.tsx:39, race-deletion confirm omits finalized results**
+- Where: `src/features/races/RacesTab.tsx:37-40`.
+- Fix: confirm message now also says "se a prova estiver finalizada, os resultados são apagados e
+  somem do histórico e das estatísticas dos atletas."
+- Test: `src/features/races/races.test.tsx` (new, after "does nothing when cancelled") — asserts
+  the dialog contains "resultados são apagados" and "histórico e das estatísticas dos atletas".
+  GREEN on first run (pure copy addition).
+
+**12 — PublicEventPage.tsx:343, public race tabs off-screen at 390 px**
+- Where: `src/features/public/PublicEventPage.tsx:8-17` (import), `213-247` (render).
+- Round 1's scroll-into-view + fade cue still left a second (inactive) race entirely off-screen on
+  load, per the reviewer's screenshot. Fix: below `sm`, the tablist is replaced outright by a kit
+  `<Select data-testid="public-race-select">` listing every race as a plain `<option>` — a
+  `<select>` cannot overflow regardless of race count. `sm:` and up keep the tablist (room to see
+  every tab there).
+- Test: `src/features/public/public.test.tsx` (new, after the C-Minor-8 scroll test) — asserts the
+  select lists both race names in order, starts on the active race, and switching it via
+  `selectOptions` renders the other race's heading.
+- Confirmed visually in the E2E gate: `tests/e2e/artifacts/04-public-results-mobile-1.png` shows
+  the "Prova" select (not a cut-off tab) at 390×844.
+
+**18 — PublicHome.tsx:99-103, load error has no retry**
+- Where: `src/features/public/PublicHome.tsx:10,68,99-108`.
+- Fix: destructured `refetch`/`isFetching` from the `useQuery`; added a "Tentar novamente" button
+  next to the error message.
+- Test: `src/features/public/public.test.tsx` (new, after the empty-state test) — RED first run
+  expected the `ApiError`-branch text ("Falha de rede") but the mocked rejection was a plain
+  `Error`, which the component correctly renders as the generic fallback — adjusted the test's
+  expectation to match the component's actual (correct) behaviour; GREEN after.
+
+**20 — LineChart.tsx:289, centred tooltip still overflows at 390 px**
+- Where: `src/components/LineChart.tsx:1,29,58-70` (measurement), `182-192` (clamp), `280-291`
+  (render, ref, style, dropped `-translate-x-1/2`).
+- Round 1's percentage clamp (`8%-92%`) didn't know the tooltip's actual rendered width — a
+  ~140-200 px label centred near an edge still overflowed. Fix: the tooltip's own `offsetWidth` is
+  measured via a ref + `useLayoutEffect` (keyed on `activeIndex`, so it re-measures per point,
+  before paint — no visible jump), and `left` is now computed in **pixels** as
+  `clamp(active.x - width/2, TOOLTIP_EDGE_PAD, measuredWidth - width - TOOLTIP_EDGE_PAD)`, replacing
+  the percentage-based centring entirely (the `-translate-x-1/2` transform is removed since `left`
+  is now already the clamped left edge).
+- Test: `src/components/ui/ui.test.tsx` (replaces the old C-Minor-16 test) — mocks
+  `HTMLElement.prototype.offsetWidth` to a realistic 180 px (jsdom never lays out real geometry),
+  then asserts `0 <= left` and `left + 180 <= 640` (the jsdom fallback chart width) at both the
+  first point (left edge, reached via two `ArrowLeft`s) and the last point (right edge, the
+  keyboard-focus default). Passed on first run with the new implementation.
+
+**22 — E2E PII check can never fail**
+- Where: `tests/e2e/01_master_setup.sh:74-91` (Ana gets a real e-mail/phone, `data-testid`
+  parameters added to `new_athlete`, `save_state`); `tests/e2e/04_public_offline.sh:15-72`
+  (rewritten PII section); `src/features/athletes/AthleteForm.tsx:114-115` (`data-testid`
+  `athlete-email`/`athlete-phone`, no behaviour change).
+- Round 1's checks only asserted "no `@` visible" / "no birth year visible" — passable even if the
+  server never omitted anything at all, since no athlete had an e-mail to begin with. Fix: Ana now
+  gets `ana.e2e@example.test` / `27999990000` at creation; both the rendered-page checks (results
+  and athlete page `innerText`) and two **new** raw-payload checks assert the exact strings are
+  absent. The payload checks `curl` the shim's `pub_event`/`pub_athlete` RPC endpoints directly
+  (`http://127.0.0.1:$SHIM_PORT/rest/v1/rpc/<fn>`, no `Authorization` header — the shim resolves
+  that to the `anon` role, the same one the page itself uses) and assert on the raw JSON text, plus
+  that no `birth_date` key is present at all. `pub_event`'s response is also parsed to find Ana's
+  id (matched by name) for the follow-up `pub_athlete` call, replacing the need for a
+  browser-derived id.
+- Verification: `bash -n` on both shell scripts; confirmed live end-to-end in the E2E gate —
+  `04_public_offline` now logs both new PII steps and the run ends `E2E PASS`.
+
+**N1 — EventGeneralTab.tsx, delete-while-dirty pops a spurious "unsaved changes" prompt**
+- Where: `src/features/events/EventGeneralTab.tsx:3` (import `flushSync`), `159-165`.
+- A dirty form's successful delete called `navigate('/eventos')` while `dirty` was still `true`,
+  so `useBlocker(dirty)` intercepted that very navigation.
+- Fix attempt 1 (plain `setDirty(false)` before `navigate()`): **RED** — the new test still hung on
+  the form instead of reaching "Lista de eventos", because react-router's blocker reads `dirty`
+  synchronously at the moment `navigate()` runs, before React's async state update would have
+  re-rendered it. Fix attempt 2: `flushSync(() => setDirty(false))` before `navigate()`, forcing
+  the state update (and the blocker's re-registration) to commit first. **GREEN**.
+- Test: `src/features/events/events.test.tsx` (new, before the C-Minor-13 test) — types into
+  `event-name` (making the form dirty) before deleting; asserts the router ends on `/eventos` and
+  no dialog (besides the delete confirm itself, already closed) is left open.
+
+**N2 — RaceEditor.tsx:181-199, a locked wave should not be removable at all**
+- Where: `src/features/races/RaceEditor.tsx:14` (import `RaceFormWave`), `181-187`
+  (`waveEntryCount` helper, simplified `removeWave`), `253-284` (render: `locked`/`onlyWave`,
+  `disabled`, reason text).
+- Round 1 let the organizer confirm-and-remove a wave with a start/entries, deferring the
+  inevitable server refusal to Salvar. Fix: "Remover" is now `disabled` outright for such a wave
+  (`disabled={onlyWave || locked}`), with a small reason line underneath
+  (`data-testid="wave-remove-reason-{i}"`: "Já largou", "Tem N inscrições", or both). `removeWave`
+  itself is back to a plain synchronous filter — the confirm dialog is gone, since removal is
+  prevented at the source instead of asked-and-undone.
+- Test: `src/features/races/races.test.tsx` — the old "C-I3" describe block (three tests keyed to
+  the round-1 confirm flow) rewritten to assert `toBeDisabled()` + the reason text for a
+  started/entries-having wave, and that a plain wave still removes immediately with no dialog.
+
+**N3 — UpdatePrompt: toast should not follow the volunteer into `#/c/`**
+- Where: `src/components/UpdatePrompt.tsx:1,64-92`.
+- The toast is mounted once at the app root (outside the router), so it survives an in-app
+  navigation on its own — including "Voltar à cronometragem" (C-Minor-7) carrying it from `#/`
+  into the timekeeper route, where Ruling 26 says it must never appear (it can sit over the "Em
+  prova" rows and swallow a tap).
+- Fix: captures the toast's id from `toast.show(...)`; a new `hashchange` listener dismisses it via
+  `toast.dismiss(id)` the moment `!shouldPromptForUpdate(location.hash)`.
+- Test: `src/components/UpdatePrompt.test.tsx` (two new cases) — a toast shown, then a
+  `hashchange` to `#/c/abc123`, dismisses it; a `hashchange` to `#/eventos` leaves it alone. Both
+  GREEN on first run.
+
+**N4 — TimekeeperPage.tsx runtime theme switch doesn't sync theme-color (grant)**
+- Where: `src/features/timekeeper/TimekeeperPage.tsx:33-52` (`useLightThemeByDefault`).
+- index.html's bootstrap script only runs on a full page load, so an in-app navigation into
+  `#/c/:token` left the `theme-color` meta on whatever colour the previous screen had, even though
+  `data-theme` itself switched to light.
+- Fix: the same effect that flips `data-theme` now also calls
+  `document.querySelector('meta[name="theme-color"]')?.setAttribute('content', ...)` with the
+  matching colour (`#F4F1EC` light / `#191513` dark, same values as index.html/ThemeToggle).
+- Per the grant's scope ("one small hunk" in this Fixer-2-owned file), no test was added to the
+  Fixer-2-owned `timekeeper.test.tsx`; ran its existing 87 tests as a regression check (all still
+  pass) and rely on the E2E's "themes: light (default) and dark" step (`02_timing.sh`) for
+  end-to-end coverage of this screen's theme behaviour.
+
+**Badge success-tone AA contrast**
+- Where: `src/index.css:29-31` (new `--color-success-text`), `src/components/ui/Badge.tsx:13-19`.
+- The plain `--color-success` swatch is ≈4.6:1 on dark theme's `--bg` (passes) but only ≈3.5:1 on
+  light theme's brighter paper (fails). Fix: same `color-mix(... 70%, var(--fg) 30%)` derivation as
+  C-Minor-11's danger/warning/info, computed by hand to confirm ≈5.6:1 (light) / ≈6.9:1 (dark)
+  before implementing.
+- No dedicated new test (a static CSS/class-mapping change, like the rest of C-Minor-11); confirmed
+  no existing test asserts the old `text-success` class name (grepped first), and the full suite
+  still passes.
+
+### Gates (WSL, ff3, after the merge)
+
+- `npm run typecheck` — clean.
+- `npx vitest run` — **758/758 tests, 41/41 files** (up from 664/40 pre-merge: Fixers 1/2 brought
+  their own suites in). No failures at any point in round 2's development.
+- `npm run build` — succeeds: 301 modules transformed, `vite-plugin-pwa` precaches 50 entries
+  (911.1 KiB), `dist/sw.js`/workbox runtime generated.
+- `bash tests/e2e/run.sh` — **E2E PASS**, all four scenarios, including both new item-22 PII
+  payload checks and the round-1 classification-order/PII checks. Screenshots reviewed:
+  `04-public-results-mobile-1.png` shows the new "Prova" select instead of a cut-off tab (item 12).
+- `EBC_DB=ebc_ff3 bash scripts/test-sql.sh` — all 7 files PASS
+  (`00_helpers`, `10_schema`, `20_admin_events`, `30_admin_athletes_entries`, `40_timing`,
+  `50_public`, `60_security`) — run against the merged `feat/ebc-app` SQL (Fixer 1's migrations),
+  confirming this branch's combined server-side state is sound.
+
+### Round 2 commits
+
+- `1c0edd5` — merge: `feat/ebc-app` into `fix/final-3` (Fixers 1 and 2).
+- `5b99ea7` — fix: round 2 items 1, 9, 12, 18, 20, 22, N1, N2.
+- `0d8969f` — fix: round 2 items N3, N4, Badge success-tone AA contrast.
+
+### Round 2 concerns
+
+None new. The round-1 concerns above still stand as written (WCAG sweep scope, StatsView partner
+links, no `beforeunload`); N1's `flushSync` fix is a small, localized use of an escape hatch React
+generally discourages, justified here because `useBlocker`'s check genuinely happens synchronously
+outside React's own render cycle — noting it in case a future refactor of the delete flow forgets
+why it's there.
