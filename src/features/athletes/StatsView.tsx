@@ -2,50 +2,28 @@ import { useMemo } from 'react';
 import { Link } from 'react-router';
 import { computeAthleteStats } from '../../domain/stats';
 import { MODALITY_LABEL } from '../../domain/presets';
-import { formatDateBR, formatDuration } from '../../lib/format';
+import { formatDateBR, formatDistance, formatDuration, formatKm } from '../../lib/format';
 import { LineChart } from '../../components/LineChart';
 import { Badge, Card, EmptyState, Table } from '../../components/ui';
-import type { AthleteRow, Modality, ResultRow, SnapshotStatus } from '../../lib/types';
+import type { AthleteRow, Modality, ResultRow } from '../../lib/types';
+import { STATUS_LABEL, STATUS_TONE, ordinal, percent } from './statsFormat';
 
 export interface StatsViewProps {
-  athlete: AthleteRow;
+  athlete: Pick<AthleteRow, 'id'>;
   results: ResultRow[];
   /** Reused as-is by the public athlete page (Task 26): hides nothing (stats only ever use
    * public data) but routes team-partner links to the public profile instead of the organizer one. */
   publicMode?: boolean;
+  /** Where a team partner's name links to; null = plain text. Without it: the organizer profile
+   * (`/atletas/:id`) outside public mode, plain text in public mode (C-Minor-16). The public
+   * profile passes one that links public partners to "Nós dois" (2026-09-28 §3.3). */
+  partnerLink?: (athleteId: string) => string | null;
 }
 
-const STATUS_LABEL: Record<SnapshotStatus, string> = {
-  finished: 'Concluído', on_course: 'Em prova', not_started: 'Não iniciado', dnf: 'DNF', dns: 'DNS', dsq: 'DSQ',
-};
-const STATUS_TONE: Record<SnapshotStatus, 'success' | 'danger' | 'neutral'> = {
-  finished: 'success', dnf: 'danger', dsq: 'danger', on_course: 'neutral', not_started: 'neutral', dns: 'neutral',
-};
 /** Ruling 20: pace_by_modality never carries 'other'; this fixes the display order for the ones it does. */
 const PACE_MODALITY_ORDER: Modality[] = ['run', 'swim', 'bike'];
 
-function ordinal(pos: number | null): string {
-  return pos === null ? '—' : `${pos}º`;
-}
-
-function percent(v: number | null): string {
-  return v === null ? '—' : `${Math.round(v * 100)}%`;
-}
-
-function formatDistance(m: number): string {
-  if (m >= 1000) {
-    const km = m / 1000;
-    const value = Number.isInteger(km) ? String(km) : km.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
-    return `${value} km`;
-  }
-  return `${m} m`;
-}
-
-function formatKm(km: number): string {
-  return `${km.toLocaleString('pt-BR', { maximumFractionDigits: 2 })} km`;
-}
-
-export function StatsView({ athlete, results, publicMode = false }: StatsViewProps) {
+export function StatsView({ athlete, results, publicMode = false, partnerLink }: StatsViewProps) {
   const stats = useMemo(() => computeAthleteStats(athlete.id, results), [athlete.id, results]);
 
   if (results.length === 0) {
@@ -81,8 +59,6 @@ export function StatsView({ athlete, results, publicMode = false }: StatsViewPro
   const evolutionTitle = evolution
     ? `Evolução — ${MODALITY_LABEL[evolution.modality]} ${formatDistance(evolution.distance_m)}`
     : 'Evolução';
-
-  const partnerHref = (id: string) => (publicMode ? `/atleta/${id}` : `/atletas/${id}`);
 
   return (
     <div className="flex flex-col gap-6">
@@ -214,21 +190,16 @@ export function StatsView({ athlete, results, publicMode = false }: StatsViewPro
           <ul className="flex flex-col gap-1">
             {stats.partners.map((p) => (
               <li key={p.athlete_id}>
-                {/* C-Minor-16: a teammate's `public_profile` isn't part of this data (a finalized
-                    snapshot only carries id/name/legs) — public mode can't tell which partners
-                    have a public profile to link to, so it shows plain text instead of a link
-                    that would dead-end on "Atleta não encontrado ou perfil privado" for a private
-                    one. The organizer view still links every partner (its own profile page). */}
-                {publicMode ? (
-                  <span className="text-sm text-fg">{p.name}</span>
-                ) : (
-                  <Link
-                    to={partnerHref(p.athlete_id)}
-                    className="text-sm text-fg underline underline-offset-2 hover:text-muted"
-                  >
-                    {p.name}
-                  </Link>
-                )}
+                {(() => {
+                  const href = partnerLink ? partnerLink(p.athlete_id) : publicMode ? null : `/atletas/${p.athlete_id}`;
+                  return href ? (
+                    <Link to={href} className="text-sm text-fg underline underline-offset-2 hover:text-muted">
+                      {p.name}
+                    </Link>
+                  ) : (
+                    <span className="text-sm text-fg">{p.name}</span>
+                  );
+                })()}
                 <span className="ml-2 text-sm text-muted tabular">×{p.count}</span>
               </li>
             ))}

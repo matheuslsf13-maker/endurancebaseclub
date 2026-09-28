@@ -7,23 +7,21 @@ import {
   iso, makeAthlete, makeEntry, makeEvent, makeMark, makeRace, makeTimekeeper, makeWave, MIN, T0,
 } from '../../domain/testing/fixtures';
 import type {
-  AthleteProfile, EventAggregate, LiveDelta, PubEventListItem, PubEventPayload, ResultRow, ResultSnapshot,
+  EventAggregate, LiveDelta, PubEventListItem, PubEventPayload, ResultRow, ResultSnapshot,
 } from '../../lib/types';
 
 import PublicHome from './PublicHome';
 import PublicEventPage from './PublicEventPage';
-import PublicAthletePage from './PublicAthletePage';
 
 const mocks = vi.hoisted(() => ({
   events: vi.fn<() => Promise<PubEventListItem[]>>(),
   event: vi.fn<(slug: string) => Promise<PubEventPayload>>(),
   live: vi.fn<(slug: string, since: string | null) => Promise<LiveDelta>>(),
-  athlete: vi.fn<(id: string) => Promise<AthleteProfile>>(),
 }));
 vi.mock('../../lib/supabase', () => ({ supabase: {} }));
 vi.mock('../../lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/api')>()),
-  api: { pub: { events: mocks.events, event: mocks.event, live: mocks.live, athlete: mocks.athlete } },
+  api: { pub: { events: mocks.events, event: mocks.event, live: mocks.live } },
 }));
 
 const NOW = T0 + 40 * MIN;
@@ -32,7 +30,6 @@ beforeEach(() => {
   mocks.events.mockReset();
   mocks.event.mockReset();
   mocks.live.mockReset().mockResolvedValue({ server_now: iso(NOW), version: 1, marks: [], resolutions: [], waves: [] });
-  mocks.athlete.mockReset();
 });
 
 // ---------------------------------------------------------------------------
@@ -479,50 +476,5 @@ describe('PublicEventPage', () => {
     const livePodiums = await within(liveRender.container).findByTestId('podiums');
     const liveLabels = [...livePodiums.querySelectorAll('p')].map((el) => el.textContent);
     expect(liveLabels).toEqual(GROUP_ORDER_EXPECTED);
-  });
-});
-
-// ---------------------------------------------------------------------------
-
-function renderAthletePage(athleteId = 'a1') {
-  return renderWithProviders(<PublicAthletePage />, { route: `/atleta/${athleteId}`, path: '/atleta/:athleteId' });
-}
-
-describe('PublicAthletePage', () => {
-  it('renders the athlete header and StatsView ("Participações") from pub.athlete', async () => {
-    const finished = makeResultRow({ entry_id: 'en1', bib: '101', athlete_id: 'a1', name: 'Ana Souza', overall_pos: 1, final_ms: 25 * MIN });
-    mocks.athlete.mockResolvedValue({
-      athlete: { id: 'a1', name: 'Ana Souza', sex: 'F', city: 'Vila Velha', team_club: 'Tubarões' } as AthleteProfile['athlete'],
-      results: [finished],
-    });
-
-    renderAthletePage();
-
-    expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
-    expect(screen.getByTestId('public-athlete')).toBeInTheDocument();
-    expect(screen.getByText(/Vila Velha/)).toBeInTheDocument();
-    expect(screen.getByText('Participações')).toBeInTheDocument();
-  });
-
-  it('C-Minor-15: resets document.title when navigating away', async () => {
-    mocks.athlete.mockResolvedValue({
-      athlete: { id: 'a1', name: 'Ana Souza', sex: 'F', city: null, team_club: null } as AthleteProfile['athlete'],
-      results: [],
-    });
-    const { unmount } = renderAthletePage();
-
-    await screen.findByText('Ana Souza');
-    expect(document.title).toBe('Ana Souza – EnduranceBaseClub');
-
-    unmount();
-    expect(document.title).toBe('EnduranceBaseClub');
-  });
-
-  it('shows a friendly message when the athlete is private or missing', async () => {
-    mocks.athlete.mockRejectedValue(new Error('Atleta não encontrado'));
-
-    renderAthletePage('desconhecido');
-
-    expect(await screen.findByText('Atleta não encontrado')).toBeInTheDocument();
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computeAthleteStats } from './stats';
+import { computeAthleteStats, filterResultsByYear, participationCounts, qualifyingLegs, resultYears } from './stats';
+import { makeResult } from './testing/results';
 import type { ResultRow, ResultSnapshot } from '../lib/types';
 
 function result(p: { date: string; name: string; race: string; status: ResultSnapshot['status']; final: number | null; pos: number | null; fin: number; podiums?: ResultSnapshot['podiums']; members?: ResultSnapshot['members']; legs: ResultSnapshot['legs'] }): ResultRow {
@@ -93,5 +94,51 @@ describe('computeAthleteStats skips unusable performances (B1-M3)', () => {
     expect(s.evolution).toBeNull();
     // The DSQ still counts as a participation and in the DSQ bucket.
     expect(s).toMatchObject({ participations: 4, dsq: 1 });
+  });
+});
+
+describe('year helpers (spec §5.1)', () => {
+  const r2025 = makeResult({ race_id: 'r1', entry_id: 'e1', date: '2025-11-02', members: [{ athlete_id: 'a1', name: 'Ana' }], final_ms: 1_500_000, overall_pos: 1 });
+  const r2026a = makeResult({ race_id: 'r2', entry_id: 'e2', date: '2026-03-10', members: [{ athlete_id: 'a1', name: 'Ana' }], final_ms: 1_450_000, overall_pos: 2 });
+  const r2026b = makeResult({ race_id: 'r3', entry_id: 'e3', date: '2026-09-01', members: [{ athlete_id: 'a2', name: 'Bia' }], status: 'dns' });
+
+  it('lists the distinct years newest first', () => {
+    expect(resultYears([r2025, r2026a, r2026b])).toEqual(['2026', '2025']);
+    expect(resultYears([])).toEqual([]);
+  });
+  it('filters by year; null is the whole career', () => {
+    expect(filterResultsByYear([r2025, r2026a, r2026b], '2025')).toEqual([r2025]);
+    expect(filterResultsByYear([r2025, r2026a, r2026b], null)).toHaveLength(3);
+  });
+  it('counts participations per athlete with the §10 rule (DNS and not started do not count)', () => {
+    const team = makeResult({ race_id: 'r4', entry_id: 'e4', date: '2026-05-05', members: [{ athlete_id: 'a1', name: 'Ana' }, { athlete_id: 'a2', name: 'Bia' }], status: 'dnf' });
+    const counts = participationCounts([r2025, r2026a, r2026b, team]);
+    expect(counts.get('a1')).toBe(3);
+    expect(counts.get('a2')).toBe(1); // her DNS does not count, the team DNF does
+  });
+});
+
+describe('qualifyingLegs (shared by the profile and the club records)', () => {
+  it('keeps timed legs with a distance and an athlete, never a DSQ result', () => {
+    const ok = makeResult({
+      race_id: 'r1', entry_id: 'e1', date: '2026-03-10', members: [{ athlete_id: 'a1', name: 'Ana' }, { athlete_id: 'a2', name: 'Bia' }],
+      final_ms: 2_400_000, overall_pos: 1,
+      legs: [
+        { athlete_id: 'a1', modality: 'swim', label: 'Natação', distance_m: 750, time_ms: 750_000 },
+        { athlete_id: null, modality: 'run', label: 'Corrida', distance_m: 5000, time_ms: 1_650_000 },
+      ],
+    });
+    const noDistance = makeResult({
+      race_id: 'r2', entry_id: 'e2', date: '2026-04-01', members: [{ athlete_id: 'a1', name: 'Ana' }], final_ms: 600_000, overall_pos: 1,
+      legs: [{ athlete_id: 'a1', modality: 'other', label: 'Outro', distance_m: null, time_ms: 600_000 }],
+    });
+    const zero = makeResult({
+      race_id: 'r3', entry_id: 'e3', date: '2026-05-01', members: [{ athlete_id: 'a1', name: 'Ana' }], status: 'finished', final_ms: 0,
+      legs: [{ athlete_id: 'a1', time_ms: 0 }],
+    });
+    const dsq = makeResult({ race_id: 'r4', entry_id: 'e4', date: '2026-06-01', members: [{ athlete_id: 'a2', name: 'Bia' }], status: 'dsq', final_ms: 1_200_000 });
+    expect(qualifyingLegs([ok, noDistance, zero, dsq])).toEqual([
+      { athlete_id: 'a1', modality: 'swim', distance_m: 750, time_ms: 750_000, label: 'Natação', date: '2026-03-10', event_name: 'Evento 2026-03-10' },
+    ]);
   });
 });

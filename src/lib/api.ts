@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import type {
-  AdminMe, AthleteProfile, AthleteRow, EntryRow, EntryStatus, EventAggregate, EventRow, EventSummary,
+  AdminMe, AthleteProfile, AthleteRow, PubStatsPayload, EntryRow, EntryStatus, EventAggregate, EventRow, EventSummary,
   FinalizeRowInput, ImportResult, ImportRowInput, Leg, LiveDelta, MarkRow, OrganizerRow, PubEventListItem,
   PubEventPayload, RaceRow, ResolutionMode, ResolutionRow, Sex, TimekeeperRow, TkMarkInput, TkRegistration,
   TkSession, TkSyncResult, WaveRow,
@@ -165,6 +165,7 @@ interface Api {
     event(slug: string): Promise<PubEventPayload>;
     live(slug: string, since: string | null): Promise<LiveDelta>;
     athlete(id: string): Promise<AthleteProfile>;
+    stats(): Promise<PubStatsPayload>;
   };
 }
 
@@ -224,5 +225,6 @@ export const api: Api = {
     event: (slug) => call('pub_event', { p_slug: slug }),
     live: (slug, since) => call('pub_live', { p_slug: slug, p_since: since }),
     athlete: (id) => call('pub_athlete', { p_athlete_id: id }),
+    stats: () => call('pub_stats'),
   },
 };

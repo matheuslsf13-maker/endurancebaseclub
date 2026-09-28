@@ -94,3 +94,18 @@ export function parseDateInput(text: string): string | null {
   if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
   return `${y}-${pad(m)}-${pad(d)}`;
 }
+
+/** A leg distance for display: "750 m", "5 km", "21,1 km" (pt-BR decimals, at most 2). */
+export function formatDistance(m: number): string {
+  if (m >= 1000) {
+    const km = m / 1000;
+    const value = Number.isInteger(km) ? String(km) : km.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+    return `${value} km`;
+  }
+  return `${m} m`;
+}
+
+/** A km total for display: "10,75 km". */
+export function formatKm(km: number): string {
+  return `${km.toLocaleString('pt-BR', { maximumFractionDigits: 2 })} km`;
+}

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  formatDistance, formatKm,
   formatClock, formatDuration, formatGap, formatDateBR, formatDateTimeBR, parseClockInput,
   brasiliaOffsetMinutes, excelSerialBrasilia, excelDuration, formatPace, parseDateInput,
 } from './format';
@@ -64,5 +65,15 @@ describe('format (independent of device time zone)', () => {
     expect(parseDateInput('1990-06-15')).toBe('1990-06-15');
     expect(parseDateInput('31/02/1990')).toBeNull();
     expect(parseDateInput('')).toBeNull();
+  });
+});
+
+describe('distances (moved from StatsView for the public pages)', () => {
+  it('formats meters and km in pt-BR', () => {
+    expect(formatDistance(750)).toBe('750 m');
+    expect(formatDistance(5000)).toBe('5 km');
+    expect(formatDistance(21097)).toBe('21,1 km');
+    expect(formatKm(10.75)).toBe('10,75 km');
+    expect(formatKm(6)).toBe('6 km');
   });
 });

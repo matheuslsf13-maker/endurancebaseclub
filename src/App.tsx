@@ -36,6 +36,9 @@ const TimekeeperPage = lazy(() => import('./features/timekeeper/TimekeeperPage')
 const PublicHome = lazy(() => import('./features/public/PublicHome'));
 const PublicEventPage = lazy(() => import('./features/public/PublicEventPage'));
 const PublicAthletePage = lazy(() => import('./features/public/PublicAthletePage'));
+const PublicAthletesPage = lazy(() => import('./features/public/PublicAthletesPage'));
+const PublicComparePage = lazy(() => import('./features/public/PublicComparePage'));
+const PublicRankingPage = lazy(() => import('./features/public/PublicRankingPage'));
 const NotFound = lazy(() => import('./features/NotFound'));
 
 function PageFallback() {
@@ -261,10 +264,37 @@ export const routes: RouteObject[] = [
     errorElement: <RouteErrorBoundary />,
   },
   {
+    path: '/perfis',
+    element: (
+      <Lazy>
+        <PublicAthletesPage />
+      </Lazy>
+    ),
+    errorElement: <RouteErrorBoundary />,
+  },
+  {
     path: '/atleta/:athleteId',
     element: (
       <Lazy>
         <PublicAthletePage />
+      </Lazy>
+    ),
+    errorElement: <RouteErrorBoundary />,
+  },
+  {
+    path: '/comparar/:a/:b',
+    element: (
+      <Lazy>
+        <PublicComparePage />
+      </Lazy>
+    ),
+    errorElement: <RouteErrorBoundary />,
+  },
+  {
+    path: '/ranking',
+    element: (
+      <Lazy>
+        <PublicRankingPage />
       </Lazy>
     ),
     errorElement: <RouteErrorBoundary />,
