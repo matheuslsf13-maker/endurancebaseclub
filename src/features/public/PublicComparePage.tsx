@@ -232,8 +232,8 @@ export default function PublicComparePage() {
               {sideBySideRows(view.sa, view.sb).map((r) => (
                 <tr key={r.label} className="border-t border-border">
                   <th scope="row" className="px-3 py-2 text-left font-normal text-muted">{r.label}</th>
-                  <td className="px-3 py-2 tabular">{r.a}</td>
-                  <td className="px-3 py-2 tabular">{r.b}</td>
+                  <td className="whitespace-nowrap px-3 py-2 tabular">{r.a}</td>
+                  <td className="whitespace-nowrap px-3 py-2 tabular">{r.b}</td>
                 </tr>
               ))}
             </tbody>
