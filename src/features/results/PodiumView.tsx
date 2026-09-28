@@ -44,7 +44,14 @@ export function PodiumView({ cls, athletesById }: PodiumViewProps) {
                   {group.places.map(place => (
                     <li key={place.ranked.entry.id} className="flex items-center gap-2 text-sm tabular">
                       <span className="w-7 shrink-0 font-semibold">{PLACE_LABEL[place.podium_pos - 1] ?? `${place.podium_pos}º`}</span>
-                      <span className="min-w-0 flex-1 truncate">{entryLabel(place.ranked.entry, cls.race, athletesById)}</span>
+                      {place.ranked.entry.team_name ? (
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-medium">{place.ranked.entry.team_name}</span>
+                          <span className="block truncate text-xs text-muted">{entryLabel(place.ranked.entry, cls.race, athletesById)}</span>
+                        </span>
+                      ) : (
+                        <span className="min-w-0 flex-1 truncate">{entryLabel(place.ranked.entry, cls.race, athletesById)}</span>
+                      )}
                       <span className="shrink-0 text-muted">Nº {place.ranked.entry.bib}</span>
                       <span className="shrink-0 font-medium">{formatDuration(place.ranked.timing.final_ms)}</span>
                     </li>

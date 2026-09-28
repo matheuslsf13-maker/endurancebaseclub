@@ -28,9 +28,15 @@ const OVERLAP_MS = 10_000;
 const BATCH_SIZE = 200;
 /** Retry of tk_open while there is nothing cached to show. */
 const OPEN_RETRY_MS = 5_000;
+/** While the link is refused (rotated or turned off), tk_open is asked again this often (B2-I4b). */
+const LINK_RECHECK_MS = 10_000;
 
 const sessionKey = (token: string) => `ebc.tk.session.${token}`;
-const regKey = (token: string) => `ebc.tk.reg.${token}`;
+/** Before B2-I4c the registration was kept per link; it is moved to `deviceKey` when read. */
+const legacyRegKey = (token: string) => `ebc.tk.reg.${token}`;
+/** The device's registration for an event (B2-I4c): a new link of the same event keeps the same
+ * timekeeper id and secret (tk_sync accepts them with any valid token of the event). */
+const deviceKey = (eventId: string) => `ebc.tk.device.${eventId}`;
 const marksKey = (eventId: string) => `ebc.tk.marks.${eventId}`;
 const outboxKey = (eventId: string, timekeeperId: string) => `ebc.tk.${eventId}.${timekeeperId}`;
 /** Timekeeper ids with an outbox for this event on this device — lets a new registration pick up
@@ -46,8 +52,12 @@ export type TkPhase = 'loading' | 'invalid' | 'register' | 'main' | 'disabled' |
 /** The synced instant of a tap and the clock state behind it, read when the finger landed. */
 export interface TapStamp { tapMs: number; deviceMs: number; clock: ClockState | null }
 
-/** What the device keeps after `tk_register` (`ebc.tk.reg.<token>`). */
+/** What the device keeps after `tk_register` (`ebc.tk.device.<eventId>`). */
 export interface TkDevice { timekeeper_id: string; secret: string; name: string }
+
+/** Why the sync is not reaching the server: no answer at all, or the server answered with a
+ * failure (5xx, overloaded) — the same retries, told apart for the timekeeper (Ruling 59 entry). */
+export type OfflineReason = 'internet' | 'server';
 
 export type AssignResult =
   | {
@@ -59,7 +69,9 @@ export type AssignResult =
     }
   | { ok: false; markId: string | null; error: string };
 
-export interface MyMark { mark: MarkRow; state: OutboxState; reason: string | null }
+/** `note`: why an edit of this mark was refused although the server keeps a copy of it — settled,
+ * the server copy wins (Ruling 27) and nothing is left to fix (B2-m7). */
+export interface MyMark { mark: MarkRow; state: OutboxState; reason: string | null; note: string | null }
 
 export interface Timekeeper {
   phase: TkPhase;
@@ -69,6 +81,11 @@ export interface Timekeeper {
   clock: ClockSync;
   /** False after a network failure (or the browser's "offline" event) until a sync succeeds. */
   online: boolean;
+  /** While `online` is false: whether the internet or the server is failing. */
+  offline: OfflineReason | null;
+  /** The link was refused (rotated or turned off) while this device has a registration: MARCAR
+   * keeps working into the outbox, tk_open is checked again every 10 s (B2-I4b/d). */
+  linkInvalid: boolean;
   /** At least one sync succeeded since the page opened. */
   synced: boolean;
   /** Last non-network sync failure (pt-BR server message), cleared by the next success. */
@@ -76,6 +93,7 @@ export interface Timekeeper {
   /** Why tk_open failed while loading. */
   loadError: string | null;
   pendingCount: number;
+  /** Rejected marks still to be fixed here: those the server never stored (B2-m7). */
   rejectedCount: number;
   /** The outbox could not be written to the device storage: marks live only in this page. */
   storageFailed: boolean;
@@ -105,7 +123,7 @@ export interface Timekeeper {
   restore(markId: string): void;
   /** Sets a mark aside (deselected) or takes it back; kept on the device. */
   setAside(markId: string, aside: boolean): void;
-  /** Loading: try tk_open now. Disabled: try syncing again. */
+  /** Loading: try tk_open now. Disabled: try syncing again. Link refused: check it again now. */
   retry(): void;
 }
 
@@ -120,11 +138,111 @@ function readSession(storage: ReturnType<typeof safeLocalStorage>, token: string
   return ok ? (v as unknown as TkSession) : null;
 }
 
-function readDevice(storage: ReturnType<typeof safeLocalStorage>, token: string): TkDevice | null {
-  const v = readJSON<unknown>(storage, regKey(token), null);
+function parseDevice(v: unknown): TkDevice | null {
   return isRecord(v) && typeof v.timekeeper_id === 'string' && typeof v.secret === 'string' && typeof v.name === 'string'
     ? { timekeeper_id: v.timekeeper_id, secret: v.secret, name: v.name }
     : null;
+}
+
+/** This device's registration for `eventId`; one still kept under the link `token` (before
+ * B2-I4c) is moved to the event key. */
+function readDevice(storage: ReturnType<typeof safeLocalStorage>, eventId: string, token: string): TkDevice | null {
+  const own = parseDevice(readJSON<unknown>(storage, deviceKey(eventId), null));
+  if (own) return own;
+  const legacy = parseDevice(readJSON<unknown>(storage, legacyRegKey(token), null));
+  if (!legacy) return null;
+  writeJSON(storage, deviceKey(eventId), legacy);
+  storage.removeItem(legacyRegKey(token));
+  return legacy;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * B2-m5: the timekeeper keys of OTHER events are removed when a session opens — sessions (and old
+ * per-link registrations) of their links, registration, marks cache, outboxes and set-aside ids —
+ * unless one of their outboxes still has a mark to send, or another tab is timing that event
+ * right now (its Web Lock is held). After a few events the quota would otherwise fill up and the
+ * current outbox fall back to memory. Only keys whose event is known are touched: ids are UUIDs,
+ * a session names its event; anything else under `ebc.tk.` is left alone.
+ */
+async function pruneOtherEvents(currentEventId: string): Promise<void> {
+  let ls: Storage;
+  const keys: string[] = [];
+  try {
+    ls = window.localStorage;
+    for (let i = 0; i < ls.length; i++) {
+      const k = ls.key(i);
+      if (k !== null && k.startsWith('ebc.tk.')) keys.push(k);
+    }
+  } catch {
+    return;
+  }
+  const json = (k: string): unknown => {
+    try {
+      const raw = ls.getItem(k);
+      return raw === null ? null : JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+  const tokenEvent = new Map<string, string>();
+  for (const k of keys) {
+    if (!k.startsWith('ebc.tk.session.')) continue;
+    const v = json(k);
+    const id = isRecord(v) && isRecord(v.event) ? v.event.id : null;
+    if (typeof id === 'string' && UUID.test(id)) tokenEvent.set(k.slice('ebc.tk.session.'.length), id);
+  }
+  const eventOf = (k: string): { eventId: string; outbox: boolean } | null => {
+    const [head, ...tail] = k.slice('ebc.tk.'.length).split('.');
+    const one = tail.length === 1 && UUID.test(tail[0]) ? tail[0] : null;
+    switch (head) {
+      case 'session':
+      case 'reg': {
+        const id = tokenEvent.get(tail.join('.'));
+        return id ? { eventId: id, outbox: false } : null;
+      }
+      case 'device':
+      case 'marks':
+      case 'outboxes':
+        return one ? { eventId: one, outbox: false } : null;
+      case 'aside':
+        return tail.length === 2 && UUID.test(tail[0]) ? { eventId: tail[0], outbox: false } : null;
+      default:
+        return tail.length === 1 && UUID.test(head) && UUID.test(tail[0]) ? { eventId: head, outbox: true } : null;
+    }
+  };
+  const byEvent = new Map<string, string[]>();
+  const keep = new Set<string>([currentEventId]);
+  for (const k of keys) {
+    const owner = eventOf(k);
+    if (!owner) continue;
+    byEvent.set(owner.eventId, [...(byEvent.get(owner.eventId) ?? []), k]);
+    if (owner.outbox) {
+      const v = json(k);
+      const items = isRecord(v) && isRecord(v.items) ? Object.values(v.items) : [];
+      if (items.some(it => isRecord(it) && it.state === 'pending')) keep.add(owner.eventId);
+    }
+  }
+  const locks = webLocks();
+  if (locks && typeof locks.query === 'function') {
+    try {
+      const held = (await locks.query()).held ?? [];
+      for (const l of held) if (l.name?.startsWith('ebc.tk.')) keep.add(l.name.slice('ebc.tk.'.length));
+    } catch {
+      return; // unsure who is timing what: keep everything
+    }
+  }
+  for (const [eventId, list] of byEvent) {
+    if (keep.has(eventId)) continue;
+    for (const k of list) {
+      try {
+        ls.removeItem(k);
+      } catch {
+        // Storage refused: nothing lost, it is tried again next time.
+      }
+    }
+  }
 }
 
 function readMarksCache(storage: ReturnType<typeof safeLocalStorage>, eventId: string): MarksCache {
@@ -146,13 +264,17 @@ function toInput(m: LocalMark): TkMarkInput {
 const byTs = (a: MarkRow, b: MarkRow) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 type Failure = 'network' | 'unauthorized' | 'disabled' | 'invalid' | 'other';
-function classify(e: unknown): { kind: Failure; message: string } {
+function classify(e: unknown): { kind: Failure; message: string; offline: OfflineReason } {
   const message = e instanceof Error && e.message ? e.message : 'Erro inesperado';
-  if (e instanceof ApiError && e.code === 'network') return { kind: 'network', message };
-  if (message.includes('Cronometrista não autorizado')) return { kind: 'unauthorized', message };
-  if (message.includes('Seu acesso foi desativado')) return { kind: 'disabled', message };
-  if (message.includes('Link de cronometragem inválido')) return { kind: 'invalid', message };
-  return { kind: 'other', message };
+  // api.ts maps both a missing answer and a 5xx answer to 'network' (A-M2); an HTTP status says the
+  // server did answer.
+  const offline: OfflineReason = e instanceof ApiError && e.status !== null && e.status > 0 ? 'server' : 'internet';
+  if (e instanceof ApiError && e.code === 'network') return { kind: 'network', message, offline };
+  const other = (kind: Failure) => ({ kind, message, offline });
+  if (message.includes('Cronometrista não autorizado')) return other('unauthorized');
+  if (message.includes('Seu acesso foi desativado')) return other('disabled');
+  if (message.includes('Link de cronometragem inválido')) return other('invalid');
+  return other('other');
 }
 
 function deviceLabel(): string {
@@ -172,12 +294,19 @@ export function useTimekeeper(token: string): Timekeeper {
   const storage = useMemo(() => safeLocalStorage(), []);
   const clock = useClock();
 
-  const [session, setSessionState] = useState<TkSession | null>(() => readSession(storage, token));
-  const [registration, setRegistration] = useState<TkDevice | null>(() => readDevice(storage, token));
+  const [cached] = useState(() => {
+    const s = readSession(storage, token);
+    return { session: s, device: s ? readDevice(storage, s.event.id, token) : null };
+  });
+  const [session, setSessionState] = useState<TkSession | null>(cached.session);
+  const [registration, setRegistration] = useState<TkDevice | null>(cached.device);
   // With something cached the screen opens at once — a phone reloading without signal must not
   // sit on a spinner while tk_open times out.
   const [phase, setPhase] = useState<TkPhase>(() => (session ? (registration ? 'main' : 'register') : 'loading'));
-  const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine !== false);
+  const [offline, setOffline] = useState<OfflineReason | null>(
+    () => (typeof navigator !== 'undefined' && navigator.onLine === false ? 'internet' : null),
+  );
+  const [linkInvalid, setLinkInvalid] = useState(false);
   const [synced, setSynced] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -231,8 +360,28 @@ export function useTimekeeper(token: string): Timekeeper {
     writeJSON(storage, sessionKey(token), s);
   }, [storage, token]);
 
+  /** Loading, a refused link that works again, or a registration found for the event: time. */
   const toMainOrRegister = useCallback(() => {
-    setPhase(p => (p === 'loading' ? (deviceRef.current ? 'main' : 'register') : p));
+    setPhase(p => (p === 'loading' || p === 'invalid' || (p === 'register' && deviceRef.current)
+      ? (deviceRef.current ? 'main' : 'register')
+      : p));
+  }, []);
+
+  /** Picks up this device's registration for the event of a session just opened (B2-I4c): a new
+   * link of the same event times as the same timekeeper, with the same outbox. */
+  const adoptDevice = useCallback((eventId: string) => {
+    if (deviceRef.current) return;
+    const device = readDevice(storage, eventId, token);
+    if (!device) return;
+    deviceRef.current = device;
+    setRegistration(device);
+  }, [storage, token]);
+
+  /** The link was refused: with a registration the screen keeps timing into the outbox and checks
+   * the link again (B2-I4b/d); without one there is nothing to time with. */
+  const onInvalid = useCallback(() => {
+    if (sessionRef.current && deviceRef.current) setLinkInvalid(true);
+    else setPhase('invalid');
   }, []);
 
   // tk_open: refresh the cached session; keep retrying while there is nothing to show.
@@ -245,6 +394,7 @@ export function useTimekeeper(token: string): Timekeeper {
         const s = await api.tk.open(token);
         if (cancelled) return;
         applySession(s);
+        adoptDevice(s.event.id);
         setLoadError(null);
         toMainOrRegister();
       } catch (e) {
@@ -252,11 +402,11 @@ export function useTimekeeper(token: string): Timekeeper {
         const f = classify(e);
         // tk_open only raises P0001 for a wrong or disabled link.
         if (f.kind === 'invalid' || (e instanceof ApiError && e.code === 'P0001')) {
-          setPhase('invalid');
+          onInvalid();
           return;
         }
         setLoadError(f.message);
-        if (f.kind === 'network') setOnline(false);
+        if (f.kind === 'network') setOffline(f.offline);
         if (sessionRef.current) toMainOrRegister();
         else timer = setTimeout(() => void attempt(), OPEN_RETRY_MS);
       }
@@ -267,7 +417,33 @@ export function useTimekeeper(token: string): Timekeeper {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [token, applySession, toMainOrRegister]);
+  }, [token, applySession, adoptDevice, toMainOrRegister, onInvalid]);
+
+  // B2-I4b: while the link is refused, ask tk_open again every 10 s (and on "Tentar novamente"):
+  // a link turned back on resumes by itself; a rotated one waits for the new link on this device.
+  const checking = useRef(false);
+  const checkLink = useCallback(async () => {
+    if (checking.current) return;
+    checking.current = true;
+    try {
+      const s = await api.tk.open(token);
+      applySession(s);
+      adoptDevice(s.event.id);
+      setLoadError(null);
+      setLinkInvalid(false);
+      toMainOrRegister();
+    } catch (e) {
+      const f = classify(e);
+      if (f.kind === 'network') setOffline(f.offline);
+    } finally {
+      checking.current = false;
+    }
+  }, [token, applySession, adoptDevice, toMainOrRegister]);
+  useEffect(() => {
+    if (phase !== 'invalid' && !linkInvalid) return;
+    const id = setInterval(() => void checkLink(), LINK_RECHECK_MS);
+    return () => clearInterval(id);
+  }, [phase, linkInvalid, checkLink]);
 
   const reopen = useCallback(() => {
     if (reopening.current) return;
@@ -276,13 +452,13 @@ export function useTimekeeper(token: string): Timekeeper {
       .then(
         s => applySession(s),
         e => {
-          if (classify(e).kind === 'invalid') setPhase('invalid');
+          if (classify(e).kind === 'invalid') onInvalid();
         },
       )
       .finally(() => {
         reopening.current = false;
       });
-  }, [token, applySession]);
+  }, [token, applySession, onInvalid]);
 
   const applySyncResult = useCallback((eventId: string, box: Outbox, res: TkSyncResult) => {
     // Marks in neither list stay pending and go again next cycle (Ruling 28).
@@ -315,7 +491,9 @@ export function useTimekeeper(token: string): Timekeeper {
   }, [storage, listedOutboxes]);
 
   const dropRegistration = useCallback(() => {
-    storage.removeItem(regKey(token));
+    const evId = sessionRef.current?.event.id;
+    if (evId) storage.removeItem(deviceKey(evId));
+    storage.removeItem(legacyRegKey(token));
     deviceRef.current = null;
     setRegistration(null);
     setPhase('register');
@@ -326,6 +504,12 @@ export function useTimekeeper(token: string): Timekeeper {
   // Web Lock times; a second tab waits and takes over when the first one closes. Without Web
   // Locks the app runs as before.
   const eventId = session?.event.id ?? null;
+
+  // B2-m5: other events' timekeeper data with nothing left to send goes once a session is open.
+  useEffect(() => {
+    if (eventId) void pruneOtherEvents(eventId);
+  }, [eventId]);
+
   useEffect(() => {
     const locks = webLocks();
     if (!eventId || !locks) return;
@@ -337,7 +521,7 @@ export function useTimekeeper(token: string): Timekeeper {
       boxRef.current = null;
       cacheRef.current = null;
       asideRef.current = null;
-      const device = readDevice(storage, token);
+      const device = readDevice(storage, eventId, token);
       if (device?.timekeeper_id !== deviceRef.current?.timekeeper_id) {
         deviceRef.current = device;
         setRegistration(device);
@@ -374,7 +558,8 @@ export function useTimekeeper(token: string): Timekeeper {
   // The sync loop: single-flight (never two tk_sync requests out, or acks could be misapplied),
   // every 2 s, ×2 backoff up to 10 s on failures, paused while the page is hidden.
   useEffect(() => {
-    if (phase !== 'main' || !active || !registration || !eventId) return;
+    // A refused link sends nothing: the marks wait in the outbox until tk_open works again.
+    if (phase !== 'main' || !active || !registration || !eventId || linkInvalid) return;
     const device = registration;
     const box = outboxFor(eventId, device.timekeeper_id);
     rememberOutbox(eventId, device.timekeeper_id);
@@ -403,15 +588,15 @@ export function useTimekeeper(token: string): Timekeeper {
         // Applied even if this effect was torn down meanwhile: acks are for marks already stored.
         applySyncResult(eventId, box, res);
         delay = SYNC_INTERVAL_MS;
-        setOnline(true);
+        setOffline(null);
         setSynced(true);
         setSyncError(null);
       } catch (e) {
         const f = classify(e);
         if (f.kind === 'unauthorized') return dropRegistration();
         if (f.kind === 'disabled') return setPhase('disabled');
-        if (f.kind === 'invalid') return setPhase('invalid');
-        if (f.kind === 'network') setOnline(false);
+        if (f.kind === 'invalid') return onInvalid();
+        if (f.kind === 'network') setOffline(f.offline);
         else setSyncError(f.message);
         delay = Math.min(delay * 2, MAX_BACKOFF_MS);
       } finally {
@@ -428,7 +613,7 @@ export function useTimekeeper(token: string): Timekeeper {
     const onVisibility = () => {
       if (document.visibilityState === 'visible') resume();
     };
-    const onOffline = () => setOnline(false);
+    const onOffline = () => setOffline('internet');
 
     void tick();
     document.addEventListener('visibilitychange', onVisibility);
@@ -441,7 +626,7 @@ export function useTimekeeper(token: string): Timekeeper {
       window.removeEventListener('online', resume);
       window.removeEventListener('offline', onOffline);
     };
-  }, [phase, active, registration, eventId, token, outboxFor, cacheFor, applySyncResult, dropRegistration, bump, rememberOutbox]);
+  }, [phase, active, registration, eventId, linkInvalid, token, outboxFor, cacheFor, applySyncResult, dropRegistration, onInvalid, bump, rememberOutbox]);
 
   // Leg timers and confirmation countdowns.
   useEffect(() => {
@@ -476,7 +661,7 @@ export function useTimekeeper(token: string): Timekeeper {
     const clean = name.trim();
     const res = await api.tk.register(token, clean, deviceLabel());
     const device: TkDevice = { timekeeper_id: res.timekeeper_id, secret: res.secret, name: clean };
-    writeJSON(storage, regKey(token), device);
+    writeJSON(storage, deviceKey(s.event.id), device);
     adoptPending(s.event.id, device.timekeeper_id);
     deviceRef.current = device;
     setRegistration(device);
@@ -608,6 +793,7 @@ export function useTimekeeper(token: string): Timekeeper {
   const retry = () => {
     if (phase === 'disabled') setPhase('main');
     else if (phase === 'loading') openNow.current();
+    else if (phase === 'invalid' || linkInvalid) void checkLink();
   };
 
   // ---- derived state ----
@@ -624,15 +810,21 @@ export function useTimekeeper(token: string): Timekeeper {
     const me = registration.timekeeper_id;
     const box = outboxFor(evId, me);
     const items = box.all();
-    const marks = mergedMarks(cacheFor(evId).marks, items, evId, me);
+    const serverMarks = cacheFor(evId).marks;
+    const marks = mergedMarks(serverMarks, items, evId, me);
     const own = marks.filter(m => m.timekeeper_id === me);
     const byId = new Map(marks.map((m): [string, MarkRow] => [m.id, m]));
+    // B2-m7: a rejected edit of a mark the server holds is settled — the server copy is what
+    // counts (Ruling 27) — so it is shown with its reason but no longer counted as to be fixed.
+    const onServer = new Set(serverMarks.map(m => m.id));
     const inBox = new Set<string>();
     const myMarks: MyMark[] = items.map(it => {
       inBox.add(it.mark.id);
-      return { mark: byId.get(it.mark.id) ?? localToMarkRow(it.mark, evId, me), state: it.state, reason: it.reason ?? null };
+      const mark = byId.get(it.mark.id) ?? localToMarkRow(it.mark, evId, me);
+      if (it.state === 'rejected' && onServer.has(it.mark.id)) return { mark, state: 'synced', reason: null, note: it.reason ?? null };
+      return { mark, state: it.state, reason: it.reason ?? null, note: null };
     });
-    for (const m of own) if (!inBox.has(m.id)) myMarks.push({ mark: m, state: 'synced', reason: null });
+    for (const m of own) if (!inBox.has(m.id)) myMarks.push({ mark: m, state: 'synced', reason: null, note: null });
     myMarks.sort((a, b) => byTs(b.mark, a.mark));
     const unassigned = own.filter(m => !m.discarded && m.entry_id === null).sort(byTs);
     return {
@@ -642,7 +834,7 @@ export function useTimekeeper(token: string): Timekeeper {
       aside: new Set(keepAside(asideFor(evId, me).ids, unassigned)) as ReadonlySet<string>,
       myMarks,
       pendingCount: box.pendingCount(),
-      rejectedCount: items.filter(it => it.state === 'rejected').length,
+      rejectedCount: items.filter(it => it.state === 'rejected' && !onServer.has(it.mark.id)).length,
       storageFailed: isMemoryOnly(outboxKey(evId, me)),
     };
     // `rev` stands for the outbox, marks cache and set-aside ids, which are mutated in place.
@@ -674,7 +866,7 @@ export function useTimekeeper(token: string): Timekeeper {
   const rtt = clock.rttMs;
   return {
     phase: shownPhase, session, index: session ? indexFor(session) : null, registration, clock,
-    online, synced, syncError, loadError,
+    online: offline === null, offline, linkInvalid, synced, syncError, loadError,
     pendingCount: derived.pendingCount, rejectedCount: derived.rejectedCount, storageFailed: derived.storageFailed,
     clockQuality: clock.synced && rtt !== null ? Math.round(rtt / 2) : null,
     nowMs, marks: derived.marks, unassigned: derived.unassigned, aside: derived.aside, myMarks: derived.myMarks,

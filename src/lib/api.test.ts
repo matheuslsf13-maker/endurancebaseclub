@@ -87,11 +87,74 @@ describe('api', () => {
     expect(err).toMatchObject({ message: 'Sem conexão com o servidor', code: 'network' });
   });
 
-  it('keeps the HTTP status of a server error', async () => {
+  it('keeps the HTTP status and code of a server error', async () => {
     answer.mockResolvedValue({ data: null, error: { message: 'JWT expired', code: 'PGRST301' }, status: 401 });
     const err = await api.admin.me().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
-    expect(err).toMatchObject({ message: 'JWT expired', code: 'PGRST301', status: 401 });
+    expect(err).toMatchObject({ message: 'Sua sessão expirou. Entre novamente.', code: 'PGRST301', status: 401 });
+  });
+
+  // A-M2: only P0001 (our own pt-BR validation messages) and 42501 (our own pt-BR permission
+  // messages) reach the screen verbatim; every other Postgres/PostgREST error is English.
+  it('keeps the pt-BR message of a permission error (42501) verbatim', async () => {
+    answer.mockResolvedValue({ data: null, error: { message: 'Acesso restrito à organização', code: '42501' }, status: 403 });
+    const err = await api.admin.listEvents().catch((e: unknown) => e);
+    expect(err).toMatchObject({ message: 'Acesso restrito à organização', code: '42501', status: 403 });
+  });
+
+  it.each([
+    'permission denied for function admin_list_events',
+    'permission denied for table events',
+    'must be owner of function tk_event',
+  ])('turns a 42501 raised by Postgres itself ("%s") into pt-BR', async (original) => {
+    answer.mockResolvedValue({ data: null, error: { message: original, code: '42501' }, status: 403 });
+    const err = await api.admin.listEvents().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ message: 'Sem permissão para esta ação.', code: '42501', status: 403 });
+  });
+
+  it.each<[string, string, number, string, string]>([
+    ['statement timeout', '57014', 500, 'canceling statement due to statement timeout', 'O servidor demorou demais para responder. Tente de novo.'],
+    ['unique violation', '23505', 409, 'duplicate key value violates unique constraint "entries_event_id_bib_key"',
+      'Este registro já existe (valor repetido). Atualize a página e tente de novo.'],
+    ['foreign key violation', '23503', 409, 'insert or update on table "entry_members" violates foreign key constraint',
+      'Um registro ligado a este não existe mais ou ainda está em uso. Atualize a página e tente de novo.'],
+    ['invalid text representation', '22P02', 400, 'invalid input syntax for type uuid: "x"', 'Valor em formato inválido. Confira os campos e tente de novo.'],
+    ['invalid datetime', '22007', 400, 'invalid input syntax for type date: ""', 'Valor em formato inválido. Confira os campos e tente de novo.'],
+    ['not null violation', '23502', 400, 'null value in column "name" violates not-null constraint', 'Um campo obrigatório ficou vazio.'],
+    ['unknown function', 'PGRST202', 404, 'Could not find the function public.admin_x without parameters in the schema cache',
+      'Esta versão do app não corresponde à do servidor. Recarregue a página.'],
+    ['deadlock', '40P01', 500, 'deadlock detected', 'O servidor estava ocupado com outra alteração. Tente de novo.'],
+    ['unknown 4xx code', 'XX123', 400, 'something odd', 'Não foi possível concluir a operação (erro XX123).'],
+  ])('shows %s in Portuguese', async (_name, code, status, original, message) => {
+    answer.mockResolvedValue({ data: null, error: { message: original, code }, status });
+    const err = await api.admin.saveEntry({ race_id: 'r1', members: [] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ message, status });
+    expect((err as ApiError).message).not.toBe(original);
+  });
+
+  it('treats a server that is down (5xx, schema cache loading) as a retryable network-class failure', async () => {
+    answer.mockResolvedValue({ data: null, error: { message: 'Could not query the database for the schema cache. Retrying.', code: 'PGRST002' }, status: 503 });
+    const cacheErr = await api.tk.open('tok').catch((e: unknown) => e);
+    expect(cacheErr).toMatchObject({ message: 'Servidor indisponível no momento. Tente de novo em instantes.', code: 'network', status: 503 });
+
+    answer.mockResolvedValue({ data: null, error: { message: '<html>502 Bad Gateway</html>', code: '' }, status: 502 });
+    const gatewayErr = await api.tk.open('tok').catch((e: unknown) => e);
+    expect(gatewayErr).toMatchObject({ message: 'Servidor indisponível no momento. Tente de novo em instantes.', code: 'network', status: 502 });
+  });
+
+  it('keeps a statement timeout retryable (network class) with its own message', async () => {
+    answer.mockResolvedValue({ data: null, error: { message: 'canceling statement due to statement timeout', code: '57014' }, status: 500 });
+    const err = await api.tk.sync('t', 'k', 's', [], null).catch((e: unknown) => e);
+    expect(err).toMatchObject({ message: 'O servidor demorou demais para responder. Tente de novo.', code: 'network' });
+  });
+
+  it('never shows the English text of an unexpected thrown error', async () => {
+    answer.mockRejectedValue(new SyntaxError('Unexpected token < in JSON at position 0'));
+    const err = await api.admin.listEvents().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ message: 'Não foi possível concluir a operação.' });
   });
 
   it('gives every RPC a 15 s timeout, after which it fails as "no connection"', async () => {

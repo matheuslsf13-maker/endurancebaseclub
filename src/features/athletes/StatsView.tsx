@@ -214,12 +214,21 @@ export function StatsView({ athlete, results, publicMode = false }: StatsViewPro
           <ul className="flex flex-col gap-1">
             {stats.partners.map((p) => (
               <li key={p.athlete_id}>
-                <Link
-                  to={partnerHref(p.athlete_id)}
-                  className="text-sm text-fg underline underline-offset-2 hover:text-muted"
-                >
-                  {p.name}
-                </Link>
+                {/* C-Minor-16: a teammate's `public_profile` isn't part of this data (a finalized
+                    snapshot only carries id/name/legs) — public mode can't tell which partners
+                    have a public profile to link to, so it shows plain text instead of a link
+                    that would dead-end on "Atleta não encontrado ou perfil privado" for a private
+                    one. The organizer view still links every partner (its own profile page). */}
+                {publicMode ? (
+                  <span className="text-sm text-fg">{p.name}</span>
+                ) : (
+                  <Link
+                    to={partnerHref(p.athlete_id)}
+                    className="text-sm text-fg underline underline-offset-2 hover:text-muted"
+                  >
+                    {p.name}
+                  </Link>
+                )}
                 <span className="ml-2 text-sm text-muted tabular">×{p.count}</span>
               </li>
             ))}

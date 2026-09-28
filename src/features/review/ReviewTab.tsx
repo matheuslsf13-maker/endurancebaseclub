@@ -9,8 +9,11 @@ import { ISSUE_LABEL, SEVERITY_LABEL, crossingSourceLabel } from '../../domain/l
 import { entryDisplayName } from '../../domain/eventModel';
 import type { EventIndex } from '../../domain/eventModel';
 import { planBibAssignment } from '../../domain/suggestLeg';
+import { snapshotDrift } from '../../domain/snapshot';
 import { useEventContext } from '../events/EventContext';
 import { CrossingEditor } from './CrossingEditor';
+import { driftMessage } from '../results/officialResults';
+import { formatSecondsBR } from './reviewFormat';
 
 type Severity = Issue['severity'];
 const SEVERITY_ORDER: Severity[] = ['error', 'warning', 'info'];
@@ -33,6 +36,21 @@ function crossingStatus(c: Crossing): { label: string; tone: BadgeTone } {
   return { label: 'OK', tone: 'success' };
 }
 
+/**
+ * A key that follows the issue, not its place in the list (B2-I1): the list reorders on every
+ * poll during a race, and an index key would leave a bib typed in one "Sem atleta" row in the row
+ * that moves into its place — filed on another mark. Identical keys (not expected) get a suffix.
+ */
+function issueKeys(issues: Issue[]): string[] {
+  const seen = new Map<string, number>();
+  return issues.map((i) => {
+    const base = `${i.type}|${i.entry_id ?? ''}|${i.leg_index ?? ''}|${i.mark_ids?.join(',') ?? ''}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return n === 0 ? base : `${base}#${n}`;
+  });
+}
+
 /** Editing target for the modal: which entry/leg crossing is open, or none. */
 interface EditingTarget {
   entryId: string;
@@ -40,7 +58,7 @@ interface EditingTarget {
 }
 
 export default function ReviewTab() {
-  const { agg, index, timing, refresh } = useEventContext();
+  const { agg, index, timing, classifications, refresh } = useEventContext();
   const toast = useToast();
   const [raceFilter, setRaceFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState<'all' | IssueType>('all');
@@ -88,8 +106,34 @@ export default function ReviewTab() {
     }
   }
 
+  // A finalized race keeps its official snapshot (B2-I2): corrections made here only reach the
+  // public page, the athletes' statistics and the official table after finalizing again.
+  const finalizedNotes = agg.races
+    .filter((r) => r.finalized_at !== null)
+    .sort((a, b) => a.position - b.position)
+    .map((race) => {
+      const live = classifications.get(race.id);
+      return { race, drift: live ? snapshotDrift(live, agg.results).length : 0 };
+    });
+
   return (
     <div className="flex flex-col gap-8">
+      {finalizedNotes.length > 0 && (
+        <div data-testid="finalized-notes" className="flex flex-col gap-2">
+          {finalizedNotes.map(({ race, drift }) =>
+            drift > 0 ? (
+              <p key={race.id} role="status" className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm font-medium">
+                {race.name} (finalizada): {driftMessage(drift)}
+              </p>
+            ) : (
+              <p key={race.id} className="rounded-xl border border-border bg-surface-2 px-4 py-3 text-sm text-muted">
+                {race.name} está finalizada — correções feitas aqui só entram no resultado oficial depois de reabrir e
+                finalizar a prova de novo (em Resultados).
+              </p>
+            ),
+          )}
+        </div>
+      )}
       <section className="flex flex-col gap-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <h2 className="brand-title text-lg font-semibold">Pendências</h2>
@@ -120,6 +164,7 @@ export default function ReviewTab() {
           <div data-testid="issues-list" className="flex flex-col gap-3">
             {SEVERITY_ORDER.map((sev) => {
               const list = bySeverity.get(sev) ?? [];
+              const keys = issueKeys(list);
               const isOpen = expanded[sev];
               return (
                 <div key={sev} className="overflow-hidden rounded-xl border border-border">
@@ -136,7 +181,7 @@ export default function ReviewTab() {
                   {isOpen && list.length > 0 && (
                     <ul className="flex flex-col divide-y divide-border border-t border-border">
                       {list.map((issue, i) => (
-                        <li key={i} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                        <li key={keys[i]} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                           <div className="min-w-0">
                             <Badge tone={SEVERITY_TONE[issue.severity]}>{SEVERITY_LABEL[issue.severity]}</Badge>{' '}
                             <span className="text-sm">{issue.message}</span>
@@ -205,7 +250,7 @@ function CrossingRow({ entryId, legIndex, onOpen }: { entryId: string; legIndex:
   const leg = race.legs[legIndex];
   const c = legTiming.crossing;
   const status = crossingStatus(c);
-  const source = crossingSourceLabel(c, index.timekeepersById, agg.marks);
+  const source = crossingSourceLabel(c, index.timekeepersById, agg.marks, race.config);
 
   return (
     <li>
@@ -222,7 +267,7 @@ function CrossingRow({ entryId, legIndex, onOpen }: { entryId: string; legIndex:
           <span>{c.official_ms !== null ? formatClock(c.official_ms, { tenths: true }) : '—'}</span>
           <span>{source || '—'}</span>
           <span>{c.candidates.length} marc.</span>
-          <span>{c.spread_ms !== null ? `${(c.spread_ms / 1000).toFixed(1)} s` : '—'}</span>
+          <span>{c.spread_ms !== null ? `${formatSecondsBR(c.spread_ms)} s` : '—'}</span>
           <Badge tone={status.tone}>{status.label}</Badge>
         </span>
       </button>

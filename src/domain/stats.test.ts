@@ -77,3 +77,21 @@ describe('computeAthleteStats other modality', () => {
     expect(s.km_by_modality).toEqual({ other: 1 });
   });
 });
+
+describe('computeAthleteStats skips unusable performances (B1-M3)', () => {
+  it('a DSQ result and a non-positive leg time never become records, pace, km or evolution', () => {
+    const rows = [
+      result({ date: '2026-01-01', name: 'Etapa A', race: 'Corrida 5K', status: 'finished', final: 1_500_000, pos: 2, fin: 10, legs: [run(1_500_000)] }),
+      result({ date: '2026-02-01', name: 'Etapa B', race: 'Corrida 5K', status: 'dsq', final: 900_000, pos: null, fin: 10, legs: [run(900_000)] }),
+      result({ date: '2026-03-01', name: 'Etapa C', race: 'Corrida 5K', status: 'finished', final: 1_400_000, pos: 1, fin: 10, legs: [run(-60_000)] }),
+      result({ date: '2026-04-01', name: 'Etapa D', race: 'Corrida 5K', status: 'finished', final: 1_450_000, pos: 1, fin: 10, legs: [run(0)] }),
+    ];
+    const s = computeAthleteStats('a1', rows);
+    expect(s.records).toEqual([expect.objectContaining({ modality: 'run', time_ms: 1_500_000, event_name: 'Etapa A' })]);
+    expect(s.pace_by_modality).toEqual([expect.objectContaining({ modality: 'run', distance_m: 5000, time_ms: 1_500_000 })]);
+    expect(s.km_by_modality).toEqual({ run: 5 });
+    expect(s.evolution).toBeNull();
+    // The DSQ still counts as a participation and in the DSQ bucket.
+    expect(s).toMatchObject({ participations: 4, dsq: 1 });
+  });
+});

@@ -39,4 +39,13 @@ select tests.assert_raises($$insert into public.marks (id, event_id, ts, entry_i
 select tests.as_anon();
 select tests.assert_raises($$select count(*) from public.events$$, '42501');
 reset role;
+-- T29: every foreign key has an index led by its column (Supabase advisor "unindexed_foreign_keys").
+do $$ declare missing text; begin
+  select string_agg(c.conrelid::regclass::text || '(' || a.attname || ')', ', ' order by 1) into missing
+  from pg_constraint c
+  join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+  where c.contype = 'f' and c.connamespace = 'public'::regnamespace
+    and not exists (select 1 from pg_index i where i.indrelid = c.conrelid and i.indkey[0] = c.conkey[1]);
+  assert missing is null, 'foreign keys without a covering index: ' || missing;
+end $$;
 rollback;

@@ -59,7 +59,11 @@ function TimekeeperLinkCard() {
   async function handleRotate() {
     const ok = await confirm({
       title: 'Gerar novo link dos cronometristas?',
-      message: 'O link e o QR code atuais deixam de funcionar. Os cronometristas já cadastrados continuam ativos.',
+      // B2-I4a: the phones keep their identity and keep marking into their outbox, but tk_sync
+      // refuses the old token — nothing reaches the server until the new link is opened.
+      message:
+        'O link e o QR code atuais deixam de funcionar. Os aparelhos com o link atual continuam marcando, mas só ' +
+        'enviam as marcações depois de abrir o novo link neste mesmo aparelho — mande o novo link a todos os cronometristas.',
       confirmLabel: 'Gerar novo link',
       danger: true,
     });
@@ -102,6 +106,7 @@ function TimekeeperLinkCard() {
           </div>
           <Checkbox
             label="Link ativo"
+            hint="Desativado, os aparelhos continuam marcando e guardam as marcações até o link ser reativado."
             checked={event.tk_enabled ?? true}
             disabled={togglingEnabled}
             onChange={(e) => void handleToggleEnabled(e.currentTarget.checked)}
@@ -115,7 +120,7 @@ function TimekeeperLinkCard() {
 
 export default function TimingTab() {
   return (
-    <div className="flex flex-col gap-6 p-4 sm:p-6">
+    <div className="flex flex-col gap-6">
       <TimekeeperLinkCard />
       <TimekeepersPanel />
       <WavesPanel />

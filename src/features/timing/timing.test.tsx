@@ -97,6 +97,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('layout', () => {
+  it('adds no padding of its own — aligned with the other tabs (EventLayout pads the page) — Task 28 E2E', async () => {
+    // It used `p-4 sm:p-6`, so every Cronometragem card sat 16–24 px inside the tab bar and the
+    // cards lost that width on a phone.
+    const { container } = renderTab(buildCtx(makeAgg()));
+    await screen.findByTestId('tk-link');
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className.split(/\s+/).filter((c) => /^(\w+:)?p[xytrbl]?-\d/.test(c))).toEqual([]);
+  });
+});
+
 describe('link dos cronometristas', () => {
   it('shows the link with the current token', () => {
     const agg = makeAgg({ event: makeEvent({ tk_token: 'abc123XYZ' }) });
@@ -153,6 +164,18 @@ describe('link dos cronometristas', () => {
 
     await waitFor(() => expect(mocks.rotateTkToken).toHaveBeenCalledWith(agg.event.id));
     expect(ctx.refresh).toHaveBeenCalled();
+  });
+
+  it('the rotation confirm tells the truth: phones with the old link keep marking but only send after opening the new one (B2-I4a)', async () => {
+    const user = userEvent.setup({ delay: null });
+    renderTab(buildCtx(makeAgg({ event: makeEvent({ tk_token: 'old-token' }) })));
+
+    await user.click(screen.getByRole('button', { name: 'Gerar novo link' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).not.toHaveTextContent('continuam ativos');
+    expect(dialog).toHaveTextContent('Os aparelhos com o link atual continuam marcando, mas só enviam as marcações depois de abrir o novo link');
+    // The same truth next to the "Link ativo" switch.
+    expect(screen.getByText(/Desativado, os aparelhos continuam marcando/)).toBeInTheDocument();
   });
 
   it('does not rotate the token when the organizer cancels', async () => {
@@ -235,6 +258,31 @@ describe('largadas', () => {
     await waitFor(() => expect(mocks.setWaveStart).toHaveBeenCalledWith('w1', iso(currentNow)));
     expect(ctx.patchAgg).toHaveBeenCalled();
     expect(ctx.refresh).toHaveBeenCalled();
+  });
+
+  it('re-starting a started wave names its current start and offers Desfazer back to it (B2-m9)', async () => {
+    const user = userEvent.setup({ delay: null });
+    const nowMs = T0 + 7 * MIN;
+    const wave = makeWave({ id: 'w1', race_id: 'r1', start_at: iso(T0) });
+    const ctx = buildCtx(makeAgg({ waves: [wave] }), { clock: new ClockSync({ now: () => nowMs }) });
+    mocks.setWaveStart.mockImplementation(async (id: string, startAt: string | null) => ({ ...wave, id, start_at: startAt }));
+    renderTab(ctx);
+
+    await user.click(screen.getAllByTestId('wave-start')[0]);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Esta onda largou às 08:00:00.0 — substituir pelo horário de agora?');
+    await user.click(screen.getByTestId('confirm-ok'));
+    await waitFor(() => expect(mocks.setWaveStart).toHaveBeenCalledWith('w1', iso(nowMs)));
+
+    await user.click(await screen.findByRole('button', { name: 'Desfazer' }));
+    await waitFor(() => expect(mocks.setWaveStart).toHaveBeenLastCalledWith('w1', iso(T0)));
+    expect(mocks.setWaveStart).toHaveBeenCalledTimes(2);
+  });
+
+  it('a first start keeps the plain confirm', async () => {
+    const user = userEvent.setup({ delay: null });
+    renderTab(buildCtx(makeAgg({ waves: [makeWave({ id: 'w1', start_at: null })] })));
+    await user.click(screen.getAllByTestId('wave-start')[0]);
+    expect(screen.getByRole('dialog')).not.toHaveTextContent('Esta onda largou');
   });
 
   it('does not start the wave when the organizer cancels', async () => {
@@ -412,7 +460,8 @@ describe('painel ao vivo', () => {
 
   it('shows an inline pt-BR error for an unknown bib and does not call updateMark', async () => {
     const user = userEvent.setup({ delay: null });
-    const mark = makeMark({ id: 'm1', at: T0 + 10 * MIN, entry_id: null, leg_index: null });
+    // A timekeeper's mark more than a minute old: the quick-assign form is offered.
+    const mark = makeMark({ id: 'm1', at: Date.now() - 2 * MIN, entry_id: null, leg_index: null });
     renderTab(buildCtx(makeAgg({ entries: [makeEntry()], marks: [mark] })));
 
     await user.type(screen.getByTestId('live-assign-bib'), '999');
@@ -420,5 +469,20 @@ describe('painel ao vivo', () => {
 
     expect(await screen.findByText('Nº 999 não encontrado')).toBeInTheDocument();
     expect(mocks.updateMark).not.toHaveBeenCalled();
+  });
+
+  it('leaves a mark younger than a minute with its timekeeper: no assign form until it is 60 s old (B2-I3)', async () => {
+    const now = T0 + 10 * MIN;
+    vi.useFakeTimers({ now });
+    const mark = makeMark({ id: 'm1', at: now - 20 * SEC, entry_id: null, leg_index: null, timekeeper_id: 'tk1' });
+    renderTab(buildCtx(makeAgg({ entries: [makeEntry()], marks: [mark], timekeepers: [makeTimekeeper({ id: 'tk1', name: 'Bia' })] }), { nowMs: now }));
+
+    const item = screen.getByTestId('unassigned-mark');
+    expect(item).toHaveTextContent('com o cronometrista · há 20 s');
+    expect(screen.queryByTestId('live-assign-bib')).not.toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(41 * SEC));
+    expect(screen.getByTestId('live-assign-bib')).toBeInTheDocument();
+    expect(screen.getByTestId('unassigned-mark')).not.toHaveTextContent('com o cronometrista');
   });
 });

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import { renderWithProviders } from '../../test/renderWithProviders';
 import {
@@ -60,6 +61,43 @@ describe('PublicHome', () => {
     renderWithProviders(<PublicHome />);
 
     expect(await screen.findByText('Nenhum evento público no momento')).toBeInTheDocument();
+  });
+
+  it('round 2 item 18: offers a retry button on a load error, which re-fetches', async () => {
+    const user = userEvent.setup();
+    mocks.events.mockRejectedValueOnce(new Error('offline'));
+    renderWithProviders(<PublicHome />);
+
+    expect(await screen.findByText('Não foi possível carregar os eventos.')).toBeInTheDocument();
+    mocks.events.mockResolvedValueOnce([]);
+    await user.click(screen.getByRole('button', { name: 'Tentar novamente' }));
+
+    expect(await screen.findByText('Nenhum evento público no momento')).toBeInTheDocument();
+  });
+
+  describe('C-Minor-7: "Voltar à cronometragem"', () => {
+    afterEach(() => {
+      window.localStorage.clear();
+    });
+
+    it('offers a link back to the remembered timekeeper link when this device has one', async () => {
+      window.localStorage.setItem('ebc.lastTkToken', 'tok-abc');
+      mocks.events.mockResolvedValue([]);
+
+      renderWithProviders(<PublicHome />);
+
+      const link = await screen.findByTestId('back-to-timekeeper');
+      expect(link).toHaveAttribute('href', '/c/tok-abc');
+    });
+
+    it('shows nothing when this device has no remembered link', async () => {
+      mocks.events.mockResolvedValue([]);
+
+      renderWithProviders(<PublicHome />);
+      await screen.findByText('Nenhum evento público no momento');
+
+      expect(screen.queryByTestId('back-to-timekeeper')).not.toBeInTheDocument();
+    });
   });
 });
 
@@ -262,6 +300,98 @@ describe('PublicEventPage', () => {
     expect(within(table).queryByRole('link', { name: 'Beto Lima' })).not.toBeInTheDocument();
   });
 
+  it('C-Minor-14: offers a retry button on a load error, which re-fetches', async () => {
+    const user = userEvent.setup();
+    mocks.event.mockRejectedValueOnce(new Error('Falha de rede'));
+    renderEventPage();
+
+    expect(await screen.findByText('Falha de rede')).toBeInTheDocument();
+    const { payload } = buildLivePayload();
+    mocks.event.mockResolvedValueOnce(payload);
+    await user.click(screen.getByRole('button', { name: 'Tentar novamente' }));
+
+    expect(await screen.findByTestId('classification-table')).toBeInTheDocument();
+  });
+
+  it('C-Minor-14: does not refetch the full payload merely because the window regained focus', async () => {
+    const { payload } = buildLivePayload();
+    mocks.event.mockResolvedValue(payload);
+    renderEventPage();
+    await screen.findByTestId('classification-table');
+    mocks.event.mockClear();
+
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    expect(mocks.event).not.toHaveBeenCalled();
+  });
+
+  it('C-Minor-14: surfaces a pub_live poll failure instead of silently going stale', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { payload } = buildLivePayload();
+    mocks.event.mockResolvedValue(payload);
+    mocks.live.mockRejectedValue(new Error('offline'));
+    renderEventPage();
+    await screen.findByTestId('classification-table');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(await screen.findByText(/Não foi possível atualizar/)).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it('C-Minor-8: scrolls the active race tab into view when the organizer switches races', async () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+
+    const { payload, race: race1 } = buildLivePayload();
+    const race2 = makeRace({ id: 'r2', name: 'Corrida 10K', legs: [{ modality: 'run', label: 'Corrida', distance_m: 10_000 }] });
+    mocks.event.mockResolvedValue({ ...payload, races: [race1, race2] });
+    const user = userEvent.setup();
+    renderEventPage();
+
+    await screen.findByRole('tab', { name: race1.name });
+    scrollIntoView.mockClear(); // ignore the initial mount's scroll of the first (already active) tab
+    await user.click(screen.getByRole('tab', { name: 'Corrida 10K' }));
+
+    expect(scrollIntoView).toHaveBeenCalled();
+    expect(scrollIntoView.mock.instances[0]).toBe(screen.getByRole('tab', { name: 'Corrida 10K' }));
+
+    Element.prototype.scrollIntoView = original;
+  });
+
+  it('round 2 item 12: offers a <select> with every race, so none is ever off-screen at 390 px', async () => {
+    const user = userEvent.setup();
+    const { payload, race: race1 } = buildLivePayload();
+    const race2 = makeRace({ id: 'r2', name: 'Corrida 10K', legs: [{ modality: 'run', label: 'Corrida', distance_m: 10_000 }] });
+    mocks.event.mockResolvedValue({ ...payload, races: [race1, race2] });
+    renderEventPage();
+
+    await screen.findByRole('tab', { name: race1.name });
+    const select = screen.getByTestId('public-race-select') as HTMLSelectElement;
+    // Every race is a plain <option> — a <select> never overflows regardless of race count.
+    expect([...select.options].map((o) => o.textContent)).toEqual([race1.name, 'Corrida 10K']);
+    expect(select).toHaveValue(race1.id);
+
+    await user.selectOptions(select, 'r2');
+    expect(await screen.findByRole('heading', { name: 'Corrida 10K' })).toBeInTheDocument();
+  });
+
+  it('C-Minor-15: resets document.title when navigating away', async () => {
+    const { payload } = buildLivePayload();
+    mocks.event.mockResolvedValue(payload);
+    const { unmount } = renderEventPage();
+
+    await screen.findByTestId('classification-table');
+    expect(document.title).toBe(`${payload.event.name} – Resultados`);
+
+    unmount();
+    expect(document.title).toBe('EnduranceBaseClub');
+  });
+
   it('shows "Resultado oficial" and rows ordered by the snapshot\'s overall_pos when the race is finalized', async () => {
     const { payload, race } = buildLivePayload();
     race.finalized_at = iso(NOW);
@@ -372,6 +502,20 @@ describe('PublicAthletePage', () => {
     expect(screen.getByTestId('public-athlete')).toBeInTheDocument();
     expect(screen.getByText(/Vila Velha/)).toBeInTheDocument();
     expect(screen.getByText('Participações')).toBeInTheDocument();
+  });
+
+  it('C-Minor-15: resets document.title when navigating away', async () => {
+    mocks.athlete.mockResolvedValue({
+      athlete: { id: 'a1', name: 'Ana Souza', sex: 'F', city: null, team_club: null } as AthleteProfile['athlete'],
+      results: [],
+    });
+    const { unmount } = renderAthletePage();
+
+    await screen.findByText('Ana Souza');
+    expect(document.title).toBe('Ana Souza – EnduranceBaseClub');
+
+    unmount();
+    expect(document.title).toBe('EnduranceBaseClub');
   });
 
   it('shows a friendly message when the athlete is private or missing', async () => {

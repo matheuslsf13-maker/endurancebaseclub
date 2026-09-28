@@ -84,6 +84,20 @@ describe('entries list', () => {
     expect(screen.queryByTestId('new-entry')).not.toBeInTheDocument();
   });
 
+  it('C-Minor-10: "Categoria" only shows dimensions that apply (no age groups, no event levels)', () => {
+    const race = makeRace({ id: 'r1', name: 'Revezamento', team_size: 2, configPatch: { age_groups: [] } });
+    const entry = makeEntry({
+      id: 'en1', race_id: 'r1', bib: '1',
+      members: [{ athlete_id: 'a1', position: 0, legs: [0] }, { athlete_id: 'a2', position: 1, legs: [1] }],
+    });
+    renderTab(makeAgg({ event: makeEvent({ id: 'ev1', levels: [] }), races: [race], entries: [entry], athletes: [ANA, BETO] }));
+
+    // Ana (F) + Beto (M) => Misto, with no "Sem faixa"/"Sem nível" noise since neither applies here.
+    expect(screen.getByText('Misto')).toBeInTheDocument();
+    expect(screen.queryByText(/Sem faixa/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Sem nível/)).not.toBeInTheDocument();
+  });
+
   it('filters by race and by accent-insensitive search', async () => {
     const user = userEvent.setup();
     const race1 = makeRace({ id: 'r1', name: 'Aquathlon', team_size: 1 });
@@ -169,6 +183,40 @@ describe('creating a team entry', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Nº já usado nesta prova');
     expect(screen.getByTestId('entry-save')).toBeInTheDocument(); // modal stayed open
+  });
+
+  it('C-I4: moves focus to the error banner after a failed save', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', team_size: 1 });
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('new-entry'));
+    await user.type(screen.getByTestId('entry-member-0'), 'Ana');
+    await user.click(await screen.findByTestId('entry-member-0-option-a1'));
+
+    const { ApiError } = await import('../../lib/api');
+    saveEntry.mockRejectedValueOnce(new ApiError('Nº já usado nesta prova'));
+    await user.click(screen.getByTestId('entry-save'));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.parentElement?.parentElement).toHaveFocus();
+  });
+
+  it('C-Minor-1: MemberPicker shows loading and error states instead of "Nenhum atleta encontrado"', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', team_size: 1 });
+    let resolveList!: (v: typeof ANA[]) => void;
+    listAthletes.mockReturnValue(new Promise((resolve) => { resolveList = resolve; }));
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('new-entry'));
+    await user.click(screen.getByTestId('entry-member-0'));
+    expect(screen.getByText('Carregando atletas…')).toBeInTheDocument();
+    expect(screen.queryByText('Nenhum atleta encontrado')).not.toBeInTheDocument();
+
+    resolveList([]);
+    await waitFor(() => expect(screen.queryByText('Carregando atletas…')).not.toBeInTheDocument());
+    expect(screen.getByText('Nenhum atleta encontrado')).toBeInTheDocument();
   });
 
   it('selects a member with the keyboard (ArrowDown + Enter) and exposes combobox ARIA', async () => {
@@ -342,19 +390,60 @@ describe('bulk entry dialog', () => {
     expect(screen.getByText(/nenhuma prova individual/i)).toBeInTheDocument();
     expect(screen.getByTestId('bulk-confirm')).toBeDisabled();
   });
+
+  it('shows a pt-BR plural toast without an "(s)"/"(ões)" suffix, singular and plural (C-Minor-17)', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', name: 'Corrida 5km', team_size: 1 });
+    bulkCreateEntries.mockResolvedValue([makeEntry({ id: 'en1' })]);
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('bulk-entries'));
+    await user.click(await screen.findByText('Ana Souza'));
+    await user.click(screen.getByTestId('bulk-confirm'));
+
+    expect(await screen.findByText('1 inscrição criada')).toBeInTheDocument();
+    expect(screen.queryByText(/inscrição\(ões\)/)).not.toBeInTheDocument();
+  });
+
+  it('C-Minor-1: shows a loading state instead of "Nenhum atleta disponível" while the roster is loading', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', name: 'Corrida 5km', team_size: 1 });
+    let resolveList!: (v: typeof ANA[]) => void;
+    listAthletes.mockReturnValue(new Promise((resolve) => { resolveList = resolve; }));
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('bulk-entries'));
+    expect(screen.getByText('Carregando atletas…')).toBeInTheDocument();
+    expect(screen.queryByText('Nenhum atleta disponível.')).not.toBeInTheDocument();
+
+    resolveList([ANA, BETO]);
+    expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
+  });
+
+  it('C-Minor-1: shows an error instead of "Nenhum atleta disponível" when the roster fails to load', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r2', name: 'Corrida 5km', team_size: 1 });
+    listAthletes.mockRejectedValue(new Error('offline'));
+    renderTab(makeAgg({ races: [race] }));
+
+    await user.click(screen.getByTestId('bulk-entries'));
+
+    expect(await screen.findByText('Não foi possível carregar os atletas.')).toBeInTheDocument();
+    expect(screen.queryByText('Nenhum atleta disponível.')).not.toBeInTheDocument();
+  });
 });
 
-describe('import shortcut (Ruling 51)', () => {
-  it('keeps the exact hint text and navigates to /atletas asking it to open the import dialog', async () => {
+describe('import shortcut (Ruling 51 / C-Minor-3)', () => {
+  it('keeps the exact hint text and navigates to /atletas asking it to open the import dialog preselecting this event', async () => {
     const user = userEvent.setup();
     const race = makeRace({ id: 'r1', team_size: 1 });
-    const { router } = renderTab(makeAgg({ races: [race] }));
+    const { router } = renderTab(makeAgg({ event: makeEvent({ id: 'ev1' }), races: [race] }));
 
     expect(screen.getByText(/a coluna Prova inscreve automaticamente em provas individuais/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Importar atletas' }));
 
     expect(router.state.location.pathname).toBe('/atletas');
-    expect(router.state.location.search).toBe('?import=1');
+    expect(router.state.location.search).toBe('?import=1&evento=ev1');
   });
 });

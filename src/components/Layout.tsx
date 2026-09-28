@@ -25,7 +25,9 @@ export function Layout({ onLogout }: LayoutProps) {
 
           <nav
             aria-label="Principal"
-            className="order-3 -mx-4 flex w-full min-w-0 flex-1 gap-1 overflow-x-auto px-4 sm:order-none sm:mx-0 sm:w-auto sm:px-0"
+            // Phones: a full-width third row (`w-full`; an unprefixed `flex-1` would set
+            // flex-basis 0 and squeeze it in beside the buttons). From `sm`: shares the brand row.
+            className="order-3 -mx-4 flex w-full min-w-0 gap-1 overflow-x-auto px-4 sm:order-none sm:mx-0 sm:w-auto sm:flex-1 sm:px-0"
           >
             {NAV_ITEMS.map((item) => (
               <NavLink

@@ -482,6 +482,55 @@ describe('SessionProvider', () => {
       expect(status()).toHaveTextContent('organizer');
     });
 
+    // A-I2: auth-js's signOut returns the refresh error of an expired token BEFORE removing the
+    // stored session, and its auto-refresh later fires TOKEN_REFRESHED once coverage returns.
+    it('stays signed out after an offline "Sair" with an expired token, even when the token refreshes later', async () => {
+      window.localStorage.setItem('ebc.auth', JSON.stringify({ access_token: 't', refresh_token: 'r' }));
+      window.localStorage.setItem('ebc.auth-user', JSON.stringify({ id: 'u1' }));
+      try {
+        renderProvider();
+        await advance(100);
+        expect(status()).toHaveTextContent('organizer');
+
+        sb.auth.signOut.mockResolvedValueOnce({
+          error: { name: 'AuthRetryableFetchError', message: 'Failed to fetch', status: 0 },
+        });
+        await act(() => current.signOut());
+        expect(status()).toHaveTextContent('anon');
+        expect(sb.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
+        // The stored session (refresh token included) is gone whatever signOut returned.
+        expect(window.localStorage.getItem('ebc.auth')).toBeNull();
+        expect(window.localStorage.getItem('ebc.auth-user')).toBeNull();
+
+        act(() => onAuthEvent('TOKEN_REFRESHED'));
+        await advance(10);
+        act(() => onAuthEvent('SIGNED_IN'));
+        await advance(10);
+
+        expect(status()).toHaveTextContent('anon');
+        expect(sb.rpc).toHaveBeenCalledTimes(1); // only the admin_me of the initial restore
+      } finally {
+        window.localStorage.clear();
+      }
+    });
+
+    it('an explicit sign-in after "Sair" lets auth events restore the session again', async () => {
+      renderProvider();
+      await advance(100);
+      await act(() => current.signOut());
+      expect(status()).toHaveTextContent('anon');
+
+      await act(() => current.signIn('ana@ebc.test', 'senha-segura'));
+      expect(status()).toHaveTextContent('organizer');
+      act(() => onAuthEvent('SIGNED_OUT'));
+      expect(status()).toHaveTextContent('anon');
+
+      // Another tab signs in again: this one follows, as before any "Sair".
+      act(() => onAuthEvent('SIGNED_IN'));
+      await advance(10);
+      expect(status()).toHaveTextContent('organizer');
+    });
+
     it('does not load the profile twice for its own sign-in', async () => {
       sb.auth.getSession.mockResolvedValueOnce({ data: { session: null }, error: null });
       sb.auth.signInWithPassword.mockImplementation(async () => {

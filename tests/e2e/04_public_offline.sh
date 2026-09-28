@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Scenario 4 — the public follows the results (desktop and phone), and a timekeeper's phone
+# reloads the link with no signal: the service worker still serves the app shell.
+source "$(dirname "$0")/lib.sh"
+load_state
+
+step "public results"
+ab pub set viewport 1280 800 >/dev/null
+ab pub open "$APP/#/p/$SLUG" >/dev/null
+wait_tid pub public-results
+wait_text pub "$(tid public-results)" "Tubarões"
+expect_text pub "$(tid public-results)" "Resultado oficial"
+snap pub 04-public-results
+
+step "public results page never leaks e-mail, phone or birth date (C-Minor-18)"
+# Checked here, before navigating away — [data-testid=public-results] no longer exists once the
+# SPA moves to the athlete page below. Defensive IIFE: an element that's momentarily absent (a
+# re-render) reads as '' rather than crashing the whole scenario on a TypeError.
+PUB_RESULTS_TEXT=$(js_str pub "(() => { const el = document.querySelector('[data-testid=public-results]'); return el ? el.innerText : ''; })()")
+# Round 2 item 22: asserts the exact registered e-mail/phone (01_master_setup.sh gave Ana both) —
+# a generic "no @ visible" check would pass even if the server started leaking a *different*
+# e-mail-shaped string, or would never really have exercised the leak path at all when no athlete
+# had an e-mail set.
+python3 - "$PUB_RESULTS_TEXT" "$ANA_EMAIL" "$ANA_PHONE" <<'PY' || fail pub "the public results page leaks private athlete data"
+import sys
+text, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
+assert text, 'public-results text came back empty — element not found'
+assert email not in text, f'{email!r} (an athlete e-mail) is visible on the public results page'
+assert phone not in text, f'{phone!r} (an athlete phone) is visible on the public results page'
+assert '1990' not in text, "an athlete's birth year is visible on the public results page"
+PY
+
+step "public athlete page"
+click_with_text pub "$(tid public-results) a[href*=\"#/atleta/\"]" "Ana"
+wait_tid pub public-athlete
+wait_text pub "$(tid public-athlete)" "Participações"
+snap pub 04-public-athlete
+
+step "public athlete page never leaks e-mail, phone or birth date (C-Minor-18)"
+PUB_ATHLETE_TEXT=$(js_str pub "(() => { const el = document.querySelector('[data-testid=public-athlete]'); return el ? el.innerText : ''; })()")
+python3 - "$PUB_ATHLETE_TEXT" "$ANA_EMAIL" "$ANA_PHONE" <<'PY' || fail pub "the public athlete page leaks private athlete data"
+import sys
+text, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
+assert text, 'public-athlete text came back empty — element not found'
+# Ana's fixture (01_master_setup.sh): birth date 15/06/1990. pub_athlete must return only
+# {id,name,sex,city,team_club} (spec §6) — never birth_date, email or phone.
+assert email not in text, f'{email!r} (an athlete e-mail) is visible on the public athlete page'
+assert phone not in text, f'{phone!r} (an athlete phone) is visible on the public athlete page'
+assert '1990' not in text, "Ana's birth year is visible on the public athlete page"
+assert '15/06' not in text, "Ana's birth date is visible on the public athlete page"
+PY
+
+step "pub_event RPC payload never leaks e-mail, phone or birth date (round 2 item 22)"
+# Belt-and-suspenders beyond the rendered-page checks above: fetches the raw RPC responses the
+# page itself consumed (same shim, same anonymous role — no Authorization header) and asserts the
+# exact secrets are absent from the JSON text itself, not just from whatever the UI happens to
+# render from it.
+PUB_EVENT_JSON=$(curl -sS -X POST "http://127.0.0.1:$SHIM_PORT/rest/v1/rpc/pub_event" \
+  -H 'Content-Type: application/json' -H 'apikey: sb_publishable_local_dev' \
+  -d "{\"p_slug\":\"$SLUG\"}")
+ANA_ID=$(python3 - "$PUB_EVENT_JSON" "$ANA_EMAIL" "$ANA_PHONE" <<'PY'
+import json, sys
+raw, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
+data = json.loads(raw)  # fails loudly if the shim didn't return valid JSON (e.g. an RPC error)
+assert email not in raw, f'{email!r} is present in the pub_event RPC payload'
+assert phone not in raw, f'{phone!r} is present in the pub_event RPC payload'
+assert 'birth_date' not in raw, "'birth_date' key is present in the pub_event RPC payload"
+ana = next((a for a in data.get('athletes', []) if a.get('name') == 'Ana'), None)
+assert ana is not None, 'Ana not found in the pub_event payload athletes'
+print(ana['id'])
+PY
+) || fail pub "pub_event RPC payload leaks private athlete data or is malformed"
+
+PUB_ATHLETE_JSON=$(curl -sS -X POST "http://127.0.0.1:$SHIM_PORT/rest/v1/rpc/pub_athlete" \
+  -H 'Content-Type: application/json' -H 'apikey: sb_publishable_local_dev' \
+  -d "{\"p_athlete_id\":\"$ANA_ID\"}")
+python3 - "$PUB_ATHLETE_JSON" "$ANA_EMAIL" "$ANA_PHONE" <<'PY' || fail pub "pub_athlete RPC payload leaks private athlete data or is malformed"
+import json, sys
+raw, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
+json.loads(raw)  # must be valid JSON
+assert email not in raw, f'{email!r} is present in the pub_athlete RPC payload'
+assert phone not in raw, f'{phone!r} is present in the pub_athlete RPC payload'
+assert 'birth_date' not in raw, "'birth_date' key is present in the pub_athlete RPC payload"
+PY
+
+step "public pages at 390×844"
+ab pub set viewport 390 844 >/dev/null
+ab pub open "$APP/#/p/$SLUG" >/dev/null
+wait_text pub "$(tid public-results)" "Tubarões"
+snap_pages pub 04-public-results-mobile
+no_hscroll pub "public results"
+ab pub open "$APP/#/" >/dev/null
+wait_tid pub public-events
+wait_text pub "$(tid public-events)" "Desafio EBC E2E"
+snap pub 04-public-home-mobile
+
+step "timekeeper reloads the link offline (service worker)"
+[[ "$(js tk1 "navigator.serviceWorker.ready.then(r => r.active !== null)")" == true ]] || fail tk1 "no active service worker"
+[[ "$(ab tk1 get url)" == "$TK_LINK" ]] || fail tk1 "tk1 is not on the timekeeper link"
+ab tk1 set offline on >/dev/null
+ab tk1 reload >/dev/null || fail tk1 "offline reload failed (no service worker response)"
+wait_tid tk1 mark-button
+wait_text tk1 "$(tid tk-sync-status)" "Sem internet"
+[[ "$(js tk1 "navigator.serviceWorker.controller !== null")" == true ]] || fail tk1 "page not served by the service worker"
+snap tk1 04-tk-offline-reload
+ab tk1 set offline off >/dev/null
+wait_text tk1 "$(tid tk-sync-status)" "sincronizado" 30000

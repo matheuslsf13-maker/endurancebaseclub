@@ -35,7 +35,7 @@ export default function AthleteProfilePage() {
     try {
       await api.admin.deleteAthlete(athlete.id);
       void queryClient.invalidateQueries({ queryKey: ['athletes'] });
-      toast.show({ message: 'Atleta excluído.', tone: 'success' });
+      toast.show({ message: 'Atleta excluído', tone: 'success' });
       navigate('/atletas');
     } catch (err) {
       toast.show({ message: err instanceof ApiError ? err.message : 'Erro inesperado', tone: 'danger' });
@@ -60,7 +60,7 @@ export default function AthleteProfilePage() {
     return (
       <div className="mx-auto w-full max-w-md px-4 py-12">
         <Card className="flex flex-col gap-4">
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-sm text-danger-text">
             {query.error instanceof Error ? query.error.message : 'Atleta não encontrado'}
           </p>
           <Link to="/atletas" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
@@ -117,7 +117,7 @@ export default function AthleteProfilePage() {
         <StatsView athlete={athlete} results={results} />
       </div>
 
-      <Modal open={editing} onClose={() => setEditing(false)} title="Editar atleta" size="lg">
+      <Modal open={editing} onClose={() => setEditing(false)} title="Editar atleta" size="lg" closeOnBackdrop={false}>
         <AthleteForm initial={athlete} onSaved={handleSaved} onCancel={() => setEditing(false)} />
       </Modal>
     </div>

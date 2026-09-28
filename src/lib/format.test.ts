@@ -52,6 +52,12 @@ describe('format (independent of device time zone)', () => {
     expect(formatPace(60_000, 0, 'run')).toBe('');
     expect(formatPace(60_000, 100, 'other')).toBe('');
   });
+  it('formatPace rounds to the nearest second, carrying into the minute (B1-M9)', () => {
+    expect(formatPace(1_498_000, 5000, 'run')).toBe('5:00 /km'); // 4:59.6 /km
+    expect(formatPace(1_497_000, 5000, 'run')).toBe('4:59 /km'); // 4:59.4 /km
+    expect(formatPace(1_195_000, 1000, 'swim')).toBe('2:00 /100m'); // 1:59.5 /100m
+    expect(formatPace(1_230_000, 5000, 'run')).toBe('4:06 /km'); // 4:06.0 /km
+  });
   it('parses dates typed in Brazilian or ISO format', () => {
     expect(parseDateInput('15/06/1990')).toBe('1990-06-15');
     expect(parseDateInput('5/6/1990')).toBe('1990-06-05');

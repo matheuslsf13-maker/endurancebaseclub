@@ -1,13 +1,28 @@
 import type { AthleteRow, EntryRow, EventAggregate, EventRow, MarkRow, RaceRow } from '../lib/types';
-import type { EventTiming, Issue } from './consolidation';
+import type { Crossing, EventTiming, Issue } from './consolidation';
 import type { RaceClassification } from './ranking';
 import { entryCategory, sexLabel } from './categories';
 import { entryDisplayName, entryWave, indexEvent, type EventIndex } from './eventModel';
+import { classificationFromResults, snapshotDrift } from './snapshot';
 import { excelDuration, excelSerialBrasilia, formatClock, formatDateBR, formatDateTimeBR } from '../lib/format';
 import { colLetter, type Cell, type ColumnDef, type SheetModel, type WorkbookModel } from '../lib/xlsx/writer';
 import { crossingSourceLabel, ENTRY_STATUS_LABEL, ISSUE_LABEL, SEVERITY_LABEL, STATUS_LABEL } from './labels';
 
 const bibCollator = new Intl.Collator('pt-BR', { numeric: true });
+
+/**
+ * B1-M10: every time on screen is truncated to tenths (format.ts), while Excel's `.0` formats
+ * round — 10:00:05.960 would read 10:00:05.9 on screen and 10:00:06.0 in the sheet. Clock and
+ * duration cells therefore carry milliseconds floored to tenths; formula cells cache what the
+ * formula computes from those floored passages, so the sheet stays consistent with itself.
+ */
+const floorTenths = (ms: number): number => Math.floor(ms / 100) * 100;
+const clockCell = (ms: number): number => excelSerialBrasilia(floorTenths(ms));
+const durationCell = (ms: number): number => excelDuration(floorTenths(ms));
+/** `end - start` as the sheet's formula computes it: from the floored cells. */
+const spanCell = (endMs: number, startMs: number): number => excelDuration(floorTenths(endMs) - floorTenths(startMs));
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
 /** Entries of `race` in bib order (numeric-aware) — the row order within one race's block in the
  * Inscritos and Súmula manual sheets. */
@@ -56,8 +71,13 @@ export function workbookFileName(event: EventRow): string {
  * Inscritos, every race's Tempos sheet, every race's Classificação sheet (races in position
  * order; Task 25's `verify-xlsx.py`-checked round trip and the sheet-name test pin this grouped
  * order), Pódios, Marcações, Pendências, Súmula manual — from the event aggregate plus the
- * already-computed timing and per-race classifications. `writeXlsx` (Task 14) turns the result
- * into actual XLSX bytes.
+ * already-computed timing and per-race (live) classifications. `writeXlsx` (Task 14) turns the
+ * result into actual XLSX bytes.
+ *
+ * B1-I1/B2-I2: for a FINALIZED race, Classificação, Pódios and the Resumo counts come from the
+ * stored snapshot (`agg.results`) — the official result the public page and the athletes' stats
+ * show — and the Resumo says when the live data now differs ("Sim — difere do ao vivo"). Tempos
+ * and Marcações stay live: they are the raw conference data.
  */
 export function buildEventWorkbook(
   agg: EventAggregate,
@@ -67,22 +87,33 @@ export function buildEventWorkbook(
 ): WorkbookModel {
   const idx = indexEvent(agg);
   const races = agg.races.slice().sort((a, b) => a.position - b.position);
-  const clsByRaceId = new Map(classifications.map(c => [c.race.id, c] as const));
+  const liveByRaceId = new Map(classifications.map(c => [c.race.id, c] as const));
+  const officialByRaceId = new Map<string, RaceClassification>();
+  const driftByRaceId = new Map<string, number>();
+  for (const race of races) {
+    const live = liveByRaceId.get(race.id);
+    if (race.finalized_at) {
+      officialByRaceId.set(race.id, classificationFromResults(race, agg.results, agg.event.levels));
+      if (live) driftByRaceId.set(race.id, snapshotDrift(live, agg.results).length);
+    } else if (live) {
+      officialByRaceId.set(race.id, live);
+    }
+  }
 
   const sheets: SheetModel[] = [
-    buildResumoSheet(agg.event, races, agg.entries, timing, generatedAtMs),
+    buildResumoSheet(agg.event, races, agg.entries, officialByRaceId, driftByRaceId, timing, generatedAtMs),
     buildInscritosSheet(races, idx, agg.event),
   ];
   for (const race of races) {
-    const cls = clsByRaceId.get(race.id);
+    const cls = liveByRaceId.get(race.id);
     if (cls) sheets.push(buildTemposSheet(race, cls, idx, agg.marks));
   }
   for (const race of races) {
-    const cls = clsByRaceId.get(race.id);
+    const cls = officialByRaceId.get(race.id);
     if (cls) sheets.push(buildClassificacaoSheet(race, cls, idx));
   }
   sheets.push(
-    buildPodiumsSheet(races, clsByRaceId, idx),
+    buildPodiumsSheet(races, officialByRaceId, idx),
     buildMarcacoesSheet(agg.marks, idx, timing),
     buildPendenciasSheet(timing.issues),
     buildSumulaManualSheet(races, idx),
@@ -91,11 +122,17 @@ export function buildEventWorkbook(
 }
 
 /** Resumo (spec §11): headerless — title, Evento/Data/Local/Gerada em, a blank row, then a bold
- * header and one row per race with entry/status counts, open pendências and finalized state. */
-function buildResumoSheet(event: EventRow, races: RaceRow[], entries: EntryRow[], timing: EventTiming, generatedAtMs: number): SheetModel {
+ * header and one row per race with entry/status counts, open pendências (warnings and errors) and finalized state. The
+ * counts come from the same classification the Classificação sheet shows (T15): "Concluintes" are
+ * its ranked finishers, and a finish without a usable time (no start, or not after the start —
+ * Ruling 9) is counted apart in "Chegada sem tempo". */
+function buildResumoSheet(
+  event: EventRow, races: RaceRow[], entries: EntryRow[], clsByRaceId: Map<string, RaceClassification>,
+  driftByRaceId: Map<string, number>, timing: EventTiming, generatedAtMs: number,
+): SheetModel {
   const columns: ColumnDef[] = [
     { header: '', width: 16 }, { header: '', width: 36 },
-    ...Array.from({ length: 7 }, (): ColumnDef => ({ header: '' })),
+    ...Array.from({ length: 8 }, (): ColumnDef => ({ header: '' })),
   ];
   const rows: Cell[][] = [];
 
@@ -106,25 +143,31 @@ function buildResumoSheet(event: EventRow, races: RaceRow[], entries: EntryRow[]
   rows.push(['Gerada em', `${formatDateTimeBR(generatedAtMs)} (Brasília)`]);
   rows.push([]);
   rows.push(
-    ['Prova', 'Inscritos', 'Concluintes', 'Em prova', 'DNF', 'DNS', 'DSQ', 'Pendências', 'Finalizada']
+    ['Prova', 'Inscritos', 'Concluintes', 'Chegada sem tempo', 'Em prova', 'DNF', 'DNS', 'DSQ', 'Pendências', 'Finalizada']
       .map((v): Cell => ({ v, s: 'bold' })),
   );
 
   for (const race of races) {
-    const raceEntries = entries.filter(e => e.race_id === race.id);
-    let concluintes = 0, emProva = 0, dnf = 0, dns = 0, dsq = 0;
-    for (const entry of raceEntries) {
-      switch (timing.byEntry.get(entry.id)?.status) {
-        case 'finished': concluintes++; break;
+    const cls = clsByRaceId.get(race.id);
+    const classified = cls?.rows ?? [];
+    let semTempo = 0, emProva = 0, dnf = 0, dns = 0, dsq = 0;
+    for (const r of classified) {
+      switch (r.timing.status) {
+        case 'finished': if (r.overall_pos === null) semTempo++; break;
         case 'on_course': emProva++; break;
         case 'dnf': dnf++; break;
         case 'dns': dns++; break;
         case 'dsq': dsq++; break;
       }
     }
-    const pendencias = timing.issues.filter(i => i.race_id === race.id).length;
-    const finalizada = race.finalized_at ? `Sim (${formatDateTimeBR(Date.parse(race.finalized_at))})` : 'Não';
-    rows.push([race.name, raceEntries.length, concluintes, emProva, dnf, dns, dsq, pendencias, finalizada]);
+    const inscritos = cls ? classified.length : entries.filter(e => e.race_id === race.id).length;
+    // Pending = warnings and errors, like every counter in the app; info issues are not pending.
+    const pendencias = timing.issues.filter(i => i.race_id === race.id && i.severity !== 'info').length;
+    const drift = driftByRaceId.get(race.id) ?? 0;
+    const finalizada = race.finalized_at
+      ? `Sim (${formatDateTimeBR(Date.parse(race.finalized_at))})${drift > 0 ? ` — difere do ao vivo (${plural(drift, 'inscrição', 'inscrições')})` : ''}`
+      : 'Não';
+    rows.push([race.name, inscritos, cls?.finishers ?? 0, semTempo, emProva, dnf, dns, dsq, pendencias, finalizada]);
   }
 
   return { name: 'Resumo', columns, rows, headerless: true };
@@ -193,35 +236,44 @@ function buildTemposSheet(race: RaceRow, cls: RaceClassification, idx: EventInde
     const row: Cell[] = new Array(columns.length).fill(null);
     row[0] = r.entry.bib;
     row[1] = entryDisplayName(r.entry, idx);
-    row[LARGADA_COL] = r.timing.start_ms !== null ? excelSerialBrasilia(r.timing.start_ms) : null;
+    const startMs = r.timing.start_ms;
+    row[LARGADA_COL] = startMs !== null ? clockCell(startMs) : null;
 
     let maxSpreadS: number | null = null;
     for (let k = 0; k < legsCount; k++) {
       const leg = r.timing.legs[k];
       const officialMs = leg?.crossing.official_ms ?? null;
-      row[passagemCol(k)] = officialMs !== null ? excelSerialBrasilia(officialMs) : null;
-      row[tempoCol(k)] = leg && leg.leg_ms !== null
+      row[passagemCol(k)] = officialMs !== null ? clockCell(officialMs) : null;
+      row[tempoCol(k)] = leg && leg.leg_ms !== null && officialMs !== null && leg.start_ms !== null
         ? {
             formula: `${colLetter(passagemCol(k))}${excelRow}-${colLetter(k === 0 ? LARGADA_COL : passagemCol(k - 1))}${excelRow}`,
-            result: excelDuration(leg.leg_ms),
+            result: spanCell(officialMs, leg.start_ms),
           }
         : null;
-      row[fonteCol(k)] = leg ? crossingSourceLabel(leg.crossing, idx.timekeepersById, marks) : '';
+      row[fonteCol(k)] = leg ? crossingSourceLabel(leg.crossing, idx.timekeepersById, marks, race.config) : '';
       if (leg?.crossing.spread_ms != null) {
         const spreadS = leg.crossing.spread_ms / 1000;
         maxSpreadS = maxSpreadS === null ? spreadS : Math.max(maxSpreadS, spreadS);
       }
     }
 
-    row[totalCol] = r.timing.total_ms !== null
+    const finishMs = legsCount > 0 ? r.timing.legs[legsCount - 1]?.crossing.official_ms ?? null : null;
+    // Total/Final cache what their formulas compute from the floored cells (B1-M10).
+    const totalSpanMs = r.timing.total_ms !== null && finishMs !== null && startMs !== null
+      ? floorTenths(finishMs) - floorTenths(startMs)
+      : null;
+    row[totalCol] = totalSpanMs !== null
       ? {
           formula: `${colLetter(passagemCol(legsCount - 1))}${excelRow}-${colLetter(LARGADA_COL)}${excelRow}`,
-          result: excelDuration(r.timing.total_ms),
+          result: excelDuration(totalSpanMs),
         }
       : null;
-    row[penaltyCol] = excelDuration(r.entry.penalty_ms);
-    row[finalCol] = r.timing.total_ms !== null
-      ? { formula: `${colLetter(totalCol)}${excelRow}+${colLetter(penaltyCol)}${excelRow}`, result: excelDuration(r.timing.final_ms as number) }
+    row[penaltyCol] = durationCell(r.entry.penalty_ms);
+    row[finalCol] = totalSpanMs !== null
+      ? {
+          formula: `${colLetter(totalCol)}${excelRow}+${colLetter(penaltyCol)}${excelRow}`,
+          result: excelDuration(totalSpanMs + floorTenths(r.entry.penalty_ms)),
+        }
       : null;
     row[divergCol] = maxSpreadS;
     row[statusCol] = STATUS_LABEL[r.timing.status];
@@ -231,8 +283,10 @@ function buildTemposSheet(race: RaceRow, cls: RaceClassification, idx: EventInde
   return { name: `Tempos – ${race.name}`, columns, rows, freezeHeader: true };
 }
 
-/** Classificação – <prova> (spec §11), one per race: the already-computed classification, in
- * order, as plain values (no formulas — everything here is already final). */
+/** "Class. – <prova>" (spec §11 Classificação), one per race: the classification (the snapshot
+ * for a finalized race), in order, as plain values (no formulas — everything here is final). The
+ * short prefix keeps similar long race names distinguishable after Excel's 31-character cut
+ * (B1-M2). */
 function buildClassificacaoSheet(race: RaceRow, cls: RaceClassification, idx: EventIndex): SheetModel {
   const columns: ColumnDef[] = [
     { header: 'Pos' }, { header: 'Nº' }, { header: 'Atleta/Equipe', width: 28 }, { header: 'Sexo' },
@@ -242,11 +296,11 @@ function buildClassificacaoSheet(race: RaceRow, cls: RaceClassification, idx: Ev
   const rows: Cell[][] = cls.rows.map((r): Cell[] => [
     r.overall_pos, r.entry.bib, entryDisplayName(r.entry, idx), sexLabel(r.category.sex),
     r.category.age_group, r.category.level, r.sex_pos,
-    r.timing.final_ms !== null ? excelDuration(r.timing.final_ms) : null,
-    r.gap_ms !== null ? excelDuration(r.gap_ms) : null,
+    r.timing.final_ms !== null ? durationCell(r.timing.final_ms) : null,
+    r.gap_ms !== null ? durationCell(r.gap_ms) : null,
     STATUS_LABEL[r.timing.status],
   ]);
-  return { name: `Classificação – ${race.name}`, columns, rows };
+  return { name: `Class. – ${race.name}`, columns, rows };
 }
 
 /** Pódios (spec §11): headerless — per race a title row, per ranking a bold row, per group a bold
@@ -269,7 +323,7 @@ function buildPodiumsSheet(races: RaceRow[], clsByRaceId: Map<string, RaceClassi
       for (const place of group.places) {
         rows.push([
           `${place.podium_pos}º`, place.ranked.entry.bib, entryDisplayName(place.ranked.entry, idx),
-          excelDuration(place.ranked.timing.final_ms as number),
+          durationCell(place.ranked.timing.final_ms as number),
         ]);
       }
     }
@@ -278,8 +332,21 @@ function buildPodiumsSheet(races: RaceRow[], clsByRaceId: Map<string, RaceClassi
   return { name: 'Pódios', columns, rows, headerless: true };
 }
 
+/** Whether mark `markId` is what the official time of `crossing` comes from (B1-M8): every
+ * candidate of a median, the reference timekeeper's candidate, the chosen mark — never a mark
+ * overruled by another decision or by a manual time. */
+function feedsOfficial(markId: string, crossing: Crossing, race: RaceRow | undefined): boolean {
+  switch (crossing.official_source) {
+    case 'median': return crossing.candidates.some(c => c.mark_id === markId);
+    case 'reference': return crossing.candidates.some(c => c.mark_id === markId && c.timekeeper_id === race?.config.reference_timekeeper_id);
+    case 'mark': return crossing.resolution?.mark_id === markId;
+    default: return false;
+  }
+}
+
 /** Marcações (spec §11): one row per mark ever recorded (sorted by time), with the organizer's
- * disposition of it (usada/descartada/duplicada/sem atleta) and its gap to the accepted time. */
+ * disposition of it (usada/não usada (decisão)/descartada/duplicada/sem atleta) and its gap to the
+ * accepted time. */
 function buildMarcacoesSheet(marks: MarkRow[], idx: EventIndex, timing: EventTiming): SheetModel {
   const columns: ColumnDef[] = [
     { header: 'Hora (Brasília)' }, { header: 'Cronometrista' }, { header: 'Nº' },
@@ -296,7 +363,11 @@ function buildMarcacoesSheet(marks: MarkRow[], idx: EventIndex, timing: EventTim
       const entry = m.entry_id ? idx.entriesById.get(m.entry_id) : undefined;
       const race = entry ? idx.racesById.get(entry.race_id) : undefined;
       const crossing = entry && m.leg_index !== null ? timing.byEntry.get(entry.id)?.legs[m.leg_index]?.crossing : undefined;
-      const situacao = m.discarded ? 'descartada' : !entry ? 'sem atleta' : crossing?.duplicates.includes(m.id) ? 'duplicada' : 'usada';
+      const situacao = m.discarded ? 'descartada'
+        : !entry ? 'sem atleta'
+        : crossing?.duplicates.includes(m.id) ? 'duplicada'
+        : crossing && feedsOfficial(m.id, crossing, race) ? 'usada'
+        : 'não usada (decisão)';
       const tsMs = Date.parse(m.ts);
       const delta = crossing?.official_ms != null ? (tsMs - crossing.official_ms) / 1000 : null;
       return [

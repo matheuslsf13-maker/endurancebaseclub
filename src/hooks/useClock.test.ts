@@ -49,13 +49,25 @@ const clockWrites = () => setItem.mock.calls.filter(([key]) => key === 'ebc.cloc
 
 describe('useClock', () => {
   it('restores the offset saved under ebc.clock before the first sample answers', async () => {
-    window.localStorage.setItem('ebc.clock', JSON.stringify(SAVED));
+    window.localStorage.setItem('ebc.clock', JSON.stringify({ ...SAVED, synced_at: Date.now() - 60_000 }));
     serverTime.mockReturnValue(new Promise<number>(() => {}));
     const useClock = await loadUseClock();
 
     const { result } = renderHook(() => useClock());
 
     expect(result.current.synced).toBe(true);
+    expect(result.current.offsetMs).toBe(5_000);
+    expect(result.current.now()).toBe(Date.now() + 5_000);
+  });
+
+  it('shows a saved offset older than 12 h as not synchronized, while still applying it (B2-m4)', async () => {
+    window.localStorage.setItem('ebc.clock', JSON.stringify({ ...SAVED, synced_at: Date.now() - 12 * 3_600_000 - 1 }));
+    serverTime.mockReturnValue(new Promise<number>(() => {}));
+    const useClock = await loadUseClock();
+
+    const { result } = renderHook(() => useClock());
+
+    expect(result.current.synced).toBe(false);
     expect(result.current.offsetMs).toBe(5_000);
     expect(result.current.now()).toBe(Date.now() + 5_000);
   });

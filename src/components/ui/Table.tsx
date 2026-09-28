@@ -17,8 +17,11 @@ function withStickyHead(children: ReactNode): ReactNode {
 }
 
 export function Table({ className = '', children, ...rest }: TableProps) {
+  // `relative`: the scroller is the containing block of positioned descendants (an `sr-only`
+  // label in a column scrolled off to the right), so they scroll and clip with the table instead
+  // of widening the page on a phone.
   return (
-    <div className="w-full overflow-x-auto rounded-xl border border-border">
+    <div className="relative w-full overflow-x-auto rounded-xl border border-border">
       <table className={`w-full min-w-max border-collapse text-left text-sm ${className}`} {...rest}>
         {withStickyHead(children)}
       </table>

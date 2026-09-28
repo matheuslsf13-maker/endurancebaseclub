@@ -42,11 +42,13 @@ interface TimerState {
   focused: boolean;
 }
 
+// A toast floats over whatever is under it (a QR code, a table), so its background must be opaque:
+// each tint is mixed into the theme's surface instead of being laid, translucent, over the page.
 const TONE_CLASSES: Record<ToastTone, string> = {
   neutral: 'border-border bg-surface-2',
-  success: 'border-success/40 bg-success/15',
-  warning: 'border-warning/40 bg-warning/15',
-  danger: 'border-danger/40 bg-danger/15',
+  success: 'border-success/40 bg-[color-mix(in_srgb,var(--color-success)_15%,var(--color-surface))]',
+  warning: 'border-warning/40 bg-[color-mix(in_srgb,var(--color-warning)_15%,var(--color-surface))]',
+  danger: 'border-danger/40 bg-[color-mix(in_srgb,var(--color-danger)_15%,var(--color-surface))]',
 };
 
 let toastSeq = 0;

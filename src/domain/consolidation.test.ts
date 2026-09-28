@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { median, computeCrossing, computeEntryTiming, computeEventTiming, UNASSIGNED_ISSUE_AFTER_MS } from './consolidation';
+import { ISSUE_LABEL } from './labels';
 import type { IssueType } from './consolidation';
 import type { MarkRow, ResolutionRow, WaveRow } from '../lib/types';
 import { makeRace, makeWave, makeEntry, makeMark, makeResolution, makeTimekeeper, makeAthlete, T0, SEC, MIN, iso } from './testing/fixtures';
@@ -189,7 +190,7 @@ describe('computeEventTiming issue details', () => {
   const cases: { name: string; type: IssueType; marks: MarkRow[]; waves?: WaveRow[]; resolutions?: ResolutionRow[]; message: string }[] = [
     { name: 'divergence', type: 'divergence', marks: [makeMark({ at: L0, timekeeper_id: 'tk1' }), makeMark({ at: L0 + 14 * SEC, timekeeper_id: 'tk2' })], message: 'Nº 101 · Perna 1 (Natação): divergência de 14,0 s entre cronometristas' },
     { name: 'duplicate', type: 'duplicate', marks: [makeMark({ at: L0 }), makeMark({ at: L0 + 200 })], message: 'Nº 101 · Perna 1 (Natação): Ana marcou mais de uma vez' },
-    { name: 'chosen mark discarded', type: 'chosen_mark_discarded', marks: [makeMark({ at: L0 }), gone], resolutions: [makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: gone.id })], message: 'Nº 101 · Perna 1 (Natação): a marcação escolhida foi descartada' },
+    { name: 'chosen mark discarded', type: 'chosen_mark_discarded', marks: [makeMark({ at: L0 }), gone], resolutions: [makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: gone.id })], message: 'Nº 101 · Perna 1 (Natação): a marcação escolhida foi descartada ou movida' },
     { name: 'missing crossing', type: 'missing_crossing', marks: [makeMark({ at: T0 + 30 * MIN, leg_index: 1 })], message: 'Nº 101 · Perna 1 (Natação): passagem não registrada (há passagem posterior)' },
     { name: 'order', type: 'order', marks: [makeMark({ at: T0 + 20 * MIN, leg_index: 0 }), makeMark({ at: T0 + 10 * MIN, leg_index: 1 })], message: 'Nº 101 · Perna 2 (Corrida): passagem antes da anterior/largada' },
     { name: 'no start', type: 'no_start', marks: [makeMark({ at: L0 })], waves: [makeWave({ start_at: null })], message: 'Nº 101: marcação sem largada registrada (Largada geral)' },
@@ -199,6 +200,33 @@ describe('computeEventTiming issue details', () => {
     { name: 'unassigned (organization)', type: 'unassigned', marks: [unassignedBy(null)], message: 'Marcação 08:38:58.7 (Organização) sem atleta' },
     { name: 'unassigned (timekeeper not loaded yet)', type: 'unassigned', marks: [unassignedBy('tk9')], message: 'Marcação 08:38:58.7 (Cronometrista) sem atleta' },
   ];
+  it('B1-M6: a chosen mark moved to another leg raises the same "descartada ou movida" warning', () => {
+    const moved = makeMark({ at: L0 + SEC, timekeeper_id: 'tk2', leg_index: 1 });
+    const r = computeEventTiming({
+      ...base, marks: [makeMark({ at: L0 }), moved],
+      resolutions: [makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: moved.id })],
+    }, now);
+    expect(r.issues.find(i => i.type === 'chosen_mark_discarded')).toMatchObject({
+      severity: 'warning', leg_index: 0, message: 'Nº 101 · Perna 1 (Natação): a marcação escolhida foi descartada ou movida',
+    });
+  });
+  it('B1-M7: an entry set to DNS/DNF/DSQ that has crossings raises an issue; a contradiction is a warning', () => {
+    const at = (status: 'dns' | 'dnf' | 'dsq', marks: MarkRow[]) =>
+      computeEventTiming({ ...base, entries: [makeEntry({ status })], marks }, now).issues.find(i => i.type === 'status_with_crossings');
+    const swim = makeMark({ at: L0, leg_index: 0 });
+    const finish = makeMark({ at: T0 + 30 * MIN, leg_index: 1 });
+    // DNS but crossed the swim exit: the entry vanished from the classification without a flag.
+    expect(at('dns', [swim])).toMatchObject({ severity: 'warning', entry_id: 'en1', race_id: 'r1', message: 'Nº 101 está como DNS mas tem passagens' });
+    // DNF but crossed the finish line.
+    expect(at('dnf', [swim, finish])).toMatchObject({ severity: 'warning', message: 'Nº 101 está como DNF mas tem passagens' });
+    // DNF after the swim, and DSQ after finishing, are what those statuses usually look like: shown, not pending.
+    expect(at('dnf', [swim])).toMatchObject({ severity: 'info', message: 'Nº 101 está como DNF mas tem passagens' });
+    expect(at('dsq', [swim, finish])).toMatchObject({ severity: 'info', message: 'Nº 101 está como DSQ mas tem passagens' });
+    // No crossing (or only discarded marks): nothing to flag.
+    expect(at('dns', [])).toBeUndefined();
+    expect(at('dns', [makeMark({ at: L0, discarded: true, discarded_by: 'organizer' })])).toBeUndefined();
+    expect(ISSUE_LABEL.status_with_crossings).toBe('Status com passagens');
+  });
   it.each(cases)('$name message', ({ type, marks, waves, resolutions, message }) => {
     const r = computeEventTiming({ ...base, marks, waves: waves ?? base.waves, resolutions: resolutions ?? base.resolutions }, now);
     expect(r.issues.find(i => i.type === type)?.message).toBe(message);

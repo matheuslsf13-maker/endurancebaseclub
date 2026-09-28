@@ -1,18 +1,35 @@
 @import "tailwindcss";
 
+/* color-scheme: native controls (scrollbars, date picker, select popups) follow the theme.
+   accent-color (inherited, resolved against the active theme's --accent): radios/checkboxes. */
 :root, [data-theme="dark"] {
   --bg: #191513; --fg: #F4F1EC; --surface: #241F1C; --surface-2: #2E2825;
   --border: #3A332F; --muted: #A39D93; --accent: #F4F1EC; --accent-fg: #191513;
+  color-scheme: dark;
+  accent-color: var(--accent);
 }
 [data-theme="light"] {
   --bg: #F4F1EC; --fg: #191513; --surface: #FFFFFF; --surface-2: #ECE7DF;
   --border: #D9D3C9; --muted: #6F665E; --accent: #191513; --accent-fg: #F4F1EC;
+  color-scheme: light;
 }
 @theme inline {
   --color-bg: var(--bg); --color-fg: var(--fg); --color-surface: var(--surface); --color-surface-2: var(--surface-2);
   --color-border: var(--border); --color-muted: var(--muted); --color-accent: var(--accent); --color-accent-fg: var(--accent-fg);
   --color-ink: #191513; --color-paper: #F4F1EC;
   --color-success: #3F8F5B; --color-warning: #C8922E; --color-danger: #C2413B; --color-info: #5B7C99;
+  /* C-Minor-11: brand-derived text tints (color-mix, no new brand colours) for status TEXT only —
+     danger/warning/info at their plain swatch fail WCAG AA (4.5:1) as 14px text in one theme or the
+     other (e.g. warning on light-theme paper is ~2.4:1). Mixing toward `--fg` — already the
+     maximum-contrast foreground for each theme — pushes each colour the readable direction
+     automatically (lighter in dark mode, darker in light mode) without touching the swatches
+     Button/Badge use as backgrounds, which already have sufficient contrast against their own text. */
+  --color-danger-text: color-mix(in srgb, var(--color-danger) 70%, var(--fg) 30%);
+  --color-warning-text: color-mix(in srgb, var(--color-warning) 60%, var(--fg) 40%);
+  --color-info-text: color-mix(in srgb, var(--color-info) 55%, var(--fg) 45%);
+  /* Round 2 Badge-contrast grant: success's plain swatch reads fine in dark mode (~4.6:1 on
+     --bg) but drops to ~3.5:1 on light mode's bright paper — same fix, same derivation. */
+  --color-success-text: color-mix(in srgb, var(--color-success) 70%, var(--fg) 30%);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 html, body, #root { height: 100%; }

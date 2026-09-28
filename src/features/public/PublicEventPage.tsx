@@ -4,16 +4,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { indexEvent, mergeById } from '../../domain/eventModel';
 import { computeEventTiming } from '../../domain/consolidation';
-import type { Crossing, EntryTiming, LegTiming } from '../../domain/consolidation';
-import { classifyRace, compareGroupOrder } from '../../domain/ranking';
-import type { PodiumGroup, PodiumPlace, RaceClassification, RankedEntry } from '../../domain/ranking';
-import type { EntryCategory } from '../../domain/categories';
+import { classifyRace } from '../../domain/ranking';
+import { classificationFromResults } from '../../domain/snapshot';
 import { formatDateBR } from '../../lib/format';
-import { Badge, Card, EmptyState, Spinner } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, Select, Spinner } from '../../components/ui';
 import { ClassificationTable } from '../results/ClassificationTable';
 import { PodiumView } from '../results/PodiumView';
 import { EVENT_STATUS_LABEL, PublicShell } from './PublicHome';
-import type { AthleteRow, EntryRow, PubEventPayload, RaceRow, ResultRow } from '../../lib/types';
+import type { PubEventPayload } from '../../lib/types';
 
 /** Cadence for `pub_live` while the tab is visible (spec §12, Global Constraints "público 10 s");
  * the overlap below re-reads the same window every poll (spec "sobreposição de fetch 10 s"). */
@@ -21,136 +19,19 @@ const PUBLIC_POLL_MS = 10_000;
 const FETCH_OVERLAP_MS = 10_000;
 
 // ---------------------------------------------------------------------------
-// Official (finalized) races: `results` already carries a frozen `ResultSnapshot` per entry (spec
-// §9, `admin_finalize_race`). Task 25's `ClassificationTable`/`PodiumView` only understand a live
-// `RaceClassification` (built from `EntryRow` + `EntryTiming`), so this section adapts the
-// snapshot rows into the same shape — reusing the two components (Ruling 41) for both the live and
-// the official view instead of a second, parallel results table.
-// ---------------------------------------------------------------------------
-
-const bibCollator = new Intl.Collator('pt-BR', { numeric: true });
-const compareBib = (a: EntryRow, b: EntryRow): number => bibCollator.compare(a.bib, b.bib);
-
-/** Same unranked ordering as `domain/ranking.ts` (not exported there): a finish with no
- * resolvable time first, then on_course, not_started, dnf, dns, dsq. */
-const UNRANKED_STATUS_ORDER: Record<EntryTiming['status'], number> = {
-  finished: 0, on_course: 1, not_started: 2, dnf: 3, dns: 4, dsq: 5,
-};
-
-/** A `Crossing` stub for a snapshot leg: `ClassificationTable` only reads `leg_ms` off it, so the
- * rest is filled with neutral values purely to satisfy the type. */
-function stubCrossing(legIndex: number, ms: number | null): Crossing {
-  return {
-    leg_index: legIndex, candidates: [], duplicates: [],
-    median_ms: ms, spread_ms: null, system_ms: ms, system_source: ms !== null ? 'median' : null,
-    official_ms: ms, official_source: ms !== null ? 'median' : null,
-    resolution: null, divergent: false, chosen_mark_discarded: false,
-  };
-}
-
-/** Rebuilds the minimal `EntryRow` a snapshot row needs so `ClassificationTable`/`PodiumView` can
- * render it (member names, bib, team name, the penalty applied at finalize time). */
-function entryFromSnapshot(r: ResultRow): EntryRow {
-  return {
-    id: r.entry_id, event_id: r.event_id, race_id: r.race_id, wave_id: null,
-    bib: r.data.bib, team_name: r.data.team_name, level: r.data.category.level,
-    status: 'ok', penalty_ms: r.data.penalty_ms, notes: '',
-    members: r.data.members.map((m, i) => ({ athlete_id: m.athlete_id, position: i, legs: m.legs, name: m.name })),
-  };
-}
-
-function timingFromSnapshot(r: ResultRow): EntryTiming {
-  const legs: LegTiming[] = r.data.legs.map((l) => ({
-    leg_index: l.leg_index, athlete_id: l.athlete_id, crossing: stubCrossing(l.leg_index, l.time_ms), start_ms: null, leg_ms: l.time_ms,
-  }));
-  return {
-    entry_id: r.entry_id, race_id: r.race_id, start_ms: null, legs,
-    total_ms: r.data.total_ms, final_ms: r.data.final_ms, status: r.data.status,
-    current_leg: null, current_leg_start_ms: null,
-  };
-}
-
-/** Groups every entry's frozen `data.podiums` places by ranking + group label, resolving the full
- * `RankingDef` from the race's current config when it still has that ranking (falls back to a
- * name-only stub otherwise — the config could have changed since the race was finalized). Orders
- * groups by the race's ranking order, then within a ranking by the same canonical group order
- * (`compareGroupOrder`, spec §9: sex M, F, MISTO; age groups by `min`; levels in event order) that
- * `domain/ranking.ts`'s `buildPodiums` uses for the live view — reused here instead of an ad-hoc
- * alphabetical sort so a finalized race's podiums match the order shown before it was finalized. */
-function reconstructPodiums(race: RaceRow, results: ResultRow[], rowsByEntry: Map<string, RankedEntry>, levels: string[]): PodiumGroup[] {
-  const groups = new Map<string, PodiumGroup>();
-  const groupCategory = new Map<string, EntryCategory>();
-  for (const r of results) {
-    const ranked = rowsByEntry.get(r.entry_id);
-    if (!ranked) continue;
-    for (const p of r.data.podiums) {
-      const key = `${p.ranking_id}::${p.group_label}`;
-      let group = groups.get(key);
-      if (!group) {
-        const rankingDef = race.config.rankings.find((rd) => rd.id === p.ranking_id) ?? {
-          id: p.ranking_id, name: p.ranking_name, dims: [], size: 3,
-        };
-        group = { ranking: rankingDef, group_key: key, group_label: p.group_label, places: [] };
-        groups.set(key, group);
-        groupCategory.set(key, r.data.category);
-      }
-      group.places.push({ podium_pos: p.podium_pos, ranked });
-    }
-  }
-  for (const g of groups.values()) g.places.sort((a: PodiumPlace, b: PodiumPlace) => a.podium_pos - b.podium_pos);
-  const order = race.config.rankings.map((rd) => rd.id);
-  return [...groups.values()].sort((a, b) => {
-    const ai = order.indexOf(a.ranking.id);
-    const bi = order.indexOf(b.ranking.id);
-    const rankingOrder = (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi);
-    if (rankingOrder !== 0) return rankingOrder;
-    return compareGroupOrder(a.ranking.dims, groupCategory.get(a.group_key)!, groupCategory.get(b.group_key)!, race.config.age_groups, levels);
-  });
-}
-
-/** Rebuilds the `RaceClassification` `ClassificationTable`/`PodiumView` expect from a finalized
- * race's stored `results`, ordering rows by their frozen `overall_pos` (spec: "ordenados por
- * overall_pos, a partir dos snapshots") instead of recomputing anything from live marks. */
-function classificationFromResults(race: RaceRow, results: ResultRow[], athletesById: Map<string, AthleteRow>, levels: string[]): RaceClassification {
-  const rowsByEntry = new Map<string, RankedEntry>();
-  const built = results.map((r) => {
-    const entry = entryFromSnapshot(r);
-    const timing = timingFromSnapshot(r);
-    const ranked: RankedEntry = {
-      entry, timing, category: r.data.category,
-      overall_pos: r.overall_pos, sex_pos: r.data.positions.sex,
-      ranking_pos: Object.fromEntries(race.config.rankings.map((rd) => [rd.id, null])),
-      gap_ms: null,
-    };
-    rowsByEntry.set(r.entry_id, ranked);
-    return ranked;
-  });
-
-  const ranked = built
-    .filter((r) => r.overall_pos !== null)
-    .sort((a, b) => (a.overall_pos as number) - (b.overall_pos as number) || compareBib(a.entry, b.entry));
-  const unranked = built
-    .filter((r) => r.overall_pos === null)
-    .sort((a, b) => UNRANKED_STATUS_ORDER[a.timing.status] - UNRANKED_STATUS_ORDER[b.timing.status] || compareBib(a.entry, b.entry));
-
-  const leaderFinal = ranked.length > 0 ? ranked[0].timing.final_ms : null;
-  for (const r of ranked) {
-    r.gap_ms = leaderFinal !== null && r.timing.final_ms !== null ? r.timing.final_ms - leaderFinal : null;
-  }
-
-  const rows = [...ranked, ...unranked];
-  return { race, rows, finishers: ranked.length, podiums: reconstructPodiums(race, results, rowsByEntry, levels) };
-}
-
-// ---------------------------------------------------------------------------
 // Live polling: `pub_live` every 10 s while the tab is visible, merging marks by id like the
 // admin's `useEventData` (Ruling 43: discarded marks are included too — the domain ignores them),
 // replacing resolutions/waves, and refetching the whole payload when the version moves.
 // ---------------------------------------------------------------------------
 
-function usePublicLivePoll(slug: string | undefined, enabled: boolean) {
+/** C-Minor-14: `pub_live` failures used to be silent (kept the last known state forever, with no
+ * sign anything was wrong) — returns whether the *most recent* poll failed, so the page can show
+ * a small "não foi possível atualizar" hint instead of looking merely stale. Clears again as soon
+ * as a poll succeeds. */
+function usePublicLivePoll(slug: string | undefined, enabled: boolean): { lastPollFailed: boolean } {
   const queryClient = useQueryClient();
   const inFlight = useRef(false);
+  const [lastPollFailed, setLastPollFailed] = useState(false);
 
   useEffect(() => {
     if (!slug || !enabled) return undefined;
@@ -185,8 +66,11 @@ function usePublicLivePoll(slug: string | undefined, enabled: boolean) {
               void queryClient.refetchQueries({ queryKey: key, exact: true });
             }
           }
+          if (!cancelled) setLastPollFailed(false);
         } catch {
-          // Offline or a transient failure: keep the last known state and retry on the next tick.
+          // Offline or a transient failure: keep the last known state and retry on the next tick,
+          // but say so (C-Minor-14) instead of looking silently stale.
+          if (!cancelled) setLastPollFailed(true);
         } finally {
           inFlight.current = false;
         }
@@ -206,6 +90,8 @@ function usePublicLivePoll(slug: string | undefined, enabled: boolean) {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [slug, enabled, queryClient]);
+
+  return { lastPollFailed };
 }
 
 // ---------------------------------------------------------------------------
@@ -216,20 +102,36 @@ export default function PublicEventPage() {
     queryKey: ['pub-event', slug],
     queryFn: () => api.pub.event(slug as string),
     enabled: slug !== undefined,
+    // C-Minor-14: the 10 s delta poll (usePublicLivePoll) already resumes the moment the tab
+    // becomes visible again, so re-downloading the whole payload on every window focus only
+    // costs bandwidth on a spectator's phone for no fresher data.
+    refetchOnWindowFocus: false,
   });
   const payload = query.data;
 
-  usePublicLivePoll(slug, payload !== undefined);
+  const { lastPollFailed } = usePublicLivePoll(slug, payload !== undefined);
 
   useEffect(() => {
     document.title = payload ? `${payload.event.name} – Resultados` : 'EnduranceBaseClub';
   }, [payload]);
+
+  // C-Minor-15: reset on unmount only (not on every `payload` change, which would flash the
+  // default title while the page stays open) — otherwise an admin tab reached by following a
+  // public link keeps "… – Resultados" forever.
+  useEffect(() => () => { document.title = 'EnduranceBaseClub'; }, []);
 
   const index = useMemo(() => (payload ? indexEvent(payload) : null), [payload]);
   const races = useMemo(() => (payload ? [...payload.races].sort((a, b) => a.position - b.position) : []), [payload]);
   const [selectedRaceId, setSelectedRaceId] = useState('');
   const activeRaceId = races.some((r) => r.id === selectedRaceId) ? selectedRaceId : (races[0]?.id ?? '');
   const race = races.find((r) => r.id === activeRaceId) ?? null;
+  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+
+  // C-Minor-8: scroll the active race tab into view whenever it changes — a public event with
+  // several races can push later tabs off-screen at 390 px with no other affordance.
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [activeRaceId]);
 
   const liveTiming = useMemo(() => (payload ? computeEventTiming(payload, Date.now()) : null), [payload]);
 
@@ -242,7 +144,7 @@ export default function PublicEventPage() {
     if (!payload || !index || !race) return null;
     if (isOfficial) {
       const raceResults = payload.results.filter((r) => r.race_id === race.id);
-      return classificationFromResults(race, raceResults, index.athletesById, payload.event.levels);
+      return classificationFromResults(race, raceResults, payload.event.levels);
     }
     if (!liveTiming) return null;
     const entries = payload.entries.filter((e) => e.race_id === race.id);
@@ -264,12 +166,18 @@ export default function PublicEventPage() {
       <PublicShell>
         <div data-testid="public-results" className="mx-auto w-full max-w-md px-4 py-12">
           <Card className="flex flex-col gap-4">
-            <p role="alert" className="text-sm text-danger">
+            <p role="alert" className="text-sm text-danger-text">
               {query.error instanceof Error ? query.error.message : 'Evento não encontrado'}
             </p>
-            <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
-              Voltar aos eventos públicos
-            </Link>
+            {/* C-Minor-14: the load error had no way to recover short of a manual reload. */}
+            <div className="flex flex-wrap items-center gap-3">
+              <Button size="sm" onClick={() => void query.refetch()} loading={query.isFetching}>
+                Tentar novamente
+              </Button>
+              <Link to="/" className="text-sm text-muted underline underline-offset-2 hover:text-fg">
+                Voltar aos eventos públicos
+              </Link>
+            </div>
           </Card>
         </div>
       </PublicShell>
@@ -304,21 +212,40 @@ export default function PublicEventPage() {
 
         {races.length > 0 && (
           <>
-            <div role="tablist" aria-label="Provas" className="mt-6 flex gap-1 overflow-x-auto border-b border-border">
-              {races.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={r.id === activeRaceId}
-                  onClick={() => setSelectedRaceId(r.id)}
-                  className={`inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
-                    r.id === activeRaceId ? 'border-fg text-fg' : 'border-transparent text-muted hover:text-fg'
-                  }`}
-                >
-                  {r.name}
-                </button>
-              ))}
+            {/* Round 2 item 12: even with scroll-into-view + a fade cue (C-Minor-8), a horizontal
+                tab strip at 390 px starts with any race past the first entirely off-screen and no
+                affordance actually got it noticed in review. Below `sm`, a plain <select> replaces
+                the tablist outright — it has no overflow at all, for any number of races. `sm:` and
+                up keep the tablist (there's room to see every tab at a glance there). */}
+            <div className="mt-6 sm:hidden">
+              <Select
+                label="Prova"
+                data-testid="public-race-select"
+                value={activeRaceId}
+                onChange={(e) => setSelectedRaceId(e.target.value)}
+                options={races.map((r) => ({ value: r.id, label: r.name }))}
+              />
+            </div>
+            <div className="relative mt-6 hidden sm:block">
+              <div role="tablist" aria-label="Provas" className="flex gap-1 overflow-x-auto border-b border-border">
+                {races.map((r) => (
+                  <button
+                    key={r.id}
+                    ref={r.id === activeRaceId ? activeTabRef : undefined}
+                    type="button"
+                    role="tab"
+                    aria-selected={r.id === activeRaceId}
+                    onClick={() => setSelectedRaceId(r.id)}
+                    className={`inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                      r.id === activeRaceId ? 'border-fg text-fg' : 'border-transparent text-muted hover:text-fg'
+                    }`}
+                  >
+                    {r.name}
+                  </button>
+                ))}
+              </div>
+              <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-bg to-transparent" />
+              <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-bg to-transparent" />
             </div>
 
             {race && cls && index && (
@@ -331,6 +258,13 @@ export default function PublicEventPage() {
                     <>
                       <Badge tone="warning">Parcial – ao vivo</Badge>
                       <span className="text-xs text-muted">Atualiza automaticamente a cada 10 segundos.</span>
+                      {/* C-Minor-14: pub_live failures used to be silent; the classification just
+                          quietly stopped updating. */}
+                      {lastPollFailed && (
+                        <span role="status" className="text-xs text-warning-text">
+                          Não foi possível atualizar agora — tentando de novo.
+                        </span>
+                      )}
                     </>
                   )}
                 </div>

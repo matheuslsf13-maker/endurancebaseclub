@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, Outlet, useMatch, useParams } from 'react-router';
 import { Badge, Button, Card, Spinner, Tabs } from '../../components/ui';
 import type { BadgeTone, TabItem } from '../../components/ui';
-import { formatDateBR } from '../../lib/format';
+import { formatClock, formatDateBR } from '../../lib/format';
 import type { EventStatus } from '../../lib/types';
 import { useEventData } from '../../hooks/useEventData';
 import { EventProvider, useEventContext } from './EventContext';
@@ -27,7 +27,7 @@ const STATUS: Record<EventStatus, { label: string; tone: BadgeTone }> = {
 export default function EventLayout() {
   const eventId = useParams().eventId ?? '';
   const tab = useMatch('/eventos/:eventId/:tab/*')?.params.tab;
-  const { agg, isLoading, error, refresh, patchAgg } = useEventData(eventId, { live: tab !== undefined && LIVE_TABS.has(tab) });
+  const { agg, isLoading, error, refresh, patchAgg, staleSince } = useEventData(eventId, { live: tab !== undefined && LIVE_TABS.has(tab) });
 
   if (!agg) {
     if (isLoading || !error) {
@@ -43,7 +43,7 @@ export default function EventLayout() {
   return (
     <EventProvider eventId={eventId} agg={agg} refresh={refresh} patchAgg={patchAgg}>
       <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
-        <EventHeader />
+        <EventHeader staleSince={staleSince} />
         <div className="mt-6">
           <Outlet />
         </div>
@@ -52,7 +52,7 @@ export default function EventLayout() {
   );
 }
 
-function EventHeader() {
+function EventHeader({ staleSince }: { staleSince: number | null }) {
   const { agg, timing } = useEventContext();
   const { event } = agg;
   const pending = timing.issues.filter((i) => i.severity !== 'info');
@@ -78,7 +78,15 @@ function EventHeader() {
             {event.location ? ` · ${event.location}` : ''}
           </p>
         </div>
-        <Badge tone={status.tone}>{status.label}</Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* B2-m8: the live tabs' polls failed for a while — what is shown is that old. */}
+          {staleSince !== null && (
+            <p role="status" className="tabular rounded-lg border border-danger/40 bg-danger/10 px-2 py-1 text-xs font-medium text-danger">
+              Sem conexão · dados de {formatClock(staleSince)}
+            </p>
+          )}
+          <Badge tone={status.tone}>{status.label}</Badge>
+        </div>
       </div>
       <Tabs items={items} />
     </header>
@@ -102,7 +110,7 @@ function LoadError({ message, onRetry }: { message: string; onRetry(): Promise<v
       <Card className="flex flex-col gap-4">
         <div>
           <p className="font-medium">Não foi possível carregar o evento</p>
-          <p role="alert" className="mt-1 text-sm text-danger">
+          <p role="alert" className="mt-1 text-sm text-danger-text">
             {message}
           </p>
         </div>
