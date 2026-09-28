@@ -314,7 +314,7 @@ function MainScreen({ tk, keepAwake }: { tk: Timekeeper; keepAwake: () => void }
       // One slim line (organizer feedback): the result, then the mark's time; a warning adds a line.
       message: (
         <div className="min-w-0">
-          <p className="truncate font-semibold">
+          <p className="font-semibold">
             {warned && <span aria-hidden="true" className="text-warning">⚠ </span>}
             {r.message}
             <span className="ml-2 tabular text-xs font-normal text-muted">{clockText(Date.parse(r.ts))}</span>

@@ -69,7 +69,8 @@ export function useTkNotices(): TkNotices {
   return { notices, show, dismiss };
 }
 
-/** The notice, fixed at the bottom as one slim bar (text, then its buttons on the same line):
+/** The notice, fixed at the bottom as one compact card — the text over the full width with × beside
+ * it, the actions in one short row under it (a grid, so the DOM order stays text, actions, ×):
  * `pointer-events-none` everywhere but on its buttons. */
 export function TkNoticeLayer({ notices, onDismiss }: { notices: TkNotice[]; onDismiss: (id: string) => void }) {
   return (
@@ -79,11 +80,11 @@ export function TkNoticeLayer({ notices, onDismiss }: { notices: TkNotice[]; onD
           key={n.id}
           data-testid={n.testid}
           role={n.alert ? 'alert' : 'status'}
-          className="pointer-events-none flex w-full max-w-md items-center gap-2 rounded-xl border border-border bg-surface-2 py-1 pl-3 pr-1 text-sm text-fg shadow-lg"
+          className="pointer-events-none grid w-full max-w-md grid-cols-[1fr_auto] items-center gap-x-1 rounded-xl border border-border bg-surface-2 pl-3 pr-1 text-sm leading-snug text-fg shadow-lg"
         >
-          <div className="min-w-0 flex-1">{n.message}</div>
+          <div className="col-start-1 row-start-1 min-w-0 py-1">{n.message}</div>
           {n.actions && n.actions.length > 0 && (
-            <div className="flex shrink-0 gap-1">
+            <div className="col-start-1 row-start-2 flex flex-wrap gap-2 pb-2">
               {n.actions.map(a => (
                 <Button
                   key={a.label}
@@ -105,7 +106,7 @@ export function TkNoticeLayer({ notices, onDismiss }: { notices: TkNotice[]; onD
             type="button"
             aria-label="Fechar"
             onClick={() => onDismiss(n.id)}
-            className="pointer-events-auto inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg hover:bg-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="col-start-2 row-start-1 pointer-events-auto inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg hover:bg-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <span aria-hidden="true">×</span>
           </button>
