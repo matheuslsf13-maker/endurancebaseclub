@@ -56,7 +56,9 @@ const side = (r: ResultRow): HeadToHeadSide => ({ entry_id: r.entry_id, status: 
  * Spec 2026-09-28 §5.3: the same race (`race_id`), `a` and `b` each in their own entry, both
  * started (a DNS or not-started side drops the race). Both placed: the better position wins, and a
  * shared position is no decision. Only one placed (the other DNF/DSQ/on course): the placed one
- * wins. Neither placed: no decision. `diff_ms` = b.final_ms − a.final_ms when both have one.
+ * wins. Neither placed: no decision. `diff_ms` = b.final_ms − a.final_ms only when both concluded
+ * with a position (the approved design's "quando os dois concluíram"): a DSQ side's faster time would
+ * otherwise read as the winner's margin.
  * null when there is no such race.
  */
 export function computeHeadToHead(a: string, b: string, results: ResultRow[]): HeadToHead | null {
@@ -85,7 +87,7 @@ export function computeHeadToHead(a: string, b: string, results: ResultRow[]): H
     races.push({
       race_id: raceId, event_name: ra.data.event.name, event_date: ra.data.event.date, race_name: ra.data.race.name,
       a: side(ra), b: side(rb), winner,
-      diff_ms: ra.final_ms !== null && rb.final_ms !== null ? rb.final_ms - ra.final_ms : null,
+      diff_ms: pa !== null && pb !== null && ra.final_ms !== null && rb.final_ms !== null ? rb.final_ms - ra.final_ms : null,
     });
   }
   if (races.length === 0) return null;

@@ -60,7 +60,8 @@ describe('computeHeadToHead (spec §5.3)', () => {
     makeResult({ race_id: 'r5', entry_id: 'r5b', date: '2026-05-10', members: [BETO], status: 'dns' }),
     // r6: the same entry (a team) -> "together", not a confrontation
     makeResult({ race_id: 'r6', entry_id: 'r6ab', date: '2026-06-10', members: [ANA, BETO], final_ms: 2_000_000, overall_pos: 1 }),
-    // r7: a DSQ with a time, b placed -> b wins; both have final_ms, so the difference shows
+    // r7: a DSQ with a (faster) time, b placed -> b wins; the difference only shows when both
+    // concluded with a position, or it would read as if the DSQ side won (final review Minor 2)
     makeResult({ race_id: 'r7', entry_id: 'r7a', date: '2026-07-10', members: [ANA], status: 'dsq', final_ms: 1_300_000 }),
     makeResult({ race_id: 'r7', entry_id: 'r7b', date: '2026-07-10', members: [BETO], final_ms: 1_350_000, overall_pos: 1 }),
     // r8: only a ran -> nothing
@@ -71,7 +72,7 @@ describe('computeHeadToHead (spec §5.3)', () => {
     const h = computeHeadToHead('a', 'b', results)!;
     expect({ a: h.a_wins, b: h.b_wins, none: h.no_decision }).toEqual({ a: 1, b: 2, none: 2 });
     expect(h.races.map((r) => [r.race_id, r.winner, r.diff_ms])).toEqual([
-      ['r7', 'b', 50_000], ['r4', null, 0], ['r3', null, null], ['r2', 'b', null], ['r1', 'a', 30_000],
+      ['r7', 'b', null], ['r4', null, 0], ['r3', null, null], ['r2', 'b', null], ['r1', 'a', 30_000],
     ]);
     expect(h.races[4]).toMatchObject({ a: { entry_id: 'r1a', overall_pos: 2 }, b: { entry_id: 'r1b', overall_pos: 5 } });
   });
