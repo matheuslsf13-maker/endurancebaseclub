@@ -137,6 +137,10 @@ snap pub 04-public-athletes-mobile
 ab pub open "$COMPARE_URL" >/dev/null
 wait_tid pub public-compare
 no_hscroll pub "public compare"
+# "Lado a lado" is the point of the page: both athletes' columns must fit a 390 px phone, not
+# hide behind the table's own horizontal scroll.
+FITS=$(js pub "(() => { const w = document.querySelector('[data-testid=compare-side-by-side] table').parentElement; return w.scrollWidth <= w.clientWidth; })()")
+[[ "$FITS" == true ]] || fail pub "the side-by-side table does not fit a 390 px screen"
 snap_pages pub 04-public-compare-mobile
 ab pub open "$APP/#/ranking" >/dev/null
 wait_tid pub public-ranking
