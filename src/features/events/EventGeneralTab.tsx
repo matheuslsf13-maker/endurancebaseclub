@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
+import { flushSync } from 'react-dom';
 import { useBlocker, useNavigate } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Checkbox, Input, Select, Textarea, useConfirm, useToast } from '../../components/ui';
@@ -156,6 +157,13 @@ export default function EventGeneralTab() {
       await queryClient.invalidateQueries({ queryKey: ['events'] });
       queryClient.removeQueries({ queryKey: ['event', event.id] });
       toast.show({ message: 'Evento excluído', tone: 'success' });
+      // Round 2 item N1: the event is already gone server-side, so a dirty form has nothing left
+      // to lose — without this, useBlocker(dirty) intercepts this very navigation and pops "Sair
+      // sem salvar?" right after a successful delete. `flushSync` is needed (not a plain
+      // `setDirty(false)`): react-router reads `dirty` at the moment `navigate()` runs, before an
+      // async state update would have re-rendered, so an un-flushed `setDirty(false)` is still
+      // "true" as far as that same call to `navigate()` is concerned.
+      flushSync(() => setDirty(false));
       navigate('/eventos');
     } catch (err) {
       toast.show({ message: errorMessage(err, 'Não foi possível excluir o evento'), tone: 'danger' });

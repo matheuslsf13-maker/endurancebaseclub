@@ -183,8 +183,8 @@ describe('editing an existing race', () => {
   });
 });
 
-describe('C-I3: removing a wave that has started or has entries', () => {
-  it('warns naming the recorded start time before removing it', async () => {
+describe('C-I3 / round 2 item N2: a wave that has started or has entries cannot be removed from the form', () => {
+  it('disables "Remover" and explains why for a wave that already started', async () => {
     const user = userEvent.setup();
     const race = makeRace({ id: 'r1', event_id: 'ev1', team_size: 1 });
     const waves = [
@@ -194,18 +194,15 @@ describe('C-I3: removing a wave that has started or has entries', () => {
     renderTab(makeAgg({ races: [race], waves }));
     await user.click(screen.getByTestId('race-edit-r1'));
 
+    expect(screen.getByTestId('wave-remove-0')).toBeDisabled();
+    expect(screen.getByTestId('wave-remove-reason-0')).toHaveTextContent('Já largou');
+    // Clicking a disabled button does nothing — the wave is still there.
     await user.click(screen.getByTestId('wave-remove-0'));
-
-    const dialog = screen.getByRole('dialog');
-    expect(dialog).toHaveTextContent('Largada geral');
-    expect(dialog).toHaveTextContent(/já largou/);
-    await user.click(screen.getByTestId('confirm-cancel'));
-    // Cancelled: the wave is still there.
     expect(screen.getByTestId('wave-remove-0')).toBeInTheDocument();
-    expect(screen.getByTestId('wave-remove-1')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('warns naming the entry count before removing a wave with entries, and removes it once confirmed', async () => {
+  it('disables "Remover" and explains why for a wave with entries', async () => {
     const user = userEvent.setup();
     const race = makeRace({ id: 'r1', event_id: 'ev1', team_size: 1 });
     const waves = [
@@ -216,14 +213,11 @@ describe('C-I3: removing a wave that has started or has entries', () => {
     renderTab(makeAgg({ races: [race], waves, entries }));
     await user.click(screen.getByTestId('race-edit-r1'));
 
-    await user.click(screen.getByTestId('wave-remove-1'));
-    expect(screen.getByRole('dialog')).toHaveTextContent('2 inscrições');
-    await user.click(screen.getByTestId('confirm-ok'));
-
-    expect(screen.queryByTestId('wave-remove-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('wave-remove-1')).toBeDisabled();
+    expect(screen.getByTestId('wave-remove-reason-1')).toHaveTextContent('2 inscrições');
   });
 
-  it('removes a wave with neither a start nor entries without asking', async () => {
+  it('removes a wave with neither a start nor entries immediately, with no dialog', async () => {
     const user = userEvent.setup();
     const race = makeRace({ id: 'r1', event_id: 'ev1', team_size: 1 });
     const waves = [
@@ -233,6 +227,7 @@ describe('C-I3: removing a wave that has started or has entries', () => {
     renderTab(makeAgg({ races: [race], waves }));
     await user.click(screen.getByTestId('race-edit-r1'));
 
+    expect(screen.getByTestId('wave-remove-1')).not.toBeDisabled();
     await user.click(screen.getByTestId('wave-remove-1'));
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -393,6 +388,18 @@ describe('deleting a race', () => {
     await user.click(screen.getByTestId('confirm-cancel'));
 
     expect(deleteRace).not.toHaveBeenCalled();
+  });
+
+  it('round 2 item 9: warns that a finalized race\'s results (athlete histories/stats) are erased too', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r1', event_id: 'ev1', name: 'Aquathlon' });
+    renderTab(makeAgg({ races: [race], waves: [makeWave({ race_id: 'r1' })] }));
+
+    await user.click(screen.getByTestId('race-delete-r1'));
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('resultados são apagados');
+    expect(dialog).toHaveTextContent('histórico e das estatísticas dos atletas');
   });
 });
 

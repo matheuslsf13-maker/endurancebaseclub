@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { EmptyState } from './ui';
 
@@ -26,6 +26,8 @@ const MARGIN = { top: 16, right: 16, bottom: 28, left: 56 };
 const MAX_X_LABELS = 5;
 const MARKER_R = 5;
 const Y_TICKS = 4;
+// Round 2 item 20: minimum gap kept between the tooltip and either edge of the chart.
+const TOOLTIP_EDGE_PAD = 4;
 
 /** Evenly spaced indices into [0, n), always including the first and last. */
 function evenIndices(n: number, max: number): Set<number> {
@@ -55,6 +57,19 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const activeIndex = hoverIndex ?? touchIndex ?? focusIndex;
+
+  // Round 2 item 20: a percentage-based clamp couldn't account for the tooltip's actual rendered
+  // width — a ~140-200 px label centered near either edge of a 390 px chart still overflowed.
+  // Measures the tooltip's real `offsetWidth` after each render it's shown, then positions it in
+  // pixels so it can never cross either edge, however wide its content is. `useLayoutEffect` (not
+  // `useEffect`) so the corrected position applies before the browser paints — no visible jump
+  // from an estimated position to the real one.
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [tooltipWidth, setTooltipWidth] = useState(0);
+  useLayoutEffect(() => {
+    if (activeIndex === null) return;
+    setTooltipWidth(tooltipRef.current?.offsetWidth ?? 0);
+  }, [activeIndex]);
 
   useEffect(() => {
     if (!container || typeof ResizeObserver === 'undefined') return;
@@ -166,6 +181,15 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
 
   const active = activeIndex !== null ? coords[activeIndex] : null;
   const lastCoord = coords[coords.length - 1];
+  // Centered on `active.x` (like before), but clamped in pixels using the tooltip's own measured
+  // width so it never crosses either edge — a wide label near an edge is shifted inward instead
+  // of just having its center pinned near the edge (which still let half of it overflow).
+  const tooltipLeft = active
+    ? Math.min(
+        Math.max(active.x - tooltipWidth / 2, TOOLTIP_EDGE_PAD),
+        Math.max(TOOLTIP_EDGE_PAD, measuredWidth - tooltipWidth - TOOLTIP_EDGE_PAD),
+      )
+    : 0;
 
   return (
     <figure className="w-full">
@@ -280,13 +304,14 @@ export function LineChart({ points, formatValue, title, height = 220 }: LineChar
 
         {active && (
           <div
+            ref={tooltipRef}
             data-testid="line-chart-tooltip"
-            className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs shadow-lg"
-            // C-Minor-16: centered on the last point (`-translate-x-1/2`), the tooltip overflows
-            // the right edge at 390 px when that point sits near the end of a narrow chart —
-            // clamped so it always stays inside the container; the dashed guideline (drawn at the
-            // unclamped `active.x`) still marks the exact point.
-            style={{ left: `${Math.min(92, Math.max(8, (active.x / measuredWidth) * 100))}%`, top: `${Math.max(0, (active.y / height) * 100 - 4)}%` }}
+            className="pointer-events-none absolute z-10 -translate-y-full whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs shadow-lg"
+            // Round 2 item 20 / C-Minor-16: `tooltipLeft` is already the clamped left EDGE in
+            // pixels (see above) — no `-translate-x-1/2` here, unlike a simple centered tooltip,
+            // because that would re-introduce the overflow this clamp exists to prevent. The
+            // dashed guideline (drawn at the unclamped `active.x`) still marks the exact point.
+            style={{ left: `${tooltipLeft}px`, top: `${Math.max(0, (active.y / height) * 100 - 4)}%` }}
           >
             <div className="tabular font-semibold text-fg">{formatValue(active.point.value)}</div>
             <div className="text-muted">

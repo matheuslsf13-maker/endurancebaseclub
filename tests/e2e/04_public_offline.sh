@@ -17,12 +17,16 @@ step "public results page never leaks e-mail, phone or birth date (C-Minor-18)"
 # SPA moves to the athlete page below. Defensive IIFE: an element that's momentarily absent (a
 # re-render) reads as '' rather than crashing the whole scenario on a TypeError.
 PUB_RESULTS_TEXT=$(js_str pub "(() => { const el = document.querySelector('[data-testid=public-results]'); return el ? el.innerText : ''; })()")
-python3 - "$PUB_RESULTS_TEXT" <<'PY' || fail pub "the public results page leaks private athlete data"
+# Round 2 item 22: asserts the exact registered e-mail/phone (01_master_setup.sh gave Ana both) —
+# a generic "no @ visible" check would pass even if the server started leaking a *different*
+# e-mail-shaped string, or would never really have exercised the leak path at all when no athlete
+# had an e-mail set.
+python3 - "$PUB_RESULTS_TEXT" "$ANA_EMAIL" "$ANA_PHONE" <<'PY' || fail pub "the public results page leaks private athlete data"
 import sys
-text = sys.argv[1]
+text, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
 assert text, 'public-results text came back empty — element not found'
-# pub_event must return only public athlete fields (spec §6) — never birth_date, email or phone.
-assert '@' not in text, 'an e-mail-like "@" is visible on the public results page'
+assert email not in text, f'{email!r} (an athlete e-mail) is visible on the public results page'
+assert phone not in text, f'{phone!r} (an athlete phone) is visible on the public results page'
 assert '1990' not in text, "an athlete's birth year is visible on the public results page"
 PY
 
@@ -34,15 +38,49 @@ snap pub 04-public-athlete
 
 step "public athlete page never leaks e-mail, phone or birth date (C-Minor-18)"
 PUB_ATHLETE_TEXT=$(js_str pub "(() => { const el = document.querySelector('[data-testid=public-athlete]'); return el ? el.innerText : ''; })()")
-python3 - "$PUB_ATHLETE_TEXT" <<'PY' || fail pub "the public athlete page leaks private athlete data"
+python3 - "$PUB_ATHLETE_TEXT" "$ANA_EMAIL" "$ANA_PHONE" <<'PY' || fail pub "the public athlete page leaks private athlete data"
 import sys
-text = sys.argv[1]
+text, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
 assert text, 'public-athlete text came back empty — element not found'
 # Ana's fixture (01_master_setup.sh): birth date 15/06/1990. pub_athlete must return only
 # {id,name,sex,city,team_club} (spec §6) — never birth_date, email or phone.
-assert '@' not in text, 'an e-mail-like "@" is visible on the public athlete page'
+assert email not in text, f'{email!r} (an athlete e-mail) is visible on the public athlete page'
+assert phone not in text, f'{phone!r} (an athlete phone) is visible on the public athlete page'
 assert '1990' not in text, "Ana's birth year is visible on the public athlete page"
 assert '15/06' not in text, "Ana's birth date is visible on the public athlete page"
+PY
+
+step "pub_event RPC payload never leaks e-mail, phone or birth date (round 2 item 22)"
+# Belt-and-suspenders beyond the rendered-page checks above: fetches the raw RPC responses the
+# page itself consumed (same shim, same anonymous role — no Authorization header) and asserts the
+# exact secrets are absent from the JSON text itself, not just from whatever the UI happens to
+# render from it.
+PUB_EVENT_JSON=$(curl -sS -X POST "http://127.0.0.1:$SHIM_PORT/rest/v1/rpc/pub_event" \
+  -H 'Content-Type: application/json' -H 'apikey: sb_publishable_local_dev' \
+  -d "{\"p_slug\":\"$SLUG\"}")
+ANA_ID=$(python3 - "$PUB_EVENT_JSON" "$ANA_EMAIL" "$ANA_PHONE" <<'PY'
+import json, sys
+raw, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
+data = json.loads(raw)  # fails loudly if the shim didn't return valid JSON (e.g. an RPC error)
+assert email not in raw, f'{email!r} is present in the pub_event RPC payload'
+assert phone not in raw, f'{phone!r} is present in the pub_event RPC payload'
+assert 'birth_date' not in raw, "'birth_date' key is present in the pub_event RPC payload"
+ana = next((a for a in data.get('athletes', []) if a.get('name') == 'Ana'), None)
+assert ana is not None, 'Ana not found in the pub_event payload athletes'
+print(ana['id'])
+PY
+) || fail pub "pub_event RPC payload leaks private athlete data or is malformed"
+
+PUB_ATHLETE_JSON=$(curl -sS -X POST "http://127.0.0.1:$SHIM_PORT/rest/v1/rpc/pub_athlete" \
+  -H 'Content-Type: application/json' -H 'apikey: sb_publishable_local_dev' \
+  -d "{\"p_athlete_id\":\"$ANA_ID\"}")
+python3 - "$PUB_ATHLETE_JSON" "$ANA_EMAIL" "$ANA_PHONE" <<'PY' || fail pub "pub_athlete RPC payload leaks private athlete data or is malformed"
+import json, sys
+raw, email, phone = sys.argv[1], sys.argv[2], sys.argv[3]
+json.loads(raw)  # must be valid JSON
+assert email not in raw, f'{email!r} is present in the pub_athlete RPC payload'
+assert phone not in raw, f'{phone!r} is present in the pub_athlete RPC payload'
+assert 'birth_date' not in raw, "'birth_date' key is present in the pub_athlete RPC payload"
 PY
 
 step "public pages at 390×844"

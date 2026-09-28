@@ -71,19 +71,28 @@ snap $M 01-races
 step "Atletas"
 tap $M 'nav a[href="#/atletas"]'
 wait_tid $M new-athlete
-new_athlete() { # name sex dd/mm/aaaa
+new_athlete() { # name sex dd/mm/aaaa [email] [phone]
   tap_tid $M new-athlete
   wait_tid $M athlete-name
   ab $M fill "$(tid athlete-name)" "$1" >/dev/null
   ab $M select "$(tid athlete-sex)" "$2" >/dev/null
   ab $M fill "$(tid athlete-birth)" "$3" >/dev/null
+  [ -n "${4:-}" ] && ab $M fill "$(tid athlete-email)" "$4" >/dev/null
+  [ -n "${5:-}" ] && ab $M fill "$(tid athlete-phone)" "$5" >/dev/null
   tap_tid $M athlete-save
   ab $M wait --fn "!document.querySelector('[data-testid=athlete-name]')" >/dev/null || fail $M "athlete $1 not saved"
 }
-new_athlete Ana F 15/06/1990
+# Round 2 item 22: Ana gets an e-mail and phone so the public-page/public-payload PII checks in
+# 04_public_offline.sh assert the absence of a real, exact value — a generic "no @ visible" check
+# passes even when the server never omits an athlete's e-mail at all.
+ANA_EMAIL="ana.e2e@example.test"
+ANA_PHONE="27999990000"
+new_athlete Ana F 15/06/1990 "$ANA_EMAIL" "$ANA_PHONE"
 new_athlete Beto M 20/01/1988
 new_athlete Caio M 03/03/1995
 new_athlete Duda F 09/09/1999
+save_state ANA_EMAIL "$ANA_EMAIL"
+save_state ANA_PHONE "$ANA_PHONE"
 for n in Ana Beto Caio Duda; do expect_text $M table "$n"; done
 snap $M 01-athletes
 

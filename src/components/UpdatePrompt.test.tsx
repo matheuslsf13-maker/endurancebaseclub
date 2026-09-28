@@ -38,9 +38,10 @@ describe('UpdatePrompt', () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores the event when rendered without a ToastProvider (nothing to crash)', () => {
+  it('throws immediately when rendered without a ToastProvider, instead of silently doing nothing', () => {
     // UpdatePrompt is mounted once, inside the providers; this only guards against a future
-    // refactor moving it outside them without anyone noticing at review time.
+    // refactor moving it outside them without anyone noticing at review time — failing loudly
+    // here beats a silently-missing update prompt in production.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(() => render(<UpdatePrompt />)).toThrow('useToast must be used within a ToastProvider');
     spy.mockRestore();

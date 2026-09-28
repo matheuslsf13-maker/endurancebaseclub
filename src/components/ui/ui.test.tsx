@@ -587,23 +587,43 @@ describe('LineChart', () => {
     expect(screen.getByText('Sem dados para exibir')).toBeInTheDocument();
   });
 
-  it('C-Minor-16: clamps the tooltip so it never overflows a narrow (390 px) container, even centered on the last point', () => {
-    render(
-      <LineChart
-        title="Evolução 5 km corrida"
-        formatValue={(v) => `${Math.round(v / 1000)}s`}
-        points={[
-          { label: '01', value: 100 },
-          { label: '02', value: 200 },
-          { label: '03', value: 300 },
-        ]}
-      />,
-    );
-    const svg = screen.getByRole('img', { name: /Evolução 5 km corrida/ });
-    fireEvent.focus(svg); // keyboard focus lands on the last point by default
+  it('round 2 item 20: keeps a wide (~180 px) tooltip fully inside the chart at either edge, using its real measured width', () => {
+    // A percentage-based clamp can't account for the tooltip's actual rendered width — a wide
+    // label centered near an edge still overflowed. jsdom never lays out real geometry, so
+    // `offsetWidth` is mocked to a realistic tooltip width (the review's "~140-200 px" example).
+    const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, value: 180 });
+    try {
+      render(
+        <LineChart
+          title="Evolução 5 km corrida"
+          formatValue={(v) => `${Math.round(v / 1000)}s`}
+          points={[
+            { label: '01', value: 100 },
+            { label: '02', value: 200 },
+            { label: '03', value: 300 },
+          ]}
+        />,
+      );
+      const svg = screen.getByRole('img', { name: /Evolução 5 km corrida/ });
+      const FALLBACK_VIEW_W = 640; // jsdom has no ResizeObserver, so measuredWidth never moves off it.
+      const TOOLTIP_WIDTH = 180;
 
-    const leftPercent = parseFloat(screen.getByTestId('line-chart-tooltip').style.left);
-    expect(leftPercent).toBeLessThanOrEqual(92);
+      const assertInBounds = () => {
+        const left = parseFloat(screen.getByTestId('line-chart-tooltip').style.left);
+        expect(left).toBeGreaterThanOrEqual(0);
+        expect(left + TOOLTIP_WIDTH).toBeLessThanOrEqual(FALLBACK_VIEW_W);
+      };
+
+      fireEvent.focus(svg); // keyboard focus lands on the last point (right edge) by default
+      assertInBounds();
+
+      fireEvent.keyDown(svg, { key: 'ArrowLeft' });
+      fireEvent.keyDown(svg, { key: 'ArrowLeft' }); // now on the first point (left edge)
+      assertInBounds();
+    } finally {
+      if (originalDescriptor) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalDescriptor);
+    }
   });
 });
 

@@ -63,6 +63,18 @@ describe('PublicHome', () => {
     expect(await screen.findByText('Nenhum evento público no momento')).toBeInTheDocument();
   });
 
+  it('round 2 item 18: offers a retry button on a load error, which re-fetches', async () => {
+    const user = userEvent.setup();
+    mocks.events.mockRejectedValueOnce(new Error('offline'));
+    renderWithProviders(<PublicHome />);
+
+    expect(await screen.findByText('Não foi possível carregar os eventos.')).toBeInTheDocument();
+    mocks.events.mockResolvedValueOnce([]);
+    await user.click(screen.getByRole('button', { name: 'Tentar novamente' }));
+
+    expect(await screen.findByText('Nenhum evento público no momento')).toBeInTheDocument();
+  });
+
   describe('C-Minor-7: "Voltar à cronometragem"', () => {
     afterEach(() => {
       window.localStorage.clear();
@@ -349,6 +361,23 @@ describe('PublicEventPage', () => {
     expect(scrollIntoView.mock.instances[0]).toBe(screen.getByRole('tab', { name: 'Corrida 10K' }));
 
     Element.prototype.scrollIntoView = original;
+  });
+
+  it('round 2 item 12: offers a <select> with every race, so none is ever off-screen at 390 px', async () => {
+    const user = userEvent.setup();
+    const { payload, race: race1 } = buildLivePayload();
+    const race2 = makeRace({ id: 'r2', name: 'Corrida 10K', legs: [{ modality: 'run', label: 'Corrida', distance_m: 10_000 }] });
+    mocks.event.mockResolvedValue({ ...payload, races: [race1, race2] });
+    renderEventPage();
+
+    await screen.findByRole('tab', { name: race1.name });
+    const select = screen.getByTestId('public-race-select') as HTMLSelectElement;
+    // Every race is a plain <option> — a <select> never overflows regardless of race count.
+    expect([...select.options].map((o) => o.textContent)).toEqual([race1.name, 'Corrida 10K']);
+    expect(select).toHaveValue(race1.id);
+
+    await user.selectOptions(select, 'r2');
+    expect(await screen.findByRole('heading', { name: 'Corrida 10K' })).toBeInTheDocument();
   });
 
   it('C-Minor-15: resets document.title when navigating away', async () => {

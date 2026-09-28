@@ -11,7 +11,7 @@ import { AgeGroupsEditor } from './AgeGroupsEditor';
 import { LegsEditor } from './LegsEditor';
 import { RankingsEditor } from './RankingsEditor';
 import { formToPayload, teamSizeLabel, validateRaceForm } from './raceForm';
-import type { RaceForm, RaceFormLeg } from './raceForm';
+import type { RaceForm, RaceFormLeg, RaceFormWave } from './raceForm';
 
 /** pt-BR count phrase without an awkward "(ões)"/"(s)" suffix (C-Minor-17). */
 function countLabel(n: number, singular: string, plural: string): string {
@@ -178,23 +178,13 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
   function addWave() {
     setForm((f) => ({ ...f, waves: [...f.waves, { name: `Onda ${f.waves.length + 1}`, position: f.waves.length, start_at: null }] }));
   }
-  async function removeWave(i: number) {
-    const wave = form.waves[i];
-    const waveEntryCount = wave.id ? agg.entries.filter((e) => e.wave_id === wave.id).length : 0;
-    if (wave.start_at || waveEntryCount > 0) {
-      // Mirrors area A's admin_save_race pt-BR wording (final-fix-1-report.md): 'Não é possível
-      // remover a onda "<nome>" porque ela já largou' / '… porque ela tem N inscrição(ões)'.
-      const parts: string[] = [];
-      if (wave.start_at) parts.push('já largou');
-      if (waveEntryCount > 0) parts.push(`tem ${countLabel(waveEntryCount, 'inscrição', 'inscrições')}`);
-      const ok = await confirm({
-        title: 'Remover largada',
-        message: `Não será possível remover a largada "${wave.name}" porque ela ${parts.join(' e ')} — mova as inscrições para outra largada antes, se for o caso. Continuar mesmo assim?`,
-        confirmLabel: 'Remover',
-        danger: true,
-      });
-      if (!ok) return;
-    }
+  /** How many of this race's entries sit in a given (already-saved) wave — 0 for a wave not yet
+   * saved (`wave.id` undefined), since nothing could reference it yet. */
+  function waveEntryCount(wave: RaceFormWave): number {
+    return wave.id ? agg.entries.filter((e) => e.wave_id === wave.id).length : 0;
+  }
+
+  function removeWave(i: number) {
     setForm((f) => ({ ...f, waves: f.waves.filter((_, idx) => idx !== i) }));
   }
   function updateWaveName(i: number, name: string) {
@@ -252,25 +242,46 @@ export function RaceEditor({ initial, onDone }: RaceEditorProps) {
 
       <Section title="Largadas">
         <div className="flex flex-col gap-3">
-          {form.waves.map((w, i) => (
-            <div key={w.id ?? `new-${i}`} className="flex flex-col gap-2 rounded-xl border border-border p-3 sm:flex-row sm:items-end sm:gap-3">
-              <div className="flex-1">
-                <Input label="Nome da largada" data-testid={`wave-name-${i}`} value={w.name} onChange={(e) => updateWaveName(i, e.target.value)} />
+          {form.waves.map((w, i) => {
+            // Round 2 item N2: the server refuses to delete a wave with a recorded start or
+            // entries on every save attempt (final-fix-1-report.md) — round 1's "confirm, then
+            // remove anyway" just deferred that failure to Salvar. "Remover" is disabled outright
+            // for such a wave, with the reason shown next to it, so it can never be removed from
+            // the form in the first place.
+            const entryCountForWave = waveEntryCount(w);
+            const locked = Boolean(w.start_at) || entryCountForWave > 0;
+            const onlyWave = form.waves.length <= 1;
+            return (
+              <div key={w.id ?? `new-${i}`} className="flex flex-col gap-2 rounded-xl border border-border p-3 sm:flex-row sm:items-end sm:gap-3">
+                <div className="flex-1">
+                  <Input label="Nome da largada" data-testid={`wave-name-${i}`} value={w.name} onChange={(e) => updateWaveName(i, e.target.value)} />
+                </div>
+                <p className="text-sm text-muted tabular sm:pb-2.5">{waveStartLabel(w.start_at)}</p>
+                <div className="flex flex-col items-end gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Remover largada ${w.name}`}
+                    data-testid={`wave-remove-${i}`}
+                    disabled={onlyWave || locked}
+                    onClick={() => removeWave(i)}
+                  >
+                    Remover
+                  </Button>
+                  {!onlyWave && locked && (
+                    <p className="text-xs text-muted" data-testid={`wave-remove-reason-${i}`}>
+                      {w.start_at && entryCountForWave > 0
+                        ? `Já largou e tem ${countLabel(entryCountForWave, 'inscrição', 'inscrições')}`
+                        : w.start_at
+                          ? 'Já largou'
+                          : `Tem ${countLabel(entryCountForWave, 'inscrição', 'inscrições')}`}
+                    </p>
+                  )}
+                </div>
               </div>
-              <p className="text-sm text-muted tabular sm:pb-2.5">{waveStartLabel(w.start_at)}</p>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-label={`Remover largada ${w.name}`}
-                data-testid={`wave-remove-${i}`}
-                disabled={form.waves.length <= 1}
-                onClick={() => void removeWave(i)}
-              >
-                Remover
-              </Button>
-            </div>
-          ))}
+            );
+          })}
           <Button type="button" variant="secondary" size="sm" data-testid="wave-add" onClick={addWave}>
             Adicionar largada
           </Button>

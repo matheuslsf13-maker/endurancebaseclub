@@ -340,6 +340,25 @@ describe('EventGeneralTab', () => {
     expect(router.state.location.pathname).toBe('/eventos');
   });
 
+  it('round 2 item N1: deleting a dirty form navigates away without a spurious "unsaved changes" prompt', async () => {
+    const user = userEvent.setup();
+    mocks.deleteEvent.mockResolvedValue(undefined);
+    const agg = makeAgg({ event: makeEvent({ id: 'e1', name: 'Copa EBC' }) });
+    const { router } = renderTab(fakeContext(agg));
+
+    // Make the form dirty first — the event is deleted anyway, so this must not leave the
+    // useBlocker(dirty) guard armed for the navigation the delete itself performs.
+    await user.type(screen.getByTestId('event-name'), ' extra');
+    await user.click(screen.getByRole('button', { name: 'Excluir evento' }));
+    await user.click(screen.getByTestId('confirm-ok'));
+
+    await waitFor(() => expect(mocks.deleteEvent).toHaveBeenCalledWith('e1'));
+    expect(await screen.findByText('Lista de eventos')).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/eventos');
+    // Only the delete confirm's own dialog should have appeared — no second "Sair sem salvar?".
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('C-Minor-13: invalidates the events list and drops the deleted event from the cache', async () => {
     const user = userEvent.setup();
     mocks.deleteEvent.mockResolvedValue(undefined);

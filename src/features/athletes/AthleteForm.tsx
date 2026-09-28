@@ -111,8 +111,8 @@ export function AthleteForm({ initial, onSaved, onCancel }: AthleteFormProps) {
         />
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Input label="E-mail" type="email" value={email ?? ''} onChange={(e) => setEmail(e.target.value)} />
-        <Input label="Telefone" type="tel" value={phone ?? ''} onChange={(e) => setPhone(e.target.value)} />
+        <Input label="E-mail" type="email" value={email ?? ''} onChange={(e) => setEmail(e.target.value)} data-testid="athlete-email" />
+        <Input label="Telefone" type="tel" value={phone ?? ''} onChange={(e) => setPhone(e.target.value)} data-testid="athlete-phone" />
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Input label="Cidade" value={city ?? ''} onChange={(e) => setCity(e.target.value)} />

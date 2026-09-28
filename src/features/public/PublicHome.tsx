@@ -7,7 +7,7 @@ import { formatDateBR } from '../../lib/format';
 import { safeLocalStorage } from '../../lib/storage';
 import { Logo } from '../../components/Logo';
 import { ThemeToggle } from '../../components/ThemeToggle';
-import { Badge, Card, EmptyState, Spinner } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, Spinner } from '../../components/ui';
 import type { BadgeTone } from '../../components/ui';
 import type { EventStatus } from '../../lib/types';
 
@@ -65,7 +65,7 @@ export default function PublicHome() {
   // token via the App.tsx route wrapper the next time it's opened.
   const [lastTkToken] = useState(() => safeLocalStorage().getItem(LAST_TIMEKEEPER_TOKEN_KEY));
 
-  const { data: events, isLoading, error } = useQuery({
+  const { data: events, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['pub-events'],
     queryFn: () => api.pub.events(),
   });
@@ -97,9 +97,15 @@ export default function PublicHome() {
             </div>
           )}
           {error && (
-            <p role="alert" className="text-sm text-danger-text">
-              {error instanceof ApiError ? error.message : 'Não foi possível carregar os eventos.'}
-            </p>
+            <div className="flex flex-col items-start gap-3">
+              <p role="alert" className="text-sm text-danger-text">
+                {error instanceof ApiError ? error.message : 'Não foi possível carregar os eventos.'}
+              </p>
+              {/* Round 2 item 18: the load error had no way to recover short of a manual reload. */}
+              <Button size="sm" onClick={() => void refetch()} loading={isFetching}>
+                Tentar novamente
+              </Button>
+            </div>
           )}
           {!isLoading && !error && sorted.length === 0 && (
             <EmptyState title="Nenhum evento público no momento">

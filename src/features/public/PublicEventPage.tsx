@@ -7,7 +7,7 @@ import { computeEventTiming } from '../../domain/consolidation';
 import { classifyRace } from '../../domain/ranking';
 import { classificationFromResults } from '../../domain/snapshot';
 import { formatDateBR } from '../../lib/format';
-import { Badge, Button, Card, EmptyState, Spinner } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, Select, Spinner } from '../../components/ui';
 import { ClassificationTable } from '../results/ClassificationTable';
 import { PodiumView } from '../results/PodiumView';
 import { EVENT_STATUS_LABEL, PublicShell } from './PublicHome';
@@ -212,10 +212,21 @@ export default function PublicEventPage() {
 
         {races.length > 0 && (
           <>
-            {/* C-Minor-8: the fade + scroll-into-view mirror the kit's Tabs (src/components/ui/Tabs.tsx)
-                — this tablist can't reuse it directly (NavLink-based, not a click handler over
-                in-memory state), but the same 390 px affordance gap applies here. */}
-            <div className="relative mt-6">
+            {/* Round 2 item 12: even with scroll-into-view + a fade cue (C-Minor-8), a horizontal
+                tab strip at 390 px starts with any race past the first entirely off-screen and no
+                affordance actually got it noticed in review. Below `sm`, a plain <select> replaces
+                the tablist outright — it has no overflow at all, for any number of races. `sm:` and
+                up keep the tablist (there's room to see every tab at a glance there). */}
+            <div className="mt-6 sm:hidden">
+              <Select
+                label="Prova"
+                data-testid="public-race-select"
+                value={activeRaceId}
+                onChange={(e) => setSelectedRaceId(e.target.value)}
+                options={races.map((r) => ({ value: r.id, label: r.name }))}
+              />
+            </div>
+            <div className="relative mt-6 hidden sm:block">
               <div role="tablist" aria-label="Provas" className="flex gap-1 overflow-x-auto border-b border-border">
                 {races.map((r) => (
                   <button
