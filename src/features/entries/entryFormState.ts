@@ -150,11 +150,7 @@ export function toSavePayload(state: EntryFormState): EntrySavePayload {
   };
 }
 
-/** Diacritic-insensitive, case-insensitive fold — used by every athlete search/picker in this
- * feature ("joao" must still find "João"). */
-export function foldAccents(s: string): string {
-  return s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-}
+export { foldAccents } from '../../lib/text';
 
 const PENALTY_RE = /^(\d+):([0-5]?\d)$/;
 

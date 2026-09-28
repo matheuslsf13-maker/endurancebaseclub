@@ -13,23 +13,51 @@ export interface AthleteStats {
   partners: { athlete_id: string; name: string; count: number }[];
 }
 
-/** One leg the athlete personally ran, with a known time and distance (a "qualifying" leg for
- * records/pace/km/evolution purposes), carrying along the event it happened at. A disqualified
+/** A leg an athlete personally ran with a known time and distance: a "qualifying" leg for the
+ * profile's records/pace/km/evolution and for the club records (clubStats.ts). A disqualified
  * result never qualifies, nor does a leg time that is zero or negative (a finalized `order` error)
  * — B1-M3. */
-interface OwnLeg { modality: Modality; distance_m: number; time_ms: number; label: string; date: string; event_name: string }
+export interface QualifyingLeg { athlete_id: string; modality: Modality; distance_m: number; time_ms: number; label: string; date: string; event_name: string }
 
-function ownLegs(athleteId: string, results: ResultRow[]): OwnLeg[] {
-  const legs: OwnLeg[] = [];
+export function qualifyingLegs(results: ResultRow[]): QualifyingLeg[] {
+  const legs: QualifyingLeg[] = [];
   for (const r of results) {
     if (r.status === 'dsq') continue;
     for (const leg of r.data.legs) {
-      if (leg.athlete_id !== athleteId) continue;
+      if (leg.athlete_id == null) continue;
       if (leg.time_ms == null || leg.time_ms <= 0 || leg.distance_m == null) continue;
-      legs.push({ modality: leg.modality, distance_m: leg.distance_m, time_ms: leg.time_ms, label: leg.label, date: r.data.event.date, event_name: r.data.event.name });
+      legs.push({
+        athlete_id: leg.athlete_id, modality: leg.modality, distance_m: leg.distance_m, time_ms: leg.time_ms,
+        label: leg.label, date: r.data.event.date, event_name: r.data.event.name,
+      });
     }
   }
   return legs;
+}
+
+/** The calendar year of a result (its event date, "AAAA-MM-DD"). */
+export function resultYear(r: ResultRow): string {
+  return r.data.event.date.slice(0, 4);
+}
+
+/** The distinct years with results, newest first (spec 2026-09-28 §5.1). */
+export function resultYears(results: ResultRow[]): string[] {
+  return [...new Set(results.map(resultYear))].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+}
+
+/** The results of `year`; null = the whole career. */
+export function filterResultsByYear(results: ResultRow[], year: string | null): ResultRow[] {
+  return year === null ? results : results.filter(r => resultYear(r) === year);
+}
+
+/** Participations per athlete id with §10's rule (every status but DNS / not started counts). */
+export function participationCounts(results: ResultRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const r of results) {
+    if (r.status === 'dns' || r.status === 'not_started') continue;
+    for (const id of r.athlete_ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /** Compact category text for the history table, e.g. "Feminino · 30-39": sex label plus
@@ -70,7 +98,7 @@ export function computeAthleteStats(athleteId: string, results: ResultRow[]): At
   const completion_rate = participations > 0 ? finishes / participations : null;
   const avg_percentile = percentiles.length > 0 ? percentiles.reduce((sum, v) => sum + v, 0) / percentiles.length : null;
 
-  const legs = ownLegs(athleteId, results);
+  const legs = qualifyingLegs(results).filter(l => l.athlete_id === athleteId);
 
   const recordsByKey = new Map<string, AthleteStats['records'][number]>();
   const paceSums = new Map<Modality, { distance_m: number; time_ms: number }>();

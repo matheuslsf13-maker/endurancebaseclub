@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { Link } from 'react-router';
 import { computeAthleteStats } from '../../domain/stats';
 import { MODALITY_LABEL } from '../../domain/presets';
-import { formatDateBR, formatDuration } from '../../lib/format';
+import { formatDateBR, formatDistance, formatDuration, formatKm } from '../../lib/format';
 import { LineChart } from '../../components/LineChart';
 import { Badge, Card, EmptyState, Table } from '../../components/ui';
 import type { AthleteRow, Modality, ResultRow, SnapshotStatus } from '../../lib/types';
@@ -30,19 +30,6 @@ function ordinal(pos: number | null): string {
 
 function percent(v: number | null): string {
   return v === null ? '—' : `${Math.round(v * 100)}%`;
-}
-
-function formatDistance(m: number): string {
-  if (m >= 1000) {
-    const km = m / 1000;
-    const value = Number.isInteger(km) ? String(km) : km.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
-    return `${value} km`;
-  }
-  return `${m} m`;
-}
-
-function formatKm(km: number): string {
-  return `${km.toLocaleString('pt-BR', { maximumFractionDigits: 2 })} km`;
 }
 
 export function StatsView({ athlete, results, publicMode = false }: StatsViewProps) {

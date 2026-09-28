@@ -265,6 +265,7 @@ describe('api', () => {
     ['pub.events', () => api.pub.events(), 'pub_events', undefined],
     ['pub.event', () => api.pub.event('copa-ebc-2026-10-11'), 'pub_event', { p_slug: 'copa-ebc-2026-10-11' }],
     ['pub.athlete', () => api.pub.athlete('a1'), 'pub_athlete', { p_athlete_id: 'a1' }],
+    ['pub.stats', () => api.pub.stats(), 'pub_stats', undefined],
   ])('%s calls the matching RPC with its p_ parameters', async (_name, invoke, fn, args) => {
     await invoke();
     expect(rpc.mock.calls).toEqual([args === undefined ? [fn] : [fn, args]]);

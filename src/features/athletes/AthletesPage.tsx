@@ -7,10 +7,7 @@ import type { AthleteRow } from '../../lib/types';
 import { AthleteForm } from './AthleteForm';
 import { ImportDialog } from './ImportDialog';
 import { ageToday } from './athleteHelpers';
-
-function foldAccents(s: string): string {
-  return s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-}
+import { foldAccents } from '../../lib/text';
 
 const SEX_FILTER_OPTIONS = [
   { value: '', label: 'Todos' },

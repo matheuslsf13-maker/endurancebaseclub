@@ -104,6 +104,11 @@ export interface ImportRowInput {
 }
 export interface ImportResult { inserted: number; updated: number; entries_created: number; errors: { row: number; message: string }[] }
 export interface AthleteProfile { athlete: AthleteRow; results: ResultRow[] }
+/** 0010: an athlete as the public pages see it (exactly pub_athlete's fields, never private ones). */
+export type PublicAthleteRow = Pick<AthleteRow, 'id' | 'name' | 'sex' | 'city' | 'team_club'>;
+/** 0010 pub_stats(): the public athletes and every finalized result of a public event that has at
+ * least one of them (spec 2026-09-28 §4.1). */
+export interface PubStatsPayload { athletes: PublicAthleteRow[]; results: ResultRow[] }
 
 export interface TkSession {
   event: Pick<EventRow, 'id' | 'name' | 'date' | 'location'>;
