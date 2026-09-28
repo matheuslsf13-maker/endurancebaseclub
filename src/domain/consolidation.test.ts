@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { median, computeCrossing, computeEntryTiming, computeEventTiming, UNASSIGNED_ISSUE_AFTER_MS } from './consolidation';
+import { mean, median, computeCrossing, computeEntryTiming, computeEventTiming, UNASSIGNED_ISSUE_AFTER_MS } from './consolidation';
 import { ISSUE_LABEL } from './labels';
 import type { IssueType } from './consolidation';
 import type { MarkRow, ResolutionRow, WaveRow } from '../lib/types';
@@ -14,6 +14,15 @@ describe('median', () => {
     expect(median([3, 1, 2])).toBe(2);
     expect(median([1, 2, 3, 4])).toBe(3);
     expect(median([])).toBeNull();
+  });
+});
+
+describe('mean (0009)', () => {
+  it('averages to the nearest ms and is null when empty', () => {
+    expect(mean([1, 2, 4])).toBe(2); // 7/3 = 2.33
+    expect(mean([1, 2])).toBe(2); // 1.5 rounds half up
+    expect(mean([10])).toBe(10);
+    expect(mean([])).toBeNull();
   });
 });
 
@@ -43,11 +52,33 @@ describe('computeCrossing', () => {
     const none = computeCrossing({ legIndex: 0, marks: [], resolution: makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'manual', manual_ts: iso(L0) }), config: cfg });
     expect(none.official_ms).toBe(L0);
   });
-  it('reference timekeeper policy falls back to the median', () => {
-    const refCfg = { ...cfg, time_source: 'reference' as const, reference_timekeeper_id: 'tk2' };
+  it('0009: a priority timekeeper wins where it marked, else the median', () => {
+    const prioCfg = { ...cfg, time_source: 'median' as const, reference_timekeeper_id: 'tk2' };
     const marks = [makeMark({ at: L0, timekeeper_id: 'tk1' }), makeMark({ at: L0 + 2 * SEC, timekeeper_id: 'tk2' }), makeMark({ at: L0 + 3 * SEC, timekeeper_id: 'tk3' })];
-    expect(computeCrossing({ legIndex: 0, marks, resolution: null, config: refCfg })).toMatchObject({ official_ms: L0 + 2 * SEC, system_source: 'reference' });
-    expect(computeCrossing({ legIndex: 0, marks: [marks[0], marks[2]], resolution: null, config: refCfg })).toMatchObject({ official_ms: L0 + 1500, system_source: 'median' });
+    expect(computeCrossing({ legIndex: 0, marks, resolution: null, config: prioCfg })).toMatchObject({ official_ms: L0 + 2 * SEC, system_source: 'reference', official_source: 'reference' });
+    expect(computeCrossing({ legIndex: 0, marks: [marks[0], marks[2]], resolution: null, config: prioCfg })).toMatchObject({ official_ms: L0 + 1500, system_source: 'median' });
+  });
+  it('0009: a priority timekeeper with the mean as the fallback', () => {
+    const prioCfg = { ...cfg, time_source: 'mean' as const, reference_timekeeper_id: 'tk2' };
+    const marks = [makeMark({ at: L0, timekeeper_id: 'tk1' }), makeMark({ at: L0 + 2 * SEC, timekeeper_id: 'tk2' }), makeMark({ at: L0 + 5 * SEC, timekeeper_id: 'tk3' })];
+    expect(computeCrossing({ legIndex: 0, marks, resolution: null, config: prioCfg })).toMatchObject({ official_ms: L0 + 2 * SEC, system_source: 'reference' });
+    expect(computeCrossing({ legIndex: 0, marks: [marks[0], marks[2]], resolution: null, config: prioCfg })).toMatchObject({ official_ms: L0 + 2500, system_source: 'mean', official_source: 'mean' });
+  });
+  it('0009: the mean of the candidates; divergence is still judged against the median', () => {
+    const meanCfg = { ...cfg, time_source: 'mean' as const, reference_timekeeper_id: null };
+    const marks = [makeMark({ at: L0, timekeeper_id: 'tk1' }), makeMark({ at: L0 + SEC, timekeeper_id: 'tk2' }), makeMark({ at: L0 + 5 * SEC, timekeeper_id: 'tk3' })];
+    const c = computeCrossing({ legIndex: 0, marks, resolution: null, config: meanCfg });
+    expect(c).toMatchObject({ official_ms: L0 + 2000, system_ms: L0 + 2000, system_source: 'mean', official_source: 'mean', median_ms: L0 + SEC });
+    expect(c.divergent).toBe(true); // 10:05 is 4 s from the median (threshold 3 s)
+    const dup = makeMark({ at: L0 + 9 * SEC, timekeeper_id: 'tk1' }); // a later tap of tk1 is a duplicate, not a vote
+    expect(computeCrossing({ legIndex: 0, marks: [...marks, dup], resolution: null, config: meanCfg }).official_ms).toBe(L0 + 2000);
+  });
+  it('0009: a chosen mark or a manual time still overrides the mean and the priority', () => {
+    const prioCfg = { ...cfg, time_source: 'mean' as const, reference_timekeeper_id: 'tk1' };
+    const a = makeMark({ at: L0, timekeeper_id: 'tk1' });
+    const b = makeMark({ at: L0 + 4 * SEC, timekeeper_id: 'tk2' });
+    const pick = computeCrossing({ legIndex: 0, marks: [a, b], resolution: makeResolution({ entry_id: 'en1', leg_index: 0, mode: 'mark', mark_id: b.id }), config: prioCfg });
+    expect(pick).toMatchObject({ official_ms: L0 + 4 * SEC, official_source: 'mark', system_source: 'reference', system_ms: L0 });
   });
   it('keeps only the earliest mark per timekeeper and ignores discarded marks', () => {
     const first = makeMark({ at: L0, timekeeper_id: 'tk1' });
@@ -158,8 +189,8 @@ describe('computeCrossing edge cases', () => {
     expect(c.duplicates).toEqual([]);
     expect(c.official_ms).toBe(L0 + 500);
   });
-  it('reference policy without a chosen timekeeper uses the median, even with organization marks', () => {
-    const refCfg = { ...cfg, time_source: 'reference' as const, reference_timekeeper_id: null };
+  it('no priority timekeeper: the median, even with organization marks', () => {
+    const refCfg = { ...cfg, time_source: 'median' as const, reference_timekeeper_id: null };
     const marks = [makeMark({ at: L0, timekeeper_id: null }), makeMark({ at: L0 + 2 * SEC, timekeeper_id: 'tk1' })];
     expect(computeCrossing({ legIndex: 0, marks, resolution: null, config: refCfg })).toMatchObject({ official_ms: L0 + SEC, system_source: 'median', official_source: 'median' });
   });

@@ -218,10 +218,10 @@ describe('cronometristas', () => {
   });
 
   it('marks the reference timekeeper per race', () => {
-    const race = makeRace({ configPatch: { time_source: 'reference', reference_timekeeper_id: 'tk1' } });
+    const race = makeRace({ configPatch: { time_source: 'median', reference_timekeeper_id: 'tk1' } });
     const agg = makeAgg({ races: [race], timekeepers: [makeTimekeeper({ id: 'tk1', name: 'Ana' })] });
     renderTab(buildCtx(agg));
-    expect(screen.getByText(`Referência · ${race.name}`)).toBeInTheDocument();
+    expect(screen.getByText(`Prioritário · ${race.name}`)).toBeInTheDocument();
   });
 
   it('toggles a timekeeper active state', async () => {

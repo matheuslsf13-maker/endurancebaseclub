@@ -111,8 +111,14 @@ describe('creating a race from a preset', () => {
     await user.selectOptions(screen.getByTestId('race-preset'), 'Revezamento em dupla (natação + corrida)');
 
     expect(screen.getByTestId('race-team-size')).toHaveValue('2');
-    // Team default config has a single "Geral" podium (Nível checkbox present but disabled: no event levels).
-    expect(screen.getByRole('checkbox', { name: 'Nível' })).toBeDisabled();
+    // 0008 team defaults: "Geral" (no division, the overall podium) then "Geral por sexo"; the Nível
+    // checkboxes are present but disabled (no event levels).
+    expect(screen.getByTestId('ranking-name-0')).toHaveValue('Geral');
+    expect(screen.getByTestId('ranking-overall-0')).toHaveTextContent('Pódio geral: todos juntos, sem divisão');
+    expect(screen.getByTestId('ranking-name-1')).toHaveValue('Geral por sexo');
+    expect(screen.getByTestId('ranking-dim-sex-1')).toBeChecked();
+    expect(screen.queryByTestId('ranking-overall-1')).toBeNull();
+    for (const box of screen.getAllByRole('checkbox', { name: 'Nível' })) expect(box).toBeDisabled();
 
     // legs start as [swim, run]; move the second one (run) up so it becomes [run, swim].
     await user.click(screen.getByTestId('leg-move-up-1'));
@@ -180,6 +186,30 @@ describe('editing an existing race', () => {
 
     const alert = await screen.findByRole('alert');
     expect(alert.parentElement?.parentElement).toHaveFocus();
+  });
+});
+
+describe('0009: time source = system method (median/mean) + optional priority timekeeper', () => {
+  it('both are chosen independently and saved together', async () => {
+    const user = userEvent.setup();
+    const race = makeRace({ id: 'r1', event_id: 'ev1', name: 'Aquathlon', team_size: 1 });
+    renderTab(makeAgg({ races: [race], waves: [makeWave({ id: 'w1', race_id: 'r1' })] }));
+    await user.click(screen.getByTestId('race-edit-r1'));
+
+    expect(screen.getByTestId('race-time-source-median')).toBeChecked();
+    const priority = screen.getByTestId('race-reference-timekeeper');
+    expect(priority).toBeEnabled(); // no longer tied to a "reference" source
+    expect(priority).toHaveValue('');
+    expect(screen.getByText(/Onde o prioritário marcou, vale a marcação dele/)).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('race-time-source-mean'));
+    await user.selectOptions(priority, 'tk1');
+    saveRace.mockResolvedValue({ race, waves: [] });
+    await user.click(screen.getByTestId('race-save'));
+
+    const payload = saveRace.mock.calls[0][0];
+    expect(payload.config.time_source).toBe('mean');
+    expect(payload.config.reference_timekeeper_id).toBe('tk1');
   });
 });
 

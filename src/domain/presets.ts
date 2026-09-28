@@ -24,12 +24,13 @@ export function generateAgeGroups(start: number, step: number, last: number): Ag
 
 export function defaultRaceConfig(teamSize: number): RaceConfig {
   const isTeam = teamSize > 1;
-  const rankings: RankingDef[] = isTeam
-    ? [{ id: 'geral', name: 'Geral', dims: ['sex'], size: 3 }]
-    : [
-        { id: 'geral', name: 'Geral', dims: ['sex'], size: 3 },
-        { id: 'faixa', name: 'Faixa etária', dims: ['sex', 'age'], size: 3 },
-      ];
+  // 0008 (mirrors default_race_config): the overall podium (no division) first, then by sex, then
+  // age group for solo races -- with cumulative off, the overall places are not awarded again.
+  const rankings: RankingDef[] = [
+    { id: 'geral', name: 'Geral', dims: [], size: 3 },
+    { id: 'geral-sexo', name: 'Geral por sexo', dims: ['sex'], size: 3 },
+    ...(isTeam ? [] : [{ id: 'faixa', name: 'Faixa etária', dims: ['sex', 'age'], size: 3 } satisfies RankingDef]),
+  ];
   return {
     age_rule: 'year_end',
     team_age_rule: 'sum',
@@ -82,7 +83,11 @@ export function normalizeRaceConfig(partial: Partial<RaceConfig> | null | undefi
   if (typeof partial.cumulative === 'boolean') out.cumulative = partial.cumulative;
   if (isFinitePositive(partial.same_crossing_window_s)) out.same_crossing_window_s = partial.same_crossing_window_s;
   if (isFinitePositive(partial.divergence_threshold_s)) out.divergence_threshold_s = partial.divergence_threshold_s;
-  if (partial.time_source === 'median' || partial.time_source === 'reference') out.time_source = partial.time_source;
+  // 0009: a legacy 'reference' source (priority timekeeper, else the median) is the median plus
+  // that priority timekeeper, which reference_timekeeper_id below keeps.
+  const source: string | undefined = partial.time_source;
+  if (source === 'median' || source === 'mean') out.time_source = source;
+  else if (source === 'reference') out.time_source = 'median';
   if (typeof partial.reference_timekeeper_id === 'string' || partial.reference_timekeeper_id === null) {
     out.reference_timekeeper_id = partial.reference_timekeeper_id;
   }

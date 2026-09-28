@@ -36,7 +36,7 @@ export function TimekeepersPanel() {
 
   const referenceOf = new Map<string, string[]>();
   for (const race of agg.races) {
-    if (race.config.time_source !== 'reference' || !race.config.reference_timekeeper_id) continue;
+    if (!race.config.reference_timekeeper_id) continue; // 0009: the priority applies with either method
     const list = referenceOf.get(race.config.reference_timekeeper_id) ?? [];
     list.push(race.name);
     referenceOf.set(race.config.reference_timekeeper_id, list);
@@ -80,7 +80,7 @@ export function TimekeepersPanel() {
                     <span>{tk.name}</span>
                     {referenceOf.get(tk.id)?.map((raceName) => (
                       <Badge key={raceName} tone="info">
-                        Referência · {raceName}
+                        Prioritário · {raceName}
                       </Badge>
                     ))}
                   </div>

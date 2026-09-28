@@ -232,7 +232,7 @@ describe('buildEventWorkbook: finalized races and conferência consistency', () 
     makeRace({ id, name, legs: [{ modality: 'run', label: 'Corrida', distance_m: 10_000 }], ...extra });
   const rf = run('rf', 'Corrida 10K', { position: 0 });
   const rn = run('rn', 'Sem largada', { position: 1 });
-  const rr = run('rr', 'Referência', { position: 2, configPatch: { time_source: 'reference', reference_timekeeper_id: 'tkB' } });
+  const rr = run('rr', 'Referência', { position: 2, configPatch: { time_source: 'median', reference_timekeeper_id: 'tkB' } });
   const rt = run('rt', 'Décimos', { position: 3 });
   const waves = [
     makeWave({ id: 'wf', race_id: 'rf', start_at: iso(T0) }),
@@ -322,7 +322,7 @@ describe('buildEventWorkbook: finalized races and conferência consistency', () 
   });
 
   it('the reference timekeeper label names the configured reference, even when another mark has the same time (T15)', () => {
-    expect(sheet(model, 'Tempos – Referência').rows[0][5]).toBe('Cronometrista de referência (Bia)');
+    expect(sheet(model, 'Tempos – Referência').rows[0][5]).toBe('Prioritário (Bia)');
   });
 
   it('Marcações: a mark overruled by a manual time is "não usada (decisão)"', () => {

@@ -8,7 +8,7 @@ const DIM_LABEL: Record<RankingDim, string> = { sex: 'Sexo', age: 'Faixa etária
 let rankingSeq = 0;
 function newRanking(): RankingDef {
   rankingSeq += 1;
-  return { id: `ranking-${Date.now()}-${rankingSeq}`, name: 'Novo pódio', dims: ['sex'], size: 3 };
+  return { id: `ranking-${Date.now()}-${rankingSeq}`, name: 'Novo pódio', dims: [], size: 3 };
 }
 
 export interface RankingsEditorProps {
@@ -20,7 +20,8 @@ export interface RankingsEditorProps {
 }
 
 /** "Pódio" section: one or more `RankingDef`s (name, dimensions grouped, size 1..10), reorderable
- * (order decides who is already awarded when `cumulative` is off) plus the cumulative toggle. */
+ * (order decides who is already awarded when `cumulative` is off) plus the cumulative toggle. A
+ * ranking with no dimension checked is the overall podium (spec §9, `dims: []`), and says so. */
 export function RankingsEditor({ rankings, cumulative, hasLevels, onChange, onCumulativeChange }: RankingsEditorProps) {
   function update(i: number, patch: Partial<RankingDef>) {
     onChange(rankings.map((rd, idx) => (idx === i ? { ...rd, ...patch } : rd)));
@@ -74,7 +75,8 @@ export function RankingsEditor({ rankings, cumulative, hasLevels, onChange, onCu
               </Button>
             </div>
           </div>
-          <div className="flex flex-wrap gap-4">
+          <div className="flex flex-wrap items-center gap-x-4">
+            <span className="text-sm text-muted">Dividir por:</span>
             {DIM_ORDER.map((dim) => (
               <Checkbox
                 key={dim}
@@ -86,6 +88,11 @@ export function RankingsEditor({ rankings, cumulative, hasLevels, onChange, onCu
               />
             ))}
           </div>
+          {rd.dims.length === 0 && (
+            <p data-testid={`ranking-overall-${i}`} className="text-sm text-muted">
+              Pódio geral: todos juntos, sem divisão.
+            </p>
+          )}
         </div>
       ))}
 

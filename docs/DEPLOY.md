@@ -34,9 +34,9 @@ O app fala com o banco **somente por funções** (RPC). As tabelas têm RLS liga
 
 ### Migrations
 
-Os arquivos ficam em `supabase/migrations/`. Em produção foram aplicados de `ebc_0001_schema` a `ebc_0007_fk_indexes`, em 28/09/2026. Para uma mudança nova:
+Os arquivos ficam em `supabase/migrations/`. Em produção foram aplicados de `ebc_0001_schema` a `ebc_0007_fk_indexes` em 28/09/2026, `ebc_0008_podium_overall` (pódio geral sem divisão) e `ebc_0009_time_source_priority` (fonte do tempo: mediana ou média + cronometrista prioritário) em seguida. Para uma mudança nova:
 
-1. Crie `supabase/migrations/0008_<nome>.sql`. Se ela criar funções novas, repita no fim o bloco de permissões da `0006`.
+1. Crie `supabase/migrations/<próximo número>_<nome>.sql`. Se ela criar funções novas, repita no fim o bloco de permissões da `0006`.
 2. Rode localmente, no WSL: `bash scripts/test-sql.sh` e `npm run test:integration`.
 3. Aplique em produção pelo **SQL Editor** do Supabase, ou pelo MCP do Supabase (`apply_migration`).
 4. Rode os testes de `supabase/tests/` em produção, cada arquivo entre `begin;` e `rollback;` e precedido de `00_helpers.sql`. Assim nada fica gravado.

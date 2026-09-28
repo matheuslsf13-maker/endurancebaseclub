@@ -105,6 +105,28 @@ describe('classifyRace', () => {
   });
 });
 
+describe('0008: the overall podium (a ranking with no division)', () => {
+  const overall = makeRace({
+    legs: [{ modality: 'run', label: 'Corrida', distance_m: 5000 }],
+    configPatch: { rankings: [
+      { id: 'geral', name: 'Geral', dims: [], size: 3 },
+      { id: 'geral-sexo', name: 'Geral por sexo', dims: ['sex'], size: 3 },
+    ] },
+  });
+  const cls = classifyRace(overall, entries, timings, athletes, ev);
+  it('ranks everyone together first, then (not cumulative) the next ones by sex', () => {
+    expect(cls.podiums.map(g => [g.ranking.id, g.group_label, g.places.map(p => [idOf(p.ranked), p.podium_pos])])).toEqual([
+      ['geral', 'Geral', [['m1', 1], ['m2', 1], ['m3', 3]]],
+      ['geral-sexo', 'Masculino', [['m4', 1]]],
+      ['geral-sexo', 'Feminino', [['f1', 1], ['f2', 2], ['f3', 3]]],
+    ]);
+  });
+  it('per-ranking positions: overall among all finishers, by sex within the sex', () => {
+    const f1 = cls.rows.find(r => idOf(r) === 'f1')!;
+    expect(f1.ranking_pos).toEqual({ geral: 4, 'geral-sexo': 1 });
+  });
+});
+
 describe('compareGroupOrder (exported for reuse by public.PublicEventPage\'s finalized-race podium reconstruction)', () => {
   const cat = (p: Partial<EntryCategory>): EntryCategory => ({ sex: 'M', age: null, age_group: null, level: null, ...p });
   const ageGroups = [{ label: 'até 19', min: 0, max: 19 }, { label: '20-29', min: 20, max: 29 }, { label: '60+', min: 60, max: null }];
