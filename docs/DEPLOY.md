@@ -9,7 +9,7 @@
 | Resultados públicos | https://endurance-base-club.vercel.app/#/ |
 | Código | https://github.com/matheuslsf13-maker/endurancebaseclub (branch `main`) |
 | Hospedagem do site | Vercel, time **Matheus Proj**, projeto **endurance-base-club** |
-| Banco de dados e login | Supabase, projeto **ENDURANCE BASE CLUB** (`wlishmznbhhcqzncdxnq`, us-east-1, Postgres 17) |
+| Banco de dados e login | Supabase, projeto **ENDURANCE BASE CLUB** (`zdnrxbuyyjuquonsxshd`, us-east-1, Postgres 17) |
 
 O link de cada cronometrista (`#/c/<código>`) e o endereço público de cada evento (`#/p/<endereço>`) aparecem dentro do app, na aba **Cronometragem** e na aba **Geral** do evento.
 
@@ -34,7 +34,7 @@ O app fala com o banco **somente por funções** (RPC). As tabelas têm RLS liga
 
 ### Migrations
 
-Os arquivos ficam em `supabase/migrations/`. Em produção foram aplicados de `ebc_0001_schema` a `ebc_0007_fk_indexes` em 28/09/2026, `ebc_0008_podium_overall` (pódio geral sem divisão), `ebc_0009_time_source_priority` (fonte do tempo: mediana ou média + cronometrista prioritário) e `ebc_0010_pub_stats` (perfis públicos e estatísticas do clube) em seguida. Para uma mudança nova:
+Os arquivos ficam em `supabase/migrations/`. O projeto Supabase original foi apagado em outubro de 2026 e recriado vazio em 22/10/2026 (`zdnrxbuyyjuquonsxshd`). Nele foram aplicados, de uma vez, `ebc_0001_schema` a `ebc_0010_pub_stats`, incluindo pódio geral, fonte do tempo e perfis públicos. Para uma mudança nova:
 
 1. Crie `supabase/migrations/<próximo número>_<nome>.sql`. Se ela criar funções novas, repita no fim o bloco de permissões da `0006`.
 2. Rode localmente, no WSL: `bash scripts/test-sql.sh` e `npm run test:integration`.

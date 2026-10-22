@@ -12,7 +12,7 @@ App web para organizar o evento multiesporte **EnduranceBaseClub** (tipo triatlo
 
 ## Stack
 
-React 19 SPA (HashRouter, react-router 8), TanStack Query 5, Tailwind v4, TypeScript estrito, Vite 8, Vitest 5 (jsdom + Testing Library), fflate (XLSX próprio), qrcode, vite-plugin-pwa. Supabase **somente via RPC** (`supabase.rpc` em `src/lib/api.ts`; nunca `supabase.from`). Postgres: funções `security definer`, RLS ligado em todas as tabelas **sem policies**. Deploy: Vercel (frontend estático) + Supabase (projeto `wlishmznbhhcqzncdxnq`).
+React 19 SPA (HashRouter, react-router 8), TanStack Query 5, Tailwind v4, TypeScript estrito, Vite 8, Vitest 5 (jsdom + Testing Library), fflate (XLSX próprio), qrcode, vite-plugin-pwa. Supabase **somente via RPC** (`supabase.rpc` em `src/lib/api.ts`; nunca `supabase.from`). Postgres: funções `security definer`, RLS ligado em todas as tabelas **sem policies**. Deploy: Vercel (frontend estático) + Supabase (projeto `zdnrxbuyyjuquonsxshd`).
 
 ## Comandos
 
@@ -53,10 +53,10 @@ A execução segue **subagent-driven-development** (SDD): um implementador novo 
 - Nas skills, referências como `superpowers:test-driven-development` apontam para a skill de mesmo nome em `.claude/skills/`.
 - Scripts da SDD: `.claude/skills/subagent-driven-development/scripts/{task-brief,review-package,sdd-workspace}`. O workspace de cada plano (`.superpowers/`) é ignorado pelo git.
 - Outras skills instaladas: `agent-browser` (E2E da Task 28), `supabase` e `supabase-postgres-best-practices` (Tasks 6, 7 e 29), `deploy-to-vercel` e `vercel-cli-with-tokens` (Task 29), `vercel-react-best-practices`, `vercel-composition-patterns`, `web-design-guidelines` (telas da onda 2). `skills-lock.json` permite reinstalar com `npx skills experimental_install`.
-- MCP do projeto (`.mcp.json`): `supabase` (projeto `wlishmznbhhcqzncdxnq`) e `vercel`; autentique com `/mcp` na primeira vez.
+- MCP do projeto (`.mcp.json`): `supabase` (projeto `zdnrxbuyyjuquonsxshd`) e `vercel`; autentique com `/mcp` na primeira vez.
 
 ## Produção
 
-- Supabase: URL `https://wlishmznbhhcqzncdxnq.supabase.co`, chave publicável `sb_publishable_Py0jUHGMNAjCM8C488RvZg_qviJupEk` (pública, já em `.env.production`). Postgres 17 em produção (local é 16). Migrations `0001`–`0010` aplicadas em 28/09/2026; nova migration segue o procedimento de `docs/DEPLOY.md`.
+- Supabase: URL `https://zdnrxbuyyjuquonsxshd.supabase.co`, chave publicável `sb_publishable_kikzRD9CIAubG9W_PkbHSw_llVfaC9-` (pública, já em `.env.production`). Postgres 17 em produção (local é 16). Projeto recriado em 22/10/2026; migrations `0001`–`0010` aplicadas; nova migration segue o procedimento de `docs/DEPLOY.md`.
 - Vercel: time "Matheus Proj" (`team_5RKNbN1EiWlEpXuYzgVp3yy9`, slug `matheus-proj`); projeto `endurance-base-club` (`prj_Bg7J7kdmZFiB1Y58gWzR9IthbWHC`), ligado ao GitHub: a `main` publica em produção (https://endurance-base-club.vercel.app), as outras branches geram pré-visualizações protegidas; Node 22.x.
-- Conta owner: `matheuslsf13@gmail.com`, criada com `bootstrap_owner` em 28/09/2026 (primeiro login força troca de senha). Cadastro público desligado no Supabase Auth.
+- Conta owner: `matheuslsf13@gmail.com`, criada com `bootstrap_owner` (recriada junto com o projeto em 22/10/2026) (primeiro login força troca de senha). Cadastro público desligado no Supabase Auth.
