@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { errorMessage, parseLevels } from './eventHelpers';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { copyToClipboard, errorMessage, parseLevels } from './eventHelpers';
 
 describe('parseLevels', () => {
   it('trims, drops empties and de-duplicates while keeping the first-seen order', () => {
@@ -36,5 +36,30 @@ describe('errorMessage', () => {
     expect(errorMessage({ message: 'not an Error instance' }, 'fallback')).toBe('fallback');
     expect(errorMessage(null, 'fallback')).toBe('fallback');
     expect(errorMessage(undefined, 'fallback')).toBe('fallback');
+  });
+});
+
+describe('copyToClipboard', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window.navigator, 'clipboard');
+    Reflect.deleteProperty(document, 'execCommand');
+  });
+
+  it('falls back to a selected textarea + execCommand("copy") where the Clipboard API is missing or refuses (some phones)', async () => {
+    const execCommand = vi.fn(() => true);
+    Object.defineProperty(document, 'execCommand', { value: execCommand, configurable: true });
+    expect(await copyToClipboard('Senha: abc')).toBe(true);
+    expect(execCommand).toHaveBeenCalledWith('copy');
+    expect(document.querySelector('textarea')).toBeNull(); // cleaned up
+
+    const writeText = vi.fn().mockRejectedValue(new Error('NotAllowedError'));
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
+    expect(await copyToClipboard('Senha: abc')).toBe(true);
+    expect(execCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports failure only when both ways fail', async () => {
+    Object.defineProperty(document, 'execCommand', { value: vi.fn(() => false), configurable: true });
+    expect(await copyToClipboard('x')).toBe(false);
   });
 });

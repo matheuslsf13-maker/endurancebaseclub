@@ -232,6 +232,8 @@ describe('api', () => {
     ['admin.createOrganizer', () => api.admin.createOrganizer('bia@ebc.test', 'provisoria-1', 'Bia'), 'admin_create_organizer',
       { p_email: 'bia@ebc.test', p_password: 'provisoria-1', p_name: 'Bia' }],
     ['admin.deleteOrganizer', () => api.admin.deleteOrganizer('u2'), 'admin_delete_organizer', { p_user_id: 'u2' }],
+    ['admin.updateOrganizer', () => api.admin.updateOrganizer('u2', 'Bia', 'bia@ebc.test', null), 'admin_update_organizer',
+      { p_user_id: 'u2', p_name: 'Bia', p_email: 'bia@ebc.test', p_new_password: null }],
     ['admin.listEvents', () => api.admin.listEvents(), 'admin_list_events', undefined],
     ['admin.getEvent', () => api.admin.getEvent('ev1'), 'admin_get_event', { p_event_id: 'ev1' }],
     ['admin.deleteEvent', () => api.admin.deleteEvent('ev1'), 'admin_delete_event', { p_event_id: 'ev1' }],

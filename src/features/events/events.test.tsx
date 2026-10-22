@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   listOrganizers: vi.fn(),
   createOrganizer: vi.fn(),
   deleteOrganizer: vi.fn(),
+  updateOrganizer: vi.fn(),
 }));
 vi.mock('../../lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/api')>()),
@@ -52,6 +53,7 @@ vi.mock('../../lib/api', async (importOriginal) => ({
       listOrganizers: mocks.listOrganizers,
       createOrganizer: mocks.createOrganizer,
       deleteOrganizer: mocks.deleteOrganizer,
+      updateOrganizer: mocks.updateOrganizer,
     },
   },
 }));
@@ -509,6 +511,72 @@ describe('SettingsPage', () => {
     await user.click(screen.getByTestId('organizer-copy-credentials'));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining(password));
     expect(await screen.findByText('Credenciais copiadas')).toBeInTheDocument();
+
+    // The password sits in a field that can be selected by hand, and "Compartilhar" opens the
+    // phone's share sheet (WhatsApp) where the Web Share API exists.
+    expect(screen.getByTestId('organizer-credentials-text')).toHaveValue(`E-mail: nova@ebc.test
+Senha provisória: ${password}`);
+    const share = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'share', { value: share, configurable: true });
+    await user.click(screen.getByTestId('organizer-share-credentials'));
+    expect(share).toHaveBeenCalledWith({ text: expect.stringContaining(password) });
+    Reflect.deleteProperty(window.navigator, 'share');
+  });
+
+  it("the owner edits an organizer's name and e-mail", async () => {
+    const user = userEvent.setup();
+    const bea: OrganizerRow = { user_id: 'u2', email: 'bea@ebc.test', name: 'Bea', role: 'admin', created_at: new Date().toISOString() };
+    mocks.listOrganizers.mockResolvedValue([bea]);
+    mocks.updateOrganizer.mockResolvedValue({ ...bea, name: 'Bea Lima', email: 'bea.lima@ebc.test' });
+    renderSettings(fakeSession(OWNER));
+
+    await user.click(await screen.findByTestId('organizer-edit-u2'));
+    expect(screen.getByTestId('organizer-edit-name')).toHaveValue('Bea');
+    expect(screen.getByTestId('organizer-edit-email')).toHaveValue('bea@ebc.test');
+    await user.clear(screen.getByTestId('organizer-edit-name'));
+    await user.type(screen.getByTestId('organizer-edit-name'), 'Bea Lima');
+    await user.clear(screen.getByTestId('organizer-edit-email'));
+    await user.type(screen.getByTestId('organizer-edit-email'), 'bea.lima@ebc.test');
+    await user.click(screen.getByTestId('organizer-edit-save'));
+
+    await waitFor(() => expect(mocks.updateOrganizer).toHaveBeenCalledWith('u2', 'Bea Lima', 'bea.lima@ebc.test', null));
+    expect(await screen.findByText('Organizador atualizado')).toBeInTheDocument();
+    expect(screen.queryByTestId('organizer-edit-save')).not.toBeInTheDocument();
+  });
+
+  it('the owner sets a new temporary password for an organizer and gets the credentials to send', async () => {
+    const user = userEvent.setup();
+    const bea: OrganizerRow = { user_id: 'u2', email: 'bea@ebc.test', name: 'Bea', role: 'admin', created_at: new Date().toISOString() };
+    mocks.listOrganizers.mockResolvedValue([bea]);
+    mocks.updateOrganizer.mockResolvedValue(bea);
+    renderSettings(fakeSession(OWNER));
+
+    await user.click(await screen.findByTestId('organizer-edit-u2'));
+    await user.click(screen.getByTestId('organizer-edit-generate-password'));
+    const password = (screen.getByTestId('organizer-edit-password') as HTMLInputElement).value;
+    expect(password).toMatch(/^[A-HJ-NP-Za-km-z2-9]{12}$/);
+    await user.click(screen.getByTestId('organizer-edit-save'));
+
+    await waitFor(() => expect(mocks.updateOrganizer).toHaveBeenCalledWith('u2', 'Bea', 'bea@ebc.test', password));
+    expect(await screen.findByTestId('organizer-credentials-text')).toHaveValue(`E-mail: bea@ebc.test
+Senha provisória: ${password}`);
+  });
+
+  it('the owner edits her own row without the password option; a non-owner sees no edit button', async () => {
+    const user = userEvent.setup();
+    const others: OrganizerRow = { user_id: 'u2', email: 'bea@ebc.test', name: 'Bea', role: 'admin', created_at: new Date().toISOString() };
+    const self: OrganizerRow = { user_id: OWNER.user_id, email: OWNER.email, name: OWNER.name, role: 'owner', created_at: new Date().toISOString() };
+    mocks.listOrganizers.mockResolvedValue([self, others]);
+    const { unmount } = renderSettings(fakeSession(OWNER));
+
+    await user.click(await screen.findByTestId(`organizer-edit-${OWNER.user_id}`));
+    expect(screen.getByTestId('organizer-edit-name')).toHaveValue(OWNER.name);
+    expect(screen.queryByTestId('organizer-edit-generate-password')).not.toBeInTheDocument();
+    unmount();
+
+    renderSettings(fakeSession(NON_OWNER));
+    await screen.findAllByText('Bea');
+    expect(screen.queryByTestId('organizer-edit-u2')).not.toBeInTheDocument();
   });
 
   it('removes an organizer after confirmation', async () => {

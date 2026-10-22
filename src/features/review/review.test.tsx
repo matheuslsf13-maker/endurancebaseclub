@@ -259,7 +259,9 @@ describe('ReviewTab: unassigned marks', () => {
     const user = userEvent.setup();
     const swim = makeMark({ at: L0, leg_index: 0 });
     const finish = makeMark({ at: T0 + 30 * MIN, leg_index: 1 });
-    const stray = makeMark({ at: Date.now() - 5 * MIN, entry_id: null, leg_index: null });
+    // A fixed time before the first crossing: Date.now() made this test start failing once the
+    // real clock passed the fixture day (it then suggested the already-finished last leg).
+    const stray = makeMark({ at: T0 + 5 * MIN, entry_id: null, leg_index: null });
     renderReview(makeAgg({ marks: [swim, finish, stray] }));
 
     expect(screen.getByText(/sem atleta/)).toBeInTheDocument();

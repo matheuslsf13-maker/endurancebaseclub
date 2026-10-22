@@ -21,11 +21,12 @@ function generateTempPassword(): string {
 }
 
 export default function SettingsPage() {
-  const { me } = useSession();
+  const { me, refreshMe } = useSession();
   const toast = useToast();
   const confirm = useConfirm();
   const queryClient = useQueryClient();
   const isOwner = me?.role === 'owner';
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const { data: organizers, isLoading, error } = useQuery({
     queryKey: ['organizers'],
@@ -84,6 +85,11 @@ export default function SettingsPage() {
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge tone={o.role === 'owner' ? 'info' : 'neutral'}>{o.role === 'owner' ? 'Organizadora master' : 'Organizador'}</Badge>
+                  {isOwner && editingId !== o.user_id && (
+                    <Button size="sm" variant="secondary" onClick={() => setEditingId(o.user_id)} data-testid={`organizer-edit-${o.user_id}`}>
+                      Editar
+                    </Button>
+                  )}
                   {isOwner && o.user_id !== me?.user_id && (
                     <Button
                       size="sm"
@@ -95,6 +101,17 @@ export default function SettingsPage() {
                     </Button>
                   )}
                 </div>
+                {isOwner && editingId === o.user_id && (
+                  <EditOrganizer
+                    organizer={o}
+                    isSelf={o.user_id === me?.user_id}
+                    onSaved={async () => {
+                      await refreshOrganizers();
+                      if (o.user_id === me?.user_id) await refreshMe();
+                    }}
+                    onClose={() => setEditingId(null)}
+                  />
+                )}
               </li>
             ))}
           </ul>
@@ -223,13 +240,6 @@ function AddOrganizer({ onAdded }: { onAdded(): Promise<void> }) {
     }
   }
 
-  async function onCopyCredentials() {
-    if (!created) return;
-    const text = `E-mail: ${created.email}\nSenha provisória: ${created.password}`;
-    const ok = await copyToClipboard(text);
-    toast.show({ message: ok ? 'Credenciais copiadas' : 'Não foi possível copiar', tone: ok ? 'success' : 'danger' });
-  }
-
   if (!open) {
     return (
       <div className="mt-2">
@@ -249,31 +259,15 @@ function AddOrganizer({ onAdded }: { onAdded(): Promise<void> }) {
 
   if (created) {
     return (
-      <Card className="mt-2 flex flex-col gap-3 border-success/40" data-testid="organizer-credentials">
-        <p className="font-medium">Organizador criado</p>
-        <p className="text-sm text-muted">Anote agora: essa senha não será mostrada de novo.</p>
-        <p className="tabular text-sm">
-          <strong>E-mail:</strong> {created.email}
-        </p>
-        <p className="tabular text-sm">
-          <strong>Senha provisória:</strong> {created.password}
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => void onCopyCredentials()} data-testid="organizer-copy-credentials">
-            Copiar credenciais
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => {
-              reset();
-              setOpen(false);
-            }}
-          >
-            Concluir
-          </Button>
-        </div>
-      </Card>
+      <CredentialsCard
+        title="Organizador criado"
+        email={created.email}
+        password={created.password}
+        onDone={() => {
+          reset();
+          setOpen(false);
+        }}
+      />
     );
   }
 
@@ -306,6 +300,156 @@ function AddOrganizer({ onAdded }: { onAdded(): Promise<void> }) {
           Criar organizador
         </Button>
         <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+          Cancelar
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** The temporary password, shown once, ready to send: share sheet (WhatsApp), copy, or select by hand. */
+function CredentialsCard({ title, email, password, onDone }: { title: string; email: string; password: string; onDone: () => void }) {
+  const toast = useToast();
+  const credentialsText = `E-mail: ${email}\nSenha provisória: ${password}`;
+
+  async function onCopyCredentials() {
+    const ok = await copyToClipboard(credentialsText);
+    toast.show({
+      message: ok ? 'Credenciais copiadas' : 'Não foi possível copiar: toque no texto acima, selecione e copie',
+      tone: ok ? 'success' : 'danger',
+    });
+  }
+
+  /** Opens the phone's share sheet (WhatsApp etc.); without the Web Share API it copies instead. */
+  async function onShareCredentials() {
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ text: credentialsText });
+      } catch {
+        // The organizer closed the share sheet: nothing to do.
+      }
+      return;
+    }
+    await onCopyCredentials();
+  }
+
+  return (
+    <Card className="mt-2 flex flex-col gap-3 border-success/40" data-testid="organizer-credentials">
+      <p className="font-medium">{title}</p>
+      <p className="text-sm text-muted">Anote agora: essa senha não será mostrada de novo.</p>
+      <p className="tabular text-sm">
+        <strong>E-mail:</strong> {email}
+      </p>
+      <p className="tabular text-sm">
+        <strong>Senha provisória:</strong> {password}
+      </p>
+      {/* Selectable by hand too: a tap selects everything, ready for the phone's own "Copiar". */}
+      <textarea
+        readOnly
+        rows={2}
+        value={credentialsText}
+        aria-label="Credenciais para enviar"
+        data-testid="organizer-credentials-text"
+        onFocus={(e) => e.currentTarget.select()}
+        className="tabular w-full resize-none rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm text-fg"
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" onClick={() => void onShareCredentials()} data-testid="organizer-share-credentials">
+          Compartilhar (WhatsApp)
+        </Button>
+        <Button size="sm" variant="secondary" onClick={() => void onCopyCredentials()} data-testid="organizer-copy-credentials">
+          Copiar credenciais
+        </Button>
+        <Button size="sm" variant="secondary" onClick={onDone}>
+          Concluir
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+/** Owner-only inline editor: name, e-mail (the login) and, for someone else, a new temporary password. */
+function EditOrganizer({ organizer, isSelf, onSaved, onClose }: {
+  organizer: OrganizerRow; isSelf: boolean; onSaved: () => Promise<void>; onClose: () => void;
+}) {
+  const toast = useToast();
+  const [name, setName] = useState(organizer.name);
+  const [email, setEmail] = useState(organizer.email);
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState<{ email: string; password: string } | null>(null);
+
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!name.trim() || !email.trim()) {
+      setError('Preencha nome e e-mail');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await api.admin.updateOrganizer(organizer.user_id, name.trim(), email.trim(), password || null);
+      await onSaved();
+      if (password) {
+        setSent({ email: saved.email, password });
+      } else {
+        toast.show({ message: 'Organizador atualizado', tone: 'success' });
+        onClose();
+      }
+    } catch (err) {
+      setError(errorMessage(err, 'Não foi possível salvar o organizador'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (sent) {
+    return (
+      <div className="w-full">
+        <CredentialsCard title="Nova senha provisória definida" email={sent.email} password={sent.password} onDone={onClose} />
+      </div>
+    );
+  }
+
+  return (
+    <form className="flex w-full flex-col gap-3" onSubmit={(e) => void onSubmit(e)} noValidate>
+      <Input label="Nome" required value={name} onChange={(e) => setName(e.target.value)} data-testid="organizer-edit-name" />
+      <Input
+        label="E-mail (login)"
+        type="email"
+        required
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        data-testid="organizer-edit-email"
+      />
+      {!isSelf && (
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="min-w-0 flex-1">
+            <Input
+              label="Nova senha provisória (opcional)"
+              readOnly
+              value={password}
+              hint="Ao gerar e salvar, a pessoa troca a senha no próximo login."
+              className="tabular"
+              data-testid="organizer-edit-password"
+            />
+          </div>
+          <Button type="button" variant="secondary" onClick={() => setPassword(generateTempPassword())} data-testid="organizer-edit-generate-password">
+            Gerar nova senha
+          </Button>
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="text-sm text-danger-text">
+          {error}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" loading={busy} data-testid="organizer-edit-save">
+          Salvar
+        </Button>
+        <Button type="button" variant="ghost" onClick={onClose}>
           Cancelar
         </Button>
       </div>
