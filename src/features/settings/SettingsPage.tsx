@@ -223,11 +223,29 @@ function AddOrganizer({ onAdded }: { onAdded(): Promise<void> }) {
     }
   }
 
+  const credentialsText = created ? `E-mail: ${created.email}\nSenha provisória: ${created.password}` : '';
+
   async function onCopyCredentials() {
     if (!created) return;
-    const text = `E-mail: ${created.email}\nSenha provisória: ${created.password}`;
-    const ok = await copyToClipboard(text);
-    toast.show({ message: ok ? 'Credenciais copiadas' : 'Não foi possível copiar', tone: ok ? 'success' : 'danger' });
+    const ok = await copyToClipboard(credentialsText);
+    toast.show({
+      message: ok ? 'Credenciais copiadas' : 'Não foi possível copiar: toque no texto acima, selecione e copie',
+      tone: ok ? 'success' : 'danger',
+    });
+  }
+
+  /** Opens the phone's share sheet (WhatsApp etc.); without the Web Share API it copies instead. */
+  async function onShareCredentials() {
+    if (!created) return;
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ text: credentialsText });
+      } catch {
+        // The organizer closed the share sheet: nothing to do.
+      }
+      return;
+    }
+    await onCopyCredentials();
   }
 
   if (!open) {
@@ -258,8 +276,21 @@ function AddOrganizer({ onAdded }: { onAdded(): Promise<void> }) {
         <p className="tabular text-sm">
           <strong>Senha provisória:</strong> {created.password}
         </p>
+        {/* Selectable by hand too: a tap selects everything, ready for the phone's own "Copiar". */}
+        <textarea
+          readOnly
+          rows={2}
+          value={credentialsText}
+          aria-label="Credenciais para enviar"
+          data-testid="organizer-credentials-text"
+          onFocus={(e) => e.currentTarget.select()}
+          className="tabular w-full resize-none rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm text-fg"
+        />
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => void onCopyCredentials()} data-testid="organizer-copy-credentials">
+          <Button size="sm" onClick={() => void onShareCredentials()} data-testid="organizer-share-credentials">
+            Compartilhar (WhatsApp)
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => void onCopyCredentials()} data-testid="organizer-copy-credentials">
             Copiar credenciais
           </Button>
           <Button

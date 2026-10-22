@@ -509,6 +509,16 @@ describe('SettingsPage', () => {
     await user.click(screen.getByTestId('organizer-copy-credentials'));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining(password));
     expect(await screen.findByText('Credenciais copiadas')).toBeInTheDocument();
+
+    // The password sits in a field that can be selected by hand, and "Compartilhar" opens the
+    // phone's share sheet (WhatsApp) where the Web Share API exists.
+    expect(screen.getByTestId('organizer-credentials-text')).toHaveValue(`E-mail: nova@ebc.test
+Senha provisória: ${password}`);
+    const share = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'share', { value: share, configurable: true });
+    await user.click(screen.getByTestId('organizer-share-credentials'));
+    expect(share).toHaveBeenCalledWith({ text: expect.stringContaining(password) });
+    Reflect.deleteProperty(window.navigator, 'share');
   });
 
   it('removes an organizer after confirmation', async () => {
