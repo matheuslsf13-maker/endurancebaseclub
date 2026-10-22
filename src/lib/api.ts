@@ -126,6 +126,8 @@ interface Api {
     listOrganizers(): Promise<OrganizerRow[]>;
     createOrganizer(email: string, password: string, name: string): Promise<OrganizerRow>;
     deleteOrganizer(userId: string): Promise<void>;
+    /** `newPassword` (not for oneself) sets a temporary password that must be changed on the next login. */
+    updateOrganizer(userId: string, name: string, email: string, newPassword: string | null): Promise<OrganizerRow>;
     listEvents(): Promise<EventSummary[]>;
     getEvent(id: string): Promise<EventAggregate>;
     saveEvent(e: Partial<EventRow> & { name: string; date: string }): Promise<EventRow>;
@@ -184,6 +186,8 @@ export const api: Api = {
     listOrganizers: () => call('admin_list_organizers'),
     createOrganizer: (email, password, name) => call('admin_create_organizer', { p_email: email, p_password: password, p_name: name }),
     deleteOrganizer: (userId) => callVoid('admin_delete_organizer', { p_user_id: userId }),
+    updateOrganizer: (userId, name, email, newPassword) =>
+      call('admin_update_organizer', { p_user_id: userId, p_name: name, p_email: email, p_new_password: newPassword }),
     listEvents: () => call('admin_list_events'),
     getEvent: (id) => call('admin_get_event', { p_event_id: id }),
     saveEvent: (e) => call('admin_save_event', { p_event: e }),
